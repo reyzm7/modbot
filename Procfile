@@ -1,1 +1,1 @@
-worker: python bot_moderation.py
+worker: python bot.py
