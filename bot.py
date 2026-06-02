@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 #  CONFIGURATION
 # ════════════════════════════════════════════════
 
-TOKEN              = os.environ.get("TOKEN", "MTUxMDQwNTIzNTU0NDQyNDYyMA.Gmpb55.CJvARHajoGoaq2a10m7UpvB9PaNkRd0OjPKg2o")
+TOKEN              = os.environ.get("TOKEN", "MTUxMDQwNTIzNTU0NDQyNDYyMA.GOV36l.gSYczZeuVfcNuLNfPXW07N7jROgmZn3JQu2o0Q")
 MAX_AVERT          = 3
 LIEN_DEBAN         = "https://discord.gg/CK8CbFtYuv"
 DEFAULT_LOGS        = 1510422154725036062
