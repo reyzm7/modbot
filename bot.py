@@ -8,9 +8,9 @@ from datetime import datetime, timezone, timedelta
 #  CONFIGURATION
 # ════════════════════════════════════════════════
 
-TOKEN              = os.environ.get("TOKEN", "MTUxMDQwNTIzNTU0NDQyNDYyMA.GOV36l.gSYczZeuVfcNuLNfPXW07N7jROgmZn3JQu2o0Q")
-MAX_AVERT          = 3
-LIEN_DEBAN         = "https://discord.gg/CK8CbFtYuv"
+TOKEN               = os.environ.get("TOKEN", "MTUxMDQwNTIzNTU0NDQyNDYyMA.GOV36l.gSYczZeuVfcNuLNfPXW07N7jROgmZn3JQu2o0Q")
+MAX_AVERT           = 3
+LIEN_DEBAN          = "https://discord.gg/CK8CbFtYuv"
 DEFAULT_LOGS        = 1510422154725036062
 DEFAULT_SUGGESTIONS = 1510422091340709898
 DEFAULT_REPORTS     = 1510422117290868926
@@ -56,9 +56,12 @@ def jload(f):
     with open(f, encoding="utf-8") as fp:
         return json.load(fp)
 
+# ✅ FIX 6 — Écriture atomique pour éviter la corruption JSON
 def jsave(f, d):
-    with open(f, "w", encoding="utf-8") as fp:
+    tmp = f + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
         json.dump(d, fp, indent=2, ensure_ascii=False)
+    os.replace(tmp, f)
 
 # ════════════════════════════════════════════════
 #  CONFIG PAR SERVEUR
@@ -130,6 +133,7 @@ def del_role_imm(gid, rid):
         return True
     return False
 
+# ✅ FIX 4 — Regex améliorée : supprime le markdown AVANT la détection
 def detecter(texte, gid):
     msg = re.sub(r'[*_~`|\\]', ' ', texte.lower())
     msg = re.sub(r'\s+', ' ', msg).strip()
@@ -216,7 +220,7 @@ async def send_log(guild, embed):
         ch_id = get_ch(guild.id, "salon_logs", DEFAULT_LOGS)
         ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
         await ch.send(embed=embed)
-    except:
+    except Exception:
         pass
 
 async def make_transcript(channel, tdata):
@@ -239,12 +243,12 @@ async def make_transcript(channel, tdata):
     return io.BytesIO("\n".join(lines).encode("utf-8"))
 
 # ════════════════════════════════════════════════
-#  VIEW — SUGGESTIONS
+#  VIEW — SUGGESTIONS (persistante ✅)
 # ════════════════════════════════════════════════
 
 class VueSuggestion(discord.ui.View):
     def __init__(self, uid="", pseudo="", titre="", contenu=""):
-        super().__init__(timeout=None)
+        super().__init__(timeout=None)  # ✅ persistante
         self.uid = uid; self.pseudo = pseudo
         self.titre = titre; self.contenu = contenu
 
@@ -273,7 +277,7 @@ class VueSuggestion(discord.ui.View):
             dm.add_field(name="📊 Décision", value=s, inline=True)
             dm.add_field(name="📅 Date", value=fmt(), inline=True)
             await u.send(embed=dm)
-        except:
+        except Exception:
             pass
         await interaction.response.send_message(
             f"{'✅' if ok else '❌'} Réponse envoyée à **{self.pseudo}** !", ephemeral=True)
@@ -285,12 +289,12 @@ class VueSuggestion(discord.ui.View):
     async def no(self, i, b): await self._rep(i, False)
 
 # ════════════════════════════════════════════════
-#  VIEW — REPORTS
+#  VIEW — REPORTS (persistante ✅)
 # ════════════════════════════════════════════════
 
 class VueReport(discord.ui.View):
     def __init__(self, uid="", pseudo="", titre="", contenu=""):
-        super().__init__(timeout=None)
+        super().__init__(timeout=None)  # ✅ persistante
         self.uid = uid; self.pseudo = pseudo
         self.titre = titre; self.contenu = contenu
 
@@ -316,7 +320,7 @@ class VueReport(discord.ui.View):
             dm.add_field(name="📋 Ton report", value=f"**{self.titre}**\n{self.contenu}", inline=False)
             dm.add_field(name="📊 Statut", value=s, inline=True)
             await u.send(embed=dm)
-        except:
+        except Exception:
             pass
         await interaction.response.send_message(f"{'✅' if ok else '❌'} Mis à jour !", ephemeral=True)
 
@@ -327,23 +331,24 @@ class VueReport(discord.ui.View):
     async def no(self, i, b): await self._rep(i, False)
 
 # ════════════════════════════════════════════════
-#  VIEW — TICKETS
+#  VIEW — TICKETS (persistante ✅)
 # ════════════════════════════════════════════════
 
 class VueNotation(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    def __init__(self): super().__init__(timeout=None)  # ✅ persistante
 
     async def _noter(self, interaction, note):
         self.clear_items()
         et = "⭐" * note
-        e = E("⭐ Notation enregistrée", f"**{interaction.user}** a noté **{et} {note}/5**\nMerci pour ton retour !", 0xFFD700)
+        e = E("⭐ Notation enregistrée",
+              f"**{interaction.user}** a noté **{et} {note}/5**\nMerci pour ton retour !", 0xFFD700)
         await interaction.message.edit(embed=e, view=self)
         try:
             dm = E("⭐ Merci pour ta notation !", 0xFFD700)
             dm.set_thumbnail(url=bot.user.display_avatar.url)
             dm.description = f"Tu as noté notre support **{et} {note}/5** !\nTon avis nous aide à nous améliorer."
             await interaction.user.send(embed=dm)
-        except:
+        except Exception:
             pass
         await interaction.response.send_message(f"Merci {et} !", ephemeral=True)
 
@@ -360,12 +365,19 @@ class VueNotation(discord.ui.View):
 
 class VueTicket(discord.ui.View):
     def __init__(self, uid=""):
-        super().__init__(timeout=None)
+        super().__init__(timeout=None)  # ✅ persistante
         self.uid = uid
+
+    def _peut_agir(self, interaction):
+        # ✅ FIX 4 — uid="" après restart : seul le staff peut agir
+        if self.uid:
+            return (interaction.user.guild_permissions.manage_channels
+                    or str(interaction.user.id) == self.uid)
+        return interaction.user.guild_permissions.manage_channels
 
     @discord.ui.button(label="📄 Transcript", style=discord.ButtonStyle.secondary, custom_id="tkt_trs", row=0)
     async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.manage_channels and str(interaction.user.id) != self.uid:
+        if not self._peut_agir(interaction):
             return await interaction.response.send_message("❌ Permission refusée.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         tdata = load_tickets().get("tickets", {}).get(str(interaction.channel.id), {})
@@ -380,7 +392,7 @@ class VueTicket(discord.ui.View):
 
     @discord.ui.button(label="🔒 Fermer", style=discord.ButtonStyle.danger, custom_id="tkt_close", row=0)
     async def fermer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.manage_channels and str(interaction.user.id) != self.uid:
+        if not self._peut_agir(interaction):
             return await interaction.response.send_message("❌ Permission refusée.", ephemeral=True)
         tdata = load_tickets().get("tickets", {}).get(str(interaction.channel.id), {})
         f = await make_transcript(interaction.channel, tdata)
@@ -401,16 +413,17 @@ class VueTicket(discord.ui.View):
                 dm.description = (f"Ton ticket **{tdata.get('nom','?')}** a été fermé.\n"
                                    f"Merci d'avoir contacté le support **ModBot** !")
                 await u.send(embed=dm)
-        except:
+        except Exception:
             pass
         await asyncio.sleep(20)
         try:
             await interaction.channel.delete()
-        except:
+        except Exception:
             pass
 
+# ✅ FIX 1 — VueChoixCategorie : timeout=None (persistante) pour survivre au restart
 class VueChoixCategorie(discord.ui.View):
-    def __init__(self): super().__init__(timeout=120)
+    def __init__(self): super().__init__(timeout=None)  # ✅ FIX
 
     async def _open(self, i, cat):
         await i.response.send_modal(ModalMotifTicket(cat))
@@ -424,28 +437,21 @@ class VueChoixCategorie(discord.ui.View):
     @discord.ui.button(label="🏛️ Fondation", style=discord.ButtonStyle.secondary, custom_id="tkt_fnd", row=1)
     async def fondation(self, i, b): await self._open(i, "Fondation")
 
-class VueServeurReport(discord.ui.View):
-    def __init__(self, type_r):
-        super().__init__(timeout=60)
-        self.type_r = type_r
+# ✅ FIX 5 — Report : une seule vue avec 4 boutons directs (supprime les 2 étapes)
+class VueSelectionReport(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)  # ✅ persistante
 
-    @discord.ui.button(label="🎮 VPG", style=discord.ButtonStyle.primary, custom_id="rep_vpg")
-    async def vpg(self, i, b): await i.response.send_modal(ModalReport(self.type_r, "VPG"))
-    @discord.ui.button(label="🤖 Hote Bot", style=discord.ButtonStyle.secondary, custom_id="rep_hote")
-    async def hote(self, i, b): await i.response.send_modal(ModalReport(self.type_r, "Hote Bot — Anti Insulte"))
+    @discord.ui.button(label="🐛 Bug — VPG", style=discord.ButtonStyle.danger, custom_id="rp_bug_vpg", row=0)
+    async def bug_vpg(self, i, b): await i.response.send_modal(ModalReport("bug", "VPG"))
 
-class VueTypeReport(discord.ui.View):
-    def __init__(self): super().__init__(timeout=60)
+    @discord.ui.button(label="🐛 Bug — Hote Bot", style=discord.ButtonStyle.danger, custom_id="rp_bug_hote", row=0)
+    async def bug_hote(self, i, b): await i.response.send_modal(ModalReport("bug", "Hote Bot — Anti Insulte"))
 
-    @discord.ui.button(label="🐛 Bug", style=discord.ButtonStyle.danger, custom_id="typ_bug")
-    async def bug(self, interaction: discord.Interaction, b):
-        e = E("🌐 Choisis ton serveur", "Sur quel serveur se situe le bug ?", 0xFF4500)
-        await interaction.response.send_message(embed=e, view=VueServeurReport("bug"), ephemeral=True)
+    @discord.ui.button(label="👤 Joueur — VPG", style=discord.ButtonStyle.primary, custom_id="rp_jou_vpg", row=1)
+    async def joueur_vpg(self, i, b): await i.response.send_modal(ModalReport("joueur", "VPG"))
 
-    @discord.ui.button(label="👤 Joueur", style=discord.ButtonStyle.primary, custom_id="typ_joueur")
-    async def joueur(self, interaction: discord.Interaction, b):
-        e = E("🌐 Choisis ton serveur", "Sur quel serveur se trouve le joueur ?", 0xED4245)
-        await interaction.response.send_message(embed=e, view=VueServeurReport("joueur"), ephemeral=True)
+    @discord.ui.button(label="👤 Joueur — Hote Bot", style=discord.ButtonStyle.primary, custom_id="rp_jou_hote", row=1)
+    async def joueur_hote(self, i, b): await i.response.send_modal(ModalReport("joueur", "Hote Bot — Anti Insulte"))
 
 # ════════════════════════════════════════════════
 #  PANEL MODALS
@@ -469,18 +475,23 @@ class ModalRetirerMot(discord.ui.Modal, title="➖ Retirer un mot filtré"):
 class ModalImmuniserRole(discord.ui.Modal, title="🛡️ Immuniser un rôle"):
     role_id = discord.ui.TextInput(label="ID du rôle", placeholder="Ex : 123456789012345678", max_length=20)
     async def on_submit(self, i: discord.Interaction):
-        add_role_imm(i.guild.id, self.role_id.value)
-        role = i.guild.get_role(int(self.role_id.value))
-        nom = role.name if role else self.role_id.value
-        await i.response.send_message(
-            embed=E("✅ Rôle immunisé !", f"**{nom}** ne sera plus sanctionné pour les insultes.", 0x43B581), ephemeral=True)
+        try:
+            add_role_imm(i.guild.id, self.role_id.value)
+            role = i.guild.get_role(int(self.role_id.value))
+            nom = role.name if role else self.role_id.value
+            await i.response.send_message(
+                embed=E("✅ Rôle immunisé !", f"**{nom}** ne sera plus sanctionné pour les insultes.", 0x43B581),
+                ephemeral=True)
+        except Exception as ex:
+            await i.response.send_message(embed=E("❌ Erreur", str(ex), 0xED4245), ephemeral=True)
 
 class ModalRetirerImmunite(discord.ui.Modal, title="❌ Retirer immunité"):
     role_id = discord.ui.TextInput(label="ID du rôle", placeholder="Ex : 123456789012345678", max_length=20)
     async def on_submit(self, i: discord.Interaction):
         ok = del_role_imm(i.guild.id, self.role_id.value)
         await i.response.send_message(
-            embed=E("✅ Immunité retirée !" if ok else "❌ Introuvable", couleur=0x43B581 if ok else 0xED4245), ephemeral=True)
+            embed=E("✅ Immunité retirée !" if ok else "❌ Introuvable",
+                    couleur=0x43B581 if ok else 0xED4245), ephemeral=True)
 
 class ModalLockSalon(discord.ui.Modal, title="🔒 Lockdown d'un salon"):
     salon_id = discord.ui.TextInput(label="ID du salon", placeholder="Ex : 123456789012345678", max_length=20)
@@ -537,12 +548,12 @@ class ModalCreerSalon(discord.ui.Modal, title="➕ Créer un salon"):
         try:
             ch = await i.guild.create_text_channel(self.nom.value)
             update_cfg(i.guild.id, self.key, ch.id)
-            await i.followup.send(embed=E("✅ Salon créé !", f"{ch.mention} défini comme **{self.lbl}**.", 0x43B581), ephemeral=True)
+            await i.followup.send(embed=E("✅ Salon créé !", f"{ch.mention} → **{self.lbl}**.", 0x43B581), ephemeral=True)
         except Exception as ex:
             await i.followup.send(f"❌ Erreur : {ex}", ephemeral=True)
 
 # ════════════════════════════════════════════════
-#  PANEL VIEWS
+#  PANEL VIEWS (éphémères — pas dans add_view)
 # ════════════════════════════════════════════════
 
 class VuePanelInsultes(discord.ui.View):
@@ -557,7 +568,7 @@ class VuePanelInsultes(discord.ui.View):
     @discord.ui.button(label="📋 Voir liste", style=discord.ButtonStyle.primary, row=0)
     async def lst(self, i: discord.Interaction, b):
         custom = get_custom(i.guild.id)
-        e = E("🚫 Mots filtrés", couleur=0xED4245)
+        e = E("🚫 Mots filtrés sur ce serveur", couleur=0xED4245)
         base_str = " • ".join([f"`{x}`" for x in INSULTES_BASE])
         if len(base_str) > 1024:
             base_str = base_str[:1020] + "..."
@@ -597,7 +608,7 @@ class VuePanelSecurite(discord.ui.View):
             try:
                 await ch.set_permissions(i.guild.default_role, send_messages=False)
                 count += 1
-            except:
+            except Exception:
                 pass
         update_cfg(i.guild.id, "lockdown", True)
         await i.followup.send(embed=E("🔒 LOCKDOWN ACTIVÉ", f"**{count} salons** verrouillés.", 0xED4245), ephemeral=True)
@@ -610,7 +621,7 @@ class VuePanelSecurite(discord.ui.View):
             try:
                 await ch.set_permissions(i.guild.default_role, send_messages=None)
                 count += 1
-            except:
+            except Exception:
                 pass
         update_cfg(i.guild.id, "lockdown", False)
         await i.followup.send(embed=E("🔓 LOCKDOWN DÉSACTIVÉ", f"**{count} salons** déverrouillés.", 0x43B581), ephemeral=True)
@@ -625,8 +636,7 @@ class VuePanelSecurite(discord.ui.View):
     async def raid_on(self, i: discord.Interaction, b):
         update_cfg(i.guild.id, "antiraid", True)
         e = E("🛡️ Anti-Raid ACTIVÉ",
-              "• Comptes < 7 jours → expulsés automatiquement\n• +5 membres en 10s → alerte dans les logs",
-              0x43B581)
+              "• Comptes < 7 jours → expulsés automatiquement\n• +5 membres en 10s → alerte logs", 0x43B581)
         await i.response.send_message(embed=e, ephemeral=True)
 
     @discord.ui.button(label="🛡️ Anti-Raid OFF", style=discord.ButtonStyle.secondary, row=1)
@@ -651,10 +661,10 @@ class VuePanelSalons(discord.ui.View):
     @discord.ui.button(label="📊 Voir salons", style=discord.ButtonStyle.primary, row=0)
     async def voir(self, i: discord.Interaction, b):
         cfg = get_cfg(i.guild.id)
-        e = E("📌 Salons configurés", couleur=0x5865F2)
-        salons = [("salon_logs", "Logs"), ("salon_suggestions", "Suggestions"),
-                  ("salon_reports", "Reports"), ("salon_patchnotes", "Patch Notes"),
-                  ("salon_tickets", "Tickets")]
+        e = E("📌 Salons configurés sur ce serveur", couleur=0x5865F2)
+        salons = [("salon_logs","Logs"), ("salon_suggestions","Suggestions"),
+                  ("salon_reports","Reports"), ("salon_patchnotes","Patch Notes"),
+                  ("salon_tickets","Tickets")]
         for key, label in salons:
             val = cfg.get(key)
             ch = i.guild.get_channel(val) if val else None
@@ -748,8 +758,7 @@ class VuePanel(discord.ui.View):
     @discord.ui.button(label="📊 Stats & Bans", style=discord.ButtonStyle.secondary, row=0)
     async def stats(self, i: discord.Interaction, b):
         if not self._admin(i): return await i.response.send_message("❌ Admin uniquement.", ephemeral=True)
-        e = E("📊 Statistiques & Bannissements", couleur=0x5865F2)
-        await i.response.send_message(embed=e, view=VuePanelStats(), ephemeral=True)
+        await i.response.send_message(embed=E("📊 Stats & Bans", couleur=0x5865F2), view=VuePanelStats(), ephemeral=True)
 
 # ════════════════════════════════════════════════
 #  MODALS PRINCIPAUX
@@ -762,11 +771,13 @@ class ModalSuggestion(discord.ui.Modal, title="💡 Nouvelle suggestion"):
 
     async def on_submit(self, i: discord.Interaction):
         await i.response.defer(ephemeral=True)
+        # ✅ Isolation par serveur : on utilise le salon configuré pour CE serveur uniquement
         ch_id = get_ch(i.guild.id, "salon_suggestions", DEFAULT_SUGGESTIONS)
         try:
             salon = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
-        except:
-            return await i.followup.send("❌ Salon introuvable. Configure-le dans /panel → Salons.", ephemeral=True)
+        except Exception:
+            return await i.followup.send(
+                "❌ Salon suggestions introuvable. Configure-le dans `/panel` → Salons.", ephemeral=True)
         e = discord.Embed(title=f"💡 {self.titre.value}", description=self.contenu.value,
                           color=0x5865F2, timestamp=now())
         e.set_author(name=str(i.user), icon_url=i.user.display_avatar.url)
@@ -774,6 +785,7 @@ class ModalSuggestion(discord.ui.Modal, title="💡 Nouvelle suggestion"):
         e.add_field(name="👤 Pseudo", value=str(i.user), inline=True)
         e.add_field(name="🆔 ID", value=f"`{i.user.id}`", inline=True)
         e.add_field(name="📅 Date", value=fmt(), inline=True)
+        e.add_field(name="🌐 Serveur", value=i.guild.name, inline=True)
         e.add_field(name="📊 Statut", value="⏳ En attente de décision", inline=False)
         e.set_footer(text="ModBot • Suggestions")
         await salon.send(embed=e, view=VueSuggestion(str(i.user.id), str(i.user), self.titre.value, self.contenu.value))
@@ -783,7 +795,7 @@ class ModalSuggestion(discord.ui.Modal, title="💡 Nouvelle suggestion"):
             dm.description = f"Ta suggestion **{self.titre.value}** a été transmise.\nTu recevras une réponse en MP 📬"
             dm.add_field(name="📋 Contenu", value=self.contenu.value, inline=False)
             await i.user.send(embed=dm)
-        except:
+        except Exception:
             pass
         await i.followup.send(embed=E("✅ Envoyée !", "Tu recevras une réponse en MP 📬", 0x43B581), ephemeral=True)
 
@@ -799,11 +811,13 @@ class ModalReport(discord.ui.Modal, title="📋 Nouveau report"):
 
     async def on_submit(self, i: discord.Interaction):
         await i.response.defer(ephemeral=True)
+        # ✅ Isolation par serveur
         ch_id = get_ch(i.guild.id, "salon_reports", DEFAULT_REPORTS)
         try:
             salon = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
-        except:
-            return await i.followup.send("❌ Salon introuvable.", ephemeral=True)
+        except Exception:
+            return await i.followup.send(
+                "❌ Salon reports introuvable. Configure-le dans `/panel` → Salons.", ephemeral=True)
         est_bug = self.type_r == "bug"
         c = 0xFF4500 if est_bug else 0xED4245
         emoji, label = ("🐛", "Bug") if est_bug else ("👤", "Joueur")
@@ -825,7 +839,7 @@ class ModalReport(discord.ui.Modal, title="📋 Nouveau report"):
             dm.add_field(name="📋 Type", value=label, inline=True)
             dm.add_field(name="🌐 Serveur", value=self.serveur, inline=True)
             await i.user.send(embed=dm)
-        except:
+        except Exception:
             pass
         await i.followup.send(embed=E("✅ Report envoyé !", couleur=0x43B581), ephemeral=True)
 
@@ -839,10 +853,9 @@ class ModalPatchnotes(discord.ui.Modal, title="📋 Publier des Patch Notes"):
         ch_id = get_ch(i.guild.id, "salon_patchnotes", DEFAULT_PATCHNOTES)
         try:
             salon = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
-        except:
-            return await i.followup.send("❌ Salon introuvable.", ephemeral=True)
-        e = discord.Embed(title=f"📋 Patch Notes — {now().strftime('%d/%m/%Y')}",
-                          color=0x5865F2, timestamp=now())
+        except Exception:
+            return await i.followup.send("❌ Salon patch notes introuvable.", ephemeral=True)
+        e = discord.Embed(title=f"📋 Patch Notes — {now().strftime('%d/%m/%Y')}", color=0x5865F2, timestamp=now())
         e.description = f"```\n{self.titre.value}\n```\n{self.contenu.value}"
         e.set_thumbnail(url=bot.user.display_avatar.url)
         e.set_footer(text="ModBot • Patch Notes")
@@ -932,7 +945,7 @@ class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
                           value=f"Encore `{reste}` avant le ban." if reste > 0 else "⚠️ **Prochain = BAN**",
                           inline=True)
             await self.membre.send(embed=dm)
-        except:
+        except Exception:
             pass
         le = E(f"⚠️ LOG — Avert. manuel {nb}/{MAX_AVERT}", couleur=c)
         le.add_field(name="👤 Membre", value=str(self.membre), inline=True)
@@ -947,14 +960,14 @@ class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
                 dm_ban.description = (f"Tu as atteint **{MAX_AVERT} avertissements** sur **{i.guild.name}**.\n\n"
                                        f"🔓 **Conteste :** {LIEN_DEBAN}\nCrée un ticket **Déban**.")
                 await self.membre.send(embed=dm_ban)
-            except:
+            except Exception:
                 pass
             try:
                 await i.guild.ban(self.membre, reason="[ModBot] 3 avertissements", delete_message_days=0)
                 add_ban(str(i.guild.id), str(self.membre.id), str(self.membre))
                 await i.channel.send(embed=E("🔨 Ban automatique",
                     f"{self.membre.mention} banni après {MAX_AVERT} avertissements.", 0xED4245))
-            except:
+            except Exception:
                 pass
 
 class ModalAnnonce(discord.ui.Modal, title="📢 Nouvelle annonce"):
@@ -981,25 +994,10 @@ class ModalAnnonce(discord.ui.Modal, title="📢 Nouvelle annonce"):
         await i.followup.send(embed=E("✅ Annonce publiée !", couleur=0x43B581), ephemeral=True)
 
 # ════════════════════════════════════════════════
-#  EVENTS
+#  ANTI-RAID
 # ════════════════════════════════════════════════
 
 join_log = {}
-en_cours = set()
-
-@bot.event
-async def on_ready():
-    for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
-              VueChoixCategorie(), VueTypeReport()]:
-        bot.add_view(v)
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ ModBot connecté : {bot.user}")
-        print(f"✅ {len(synced)} commandes synchronisées")
-    except Exception as e:
-        print(f"❌ Erreur sync : {e}")
-    await bot.change_presence(
-        activity=discord.Activity(type=discord.ActivityType.watching, name="votre serveur 👮"))
 
 @bot.event
 async def on_member_join(member):
@@ -1012,14 +1010,13 @@ async def on_member_join(member):
             dm = E("🛡️ Accès refusé — Anti-Raid", couleur=0xED4245)
             dm.set_thumbnail(url=bot.user.display_avatar.url)
             dm.description = (f"Tu as été expulsé de **{member.guild.name}** "
-                               f"(compte trop récent : {age} jour(s)).\n"
-                               f"C'est une mesure de protection anti-raid.")
+                               f"(compte trop récent : {age} jour(s)).")
             await member.send(embed=dm)
-        except:
+        except Exception:
             pass
         try:
             await member.kick(reason="[ModBot Anti-Raid] Compte trop récent")
-        except:
+        except Exception:
             pass
         le = E("🛡️ LOG — Anti-Raid Kick", couleur=0xED4245)
         le.add_field(name="👤 Membre", value=str(member), inline=True)
@@ -1038,40 +1035,79 @@ async def on_member_join(member):
                f"⚠️ Utilisez `/panel` → Sécurité → Lockdown si nécessaire.", 0xED4245)
         await send_log(member.guild, le)
 
+# ════════════════════════════════════════════════
+#  ON READY — ✅ FIX 1 & 2
+# ════════════════════════════════════════════════
+
+@bot.event
+async def on_ready():
+    # ✅ FIX 1 — Uniquement les vues VRAIMENT persistantes (timeout=None + custom_id sur tous les items)
+    # VueChoixCategorie et VueSelectionReport ont timeout=None → peuvent être enregistrées
+    persistent_views = [
+        VueSuggestion(),       # timeout=None ✅ messages suggestion
+        VueReport(),           # timeout=None ✅ messages report
+        VueTicket(),           # timeout=None ✅ messages ticket
+        VueNotation(),         # timeout=None ✅ messages notation
+        VueChoixCategorie(),   # timeout=None ✅ sélection catégorie ticket
+        VueSelectionReport(),  # timeout=None ✅ sélection type report
+    ]
+    for v in persistent_views:
+        try:
+            bot.add_view(v)
+        except Exception as err:
+            print(f"⚠️ Impossible d'enregistrer la vue {type(v).__name__}: {err}")
+
+    # ✅ FIX 2 — Sync après add_view (dans le même bloc pour garantir l'ordre)
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ ModBot connecté : {bot.user}")
+        print(f"✅ {len(synced)} commandes synchronisées")
+    except Exception as e:
+        print(f"❌ Erreur sync : {e}")
+
+    await bot.change_presence(
+        activity=discord.Activity(type=discord.ActivityType.watching, name="votre serveur 👮"))
+
+# ════════════════════════════════════════════════
+#  ON MESSAGE — ✅ FIX 3 (double traitement)
+# ════════════════════════════════════════════════
+
+en_cours: set[int] = set()
+
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild:
         await bot.process_commands(message)
         return
 
+    # ✅ FIX 3 — Protection double traitement : add IMMÉDIATEMENT, avant toute logique
     if message.id in en_cours:
         await bot.process_commands(message)
         return
 
-    cfg = get_cfg(message.guild.id)
+    en_cours.add(message.id)
+    try:
+        cfg = get_cfg(message.guild.id)
 
-    # Anti-invite
-    if cfg.get("anti_invite") and INVITE_RE.search(message.content):
-        if not message.author.guild_permissions.manage_messages:
-            try:
-                await message.delete()
-            except:
-                pass
-            e = E("🚫 Invitation supprimée",
-                  f"{message.author.mention}, les liens d'invitation ne sont pas autorisés.", 0xED4245)
-            await message.channel.send(embed=e, delete_after=8)
-            await bot.process_commands(message)
-            return
+        # Anti-invite (✅ par serveur via cfg)
+        if cfg.get("anti_invite") and INVITE_RE.search(message.content):
+            if not message.author.guild_permissions.manage_messages:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                e = E("🚫 Invitation supprimée",
+                      f"{message.author.mention}, les liens d'invitation ne sont pas autorisés.", 0xED4245)
+                await message.channel.send(embed=e, delete_after=8)
+                return  # ← on ne traite pas les insultes sur ce message
 
-    # Détection insulte
-    insulte = detecter(message.content, message.guild.id)
-    if insulte and not est_immunise(message.author, message.guild.id):
-        en_cours.add(message.id)
-        try:
+        # Détection insulte (✅ par serveur via get_custom(gid))
+        insulte = detecter(message.content, message.guild.id)
+        if insulte and not est_immunise(message.author, message.guild.id):
             uid, gid = str(message.author.id), str(message.guild.id)
             try:
                 await message.delete()
-            except:
+            except Exception:
                 pass
             nb = add_avert(uid, gid, insulte)
 
@@ -1098,14 +1134,14 @@ async def on_message(message):
                                        f"🔓 **Conteste ton ban :** {LIEN_DEBAN}\n"
                                        f"Crée un ticket **Déban**.")
                     await message.author.send(embed=dm)
-                except:
+                except Exception:
                     pass
                 try:
                     await message.guild.ban(message.author, reason="[ModBot] 3 avertissements",
                                              delete_message_days=0)
                     add_ban(gid, uid, str(message.author))
                     reset_avert(uid, gid)
-                except:
+                except Exception:
                     pass
 
             else:
@@ -1121,8 +1157,7 @@ async def on_message(message):
                 e.add_field(name="📊 Avertissements",
                              value=f"{barre(nb, MAX_AVERT)} `{nb}/{MAX_AVERT}`", inline=False)
                 e.add_field(name="📌 Attention",
-                             value=f"Encore **{restants}** avertissement(s) avant le bannissement.",
-                             inline=False)
+                             value=f"Encore **{restants}** avertissement(s) avant le bannissement.", inline=False)
                 e.set_footer(text="ModBot • Respect des règles")
                 await message.channel.send(embed=e, delete_after=12)
                 le = E(f"⚠️ LOG — Avertissement {nb}/{MAX_AVERT}", couleur=c)
@@ -1141,52 +1176,74 @@ async def on_message(message):
                     dm.add_field(name="📌 Risque",
                                   value=f"Encore `{restants}` avant le bannissement.", inline=False)
                     await message.author.send(embed=dm)
-                except:
+                except Exception:
                     pass
-        finally:
-            en_cours.discard(message.id)
+    finally:
+        en_cours.discard(message.id)
 
     await bot.process_commands(message)
 
 # ════════════════════════════════════════════════
-#  COMMANDES PRÉFIXE
+#  COMMANDES PRÉFIXE — addroles / deleteroles
 # ════════════════════════════════════════════════
 
 @bot.command(name="addroles")
 @commands.has_permissions(manage_roles=True)
 async def addroles(ctx):
     membres = [m for m in ctx.message.mentions if isinstance(m, discord.Member)]
-    roles = ctx.message.role_mentions
+    roles   = ctx.message.role_mentions
     if not membres or not roles:
-        return await ctx.send(embed=E("❌ Usage", "Usage : `!addroles @membre1 @membre2 @role`", 0xED4245))
+        return await ctx.send(embed=E("❌ Usage", "Usage : `!addroles @m1 @m2 @role`", 0xED4245))
     count = 0
+    erreurs = 0
     for m in membres:
         for r in roles:
+            if r >= ctx.guild.me.top_role:
+                erreurs += 1
+                continue
             try:
                 await m.add_roles(r)
                 count += 1
-            except:
-                pass
-    await ctx.send(embed=E("✅ Rôles ajoutés",
-        f"**{count}** rôle(s) ajouté(s) à **{len(membres)}** membre(s).", 0x43B581))
+            except Exception:
+                erreurs += 1
+    e = E("✅ Rôles ajoutés", f"**{count}** rôle(s) ajouté(s) à **{len(membres)}** membre(s).", 0x43B581)
+    if erreurs:
+        e.add_field(name="⚠️ Échecs", value=f"`{erreurs}` opération(s) échouée(s) (hiérarchie ou permissions)", inline=False)
+    await ctx.send(embed=e)
+    le = E("➕ LOG — addroles", couleur=0x43B581)
+    le.add_field(name="👮 Par", value=str(ctx.author), inline=True)
+    le.add_field(name="👥 Membres", value=", ".join([m.mention for m in membres]), inline=False)
+    le.add_field(name="🏷️ Rôles", value=", ".join([r.mention for r in roles]), inline=False)
+    await send_log(ctx.guild, le)
 
 @bot.command(name="deleteroles")
 @commands.has_permissions(manage_roles=True)
 async def deleteroles(ctx):
     membres = [m for m in ctx.message.mentions if isinstance(m, discord.Member)]
-    roles = ctx.message.role_mentions
+    roles   = ctx.message.role_mentions
     if not membres or not roles:
-        return await ctx.send(embed=E("❌ Usage", "Usage : `!deleteroles @membre1 @membre2 @role`", 0xED4245))
+        return await ctx.send(embed=E("❌ Usage", "Usage : `!deleteroles @m1 @m2 @role`", 0xED4245))
     count = 0
+    erreurs = 0
     for m in membres:
         for r in roles:
+            if r >= ctx.guild.me.top_role:
+                erreurs += 1
+                continue
             try:
                 await m.remove_roles(r)
                 count += 1
-            except:
-                pass
-    await ctx.send(embed=E("✅ Rôles retirés",
-        f"**{count}** rôle(s) retiré(s) à **{len(membres)}** membre(s).", 0x43B581))
+            except Exception:
+                erreurs += 1
+    e = E("✅ Rôles retirés", f"**{count}** rôle(s) retiré(s) à **{len(membres)}** membre(s).", 0x43B581)
+    if erreurs:
+        e.add_field(name="⚠️ Échecs", value=f"`{erreurs}` opération(s) échouée(s)", inline=False)
+    await ctx.send(embed=e)
+    le = E("➖ LOG — deleteroles", couleur=0x43B581)
+    le.add_field(name="👮 Par", value=str(ctx.author), inline=True)
+    le.add_field(name="👥 Membres", value=", ".join([m.mention for m in membres]), inline=False)
+    le.add_field(name="🏷️ Rôles", value=", ".join([r.mention for r in roles]), inline=False)
+    await send_log(ctx.guild, le)
 
 # ════════════════════════════════════════════════
 #  SLASH COMMANDS
@@ -1213,8 +1270,11 @@ async def cmd_suggest(i: discord.Interaction):
 
 @bot.tree.command(name="report", description="📋 Signaler un bug ou un joueur")
 async def cmd_report(i: discord.Interaction):
-    e = E("📋 Que souhaites-tu reporter ?", "Sélectionne le type de report.", 0xED4245)
-    await i.response.send_message(embed=e, view=VueTypeReport(), ephemeral=True)
+    # ✅ FIX 5 — Une seule vue avec 4 boutons directs
+    e = E("📋 Que souhaites-tu reporter ?",
+          "Sélectionne directement le type **et** le serveur concerné.", 0xED4245)
+    e.set_thumbnail(url=bot.user.display_avatar.url)
+    await i.response.send_message(embed=e, view=VueSelectionReport(), ephemeral=True)
 
 @bot.tree.command(name="patchnotes", description="📋 Publier des patch notes")
 @app_commands.checks.has_permissions(administrator=True)
@@ -1240,7 +1300,7 @@ async def cmd_panel(i: discord.Interaction):
     e = E("⚙️ Panneau d'administration — ModBot", couleur=0x5865F2)
     e.set_thumbnail(url=bot.user.display_avatar.url)
     e.description = (f"Panneau de contrôle de **ModBot** sur **{i.guild.name}**.\n"
-                      f"Toutes les modifications sont sauvegardées et propres à ce serveur.")
+                      f"Toutes les modifications sont **sauvegardées par serveur**.")
     e.add_field(name="🚫 Mots filtrés", value=f"`{len(INSULTES_BASE)+len(custom)}`", inline=True)
     e.add_field(name="🔒 Lockdown", value="`Actif`" if cfg.get("lockdown") else "`Inactif`", inline=True)
     e.add_field(name="🛡️ Anti-Raid", value="`Actif`" if cfg.get("antiraid") else "`Inactif`", inline=True)
@@ -1267,7 +1327,7 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member, raison: str = 
         dm.description = f"Tu as été banni de **{i.guild.name}**.\n\n🔓 **Conteste :** {LIEN_DEBAN}"
         dm.add_field(name="📋 Raison", value=raison, inline=False)
         await membre.send(embed=dm)
-    except:
+    except Exception:
         pass
     await i.guild.ban(membre, reason=f"[Manuel] {raison}", delete_message_days=0)
     add_ban(str(i.guild.id), str(membre.id), str(membre), raison)
@@ -1313,10 +1373,12 @@ async def cmd_deban(i: discord.Interaction, user_id: str, raison: str = "Aucune 
                                f"Tu peux de nouveau rejoindre le serveur.")
             dm.add_field(name="📋 Raison", value=raison, inline=False)
             await u.send(embed=dm)
-        except:
+        except Exception:
             pass
     except discord.NotFound:
         await i.followup.send("❌ Utilisateur introuvable ou pas banni sur ce serveur.", ephemeral=True)
+    except ValueError:
+        await i.followup.send("❌ ID invalide. Entrez un ID Discord valide.", ephemeral=True)
     except Exception as ex:
         await i.followup.send(f"❌ Erreur : {ex}", ephemeral=True)
 
@@ -1344,8 +1406,7 @@ async def cmd_avert(i: discord.Interaction, membre: discord.Member):
     e.add_field(name="🏷️ Statut", value=statut, inline=False)
     if hist:
         e.add_field(name="📜 Historique",
-                     value="\n".join([f"• `{h['date']}` — {h['raison']}" for h in hist[-5:]]),
-                     inline=False)
+                     value="\n".join([f"• `{h['date']}` — {h['raison']}" for h in hist[-5:]]), inline=False)
     e.set_footer(text="ModBot • Dossier de modération")
     await i.response.send_message(embed=e, ephemeral=True)
 
