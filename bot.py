@@ -213,6 +213,37 @@ def build_salons_embed(guild, selected_label="Tickets"):
         e.add_field(name=label, value=ch.mention if ch else "Non defini", inline=True)
     return e
 
+DEFAULT_TICKET_QUESTIONS = [
+    {"label": "🔓 Déban", "desc": "Contester un bannissement"},
+    {"label": "❓ Question", "desc": "Poser une question"},
+    {"label": "🤖 Mise en place du bot", "desc": "Installer ModBot"},
+    {"label": "🏛️ Fondation", "desc": "Soutenir la fondation"},
+]
+
+def get_ticket_questions(gid):
+    cfg = get_cfg(gid) if gid else {}
+    saved = cfg.get("ticket_questions") or []
+    questions = []
+    for idx, default in enumerate(DEFAULT_TICKET_QUESTIONS):
+        item = saved[idx] if idx < len(saved) and isinstance(saved[idx], dict) else {}
+        questions.append({
+            "label": (item.get("label") or default["label"])[:80],
+            "desc": (item.get("desc") or default["desc"])[:1000],
+        })
+    return questions
+
+def build_ticket_panel_embed(guild):
+    gid = str(guild.id)
+    cfg = get_cfg(gid)
+    e = EG(
+        cfg.get("ticket_panel_title", "🎫 Ouvrir un ticket de support"),
+        cfg.get("ticket_panel_desc", "Sélectionne la catégorie de ta demande."),
+        gid=gid,
+    )
+    for q in get_ticket_questions(gid):
+        e.add_field(name=q["label"], value=q["desc"] or "Ouvrir un ticket", inline=True)
+    return e
+
 def build_personnalisation_embed(guild):
     cfg = get_cfg(guild.id)
     e = EG("Personnalisation des embeds", "Choisis une couleur avec la palette ou utilise les boutons Upload pour les visuels.", gid=str(guild.id))
@@ -877,22 +908,30 @@ class VueTicket(discord.ui.View):
             _tickets_closing.discard(cid)
 
 class VueChoixCategorie(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    def __init__(self, gid=None):
+        super().__init__(timeout=None)
+        self.gid = str(gid) if gid else None
+        questions = get_ticket_questions(self.gid)
+        buttons = [self.deban, self.question, self.setup, self.fondation]
+        for button, question in zip(buttons, questions):
+            button.label = question["label"][:80]
 
-    async def _open(self, i, cat):
+    async def _open(self, i, index):
+        questions = get_ticket_questions(i.guild.id)
+        cat = questions[index]["label"]
         try:
             await i.response.send_modal(ModalMotifTicket(cat))
         except Exception:
             pass
 
     @discord.ui.button(label="🔓 Déban", style=discord.ButtonStyle.danger, custom_id="tkt_dbn", row=0)
-    async def deban(self, i, b): await self._open(i, "Déban")
+    async def deban(self, i, b): await self._open(i, 0)
     @discord.ui.button(label="❓ Question", style=discord.ButtonStyle.primary, custom_id="tkt_qst", row=0)
-    async def question(self, i, b): await self._open(i, "Question")
+    async def question(self, i, b): await self._open(i, 1)
     @discord.ui.button(label="🤖 Mise en place du bot", style=discord.ButtonStyle.success, custom_id="tkt_bot", row=1)
-    async def setup(self, i, b): await self._open(i, "Mise en place du bot")
+    async def setup(self, i, b): await self._open(i, 2)
     @discord.ui.button(label="🏛️ Fondation", style=discord.ButtonStyle.secondary, custom_id="tkt_fnd", row=1)
-    async def fondation(self, i, b): await self._open(i, "Fondation")
+    async def fondation(self, i, b): await self._open(i, 3)
 
 # ════════════════════════════════════════════════
 #  VIEW — REPORT (persistante ✅) — 4 boutons directs
@@ -1003,8 +1042,8 @@ async def publish_or_update_system_message(guild, channel, key, suffix, embed, v
 async def setup_configured_channel(guild, channel, key, label):
     gid = str(guild.id)
     if key == "salon_tickets":
-        e = EG("Ouvrir un ticket de support", "Selectionne la categorie de ta demande.", gid=gid)
-        await publish_or_update_system_message(guild, channel, key, "panel", e, VueChoixCategorie())
+        e = build_ticket_panel_embed(guild)
+        await publish_or_update_system_message(guild, channel, key, "panel", e, VueChoixCategorie(gid))
         status = EG("Systeme Tickets actif", f"Le panel tickets est pret dans {channel.mention}.", 0x43B581, gid)
         await publish_or_update_system_message(guild, channel, key, "status", status)
         return "Le systeme Tickets est actif et le panel est disponible."
