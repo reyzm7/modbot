@@ -1,14 +1,14 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json, os, re, asyncio, io, aiohttp, random, string
+import json, os, re, asyncio, io, aiohttp, random, string, html
 from datetime import datetime, timezone, timedelta
 
 # ════════════════════════════════════════════════
 #  CONFIGURATION
 # ════════════════════════════════════════════════
 
-TOKEN               = os.environ.get("TOKEN", "MTUxMDQwNTIzNTU0NDQyNDYyMA.GOV36l.gSYczZeuVfcNuLNfPXW07N7jROgmZn3JQu2o0Q")
+TOKEN               = os.environ.get("TOKEN")
 MAX_AVERT           = 4  # 1=warn, 2=mute 4h, 3=mute 24h, 4=ban
 LIEN_DEBAN          = "https://discord.gg/CK8CbFtYuv"
 DEFAULT_LOGS        = 1510422154725036062
@@ -45,7 +45,11 @@ F_TICKETS = "tickets.json"
 F_CONFIG  = "config.json"
 F_STATS   = "stats.json"
 F_MODS    = "mod_stats.json"
-INVITE_RE = re.compile(r'(?:discord\.gg|discord\.com/invite|discordapp\.com/invite)/\w+', re.I)
+LINK_RE = re.compile(
+    r'(?:https?://[^\s<>()]+|www\.[^\s<>()]+|(?:canary\.|ptb\.)?discord(?:app)?\.com/invite/[A-Za-z0-9-]+|discord\.gg/[A-Za-z0-9-]+|discord\.me/[A-Za-z0-9-]+|dsc\.gg/[A-Za-z0-9-]+|invite\.gg/[A-Za-z0-9-]+)',
+    re.I
+)
+INVITE_RE = LINK_RE
 
 # ════════════════════════════════════════════════
 #  UTILITAIRES
@@ -102,28 +106,137 @@ def get_ch(gid, key, default):
 def get_ecfg(gid):
     cfg = get_cfg(gid)
     return {
-        "color":  cfg.get("embed_color",  0x5865F2),
-        "footer": cfg.get("embed_footer", "ModBot • Protection de votre communauté"),
-        "logo":   cfg.get("embed_logo",   None),
+        "color":       cfg.get("embed_color",  0x5865F2),
+        "footer":      cfg.get("embed_footer", "ModBot - Protection de votre communaute"),
+        "logo":        cfg.get("embed_logo", None),
+        "banner":      cfg.get("embed_banner", None),
+        "footer_icon": cfg.get("embed_footer_icon", None),
     }
 
-# E() = embed système (panel, admin, logs)
+# E() = embed systeme (panel, admin, logs)
 def E(titre, desc="", couleur=0x5865F2):
     e = discord.Embed(title=titre, description=desc, color=couleur, timestamp=now())
-    e.set_footer(text="ModBot • Protection de votre communauté")
+    e.set_footer(text="ModBot - Protection de votre communaute")
     return e
 
 # EG() = embed membre (suggestions, reports, tickets, sanctions)
 def EG(titre, desc="", couleur=None, gid=None):
-    ecfg = get_ecfg(gid) if gid else {"color": 0x5865F2, "footer": "ModBot", "logo": None}
+    ecfg = get_ecfg(gid) if gid else {"color": 0x5865F2, "footer": "ModBot", "logo": None, "banner": None, "footer_icon": None}
     c = couleur if couleur is not None else ecfg["color"]
     e = discord.Embed(title=titre, description=desc, color=c, timestamp=now())
-    e.set_footer(text=ecfg["footer"])
+    if ecfg.get("footer_icon"):
+        e.set_footer(text=ecfg["footer"], icon_url=ecfg["footer_icon"])
+    else:
+        e.set_footer(text=ecfg["footer"])
     if ecfg.get("logo"):
         e.set_thumbnail(url=ecfg["logo"])
+    if ecfg.get("banner"):
+        e.set_image(url=ecfg["banner"])
     return e
 
-# ════════════════════════════════════════════════
+def status_txt(active):
+    return "Actif" if active else "Inactif"
+
+def anti_link_enabled(cfg):
+    return bool(cfg.get("anti_lien") or cfg.get("anti_invite"))
+
+def contains_forbidden_link(text):
+    return bool(text and LINK_RE.search(text))
+
+def _role_lines(guild, role_ids, empty):
+    if not role_ids:
+        return empty
+    lignes = []
+    for rid in role_ids:
+        try:
+            role = guild.get_role(int(rid))
+        except Exception:
+            role = None
+        lignes.append(f"- {role.mention if role else rid}")
+    return "\n".join(lignes)
+
+def build_main_panel_embed(guild):
+    gid = str(guild.id)
+    custom = get_custom(gid)
+    cfg = get_cfg(gid)
+    e = E("Panel d'administration - ModBot", couleur=0x5865F2)
+    try:
+        if bot.user:
+            e.set_thumbnail(url=bot.user.display_avatar.url)
+    except Exception:
+        pass
+    e.description = (f"Panneau de controle de **ModBot** sur **{guild.name}**.\n"
+                     "Les modifications sont sauvegardees par serveur et les etats se rafraichissent ici.")
+    e.add_field(name="Mots filtres", value=f"`{len(INSULTES_BASE)+len(custom)}`", inline=True)
+    e.add_field(name="Anti-Raid", value=status_txt(cfg.get("antiraid")), inline=True)
+    e.add_field(name="Anti-Lien", value=status_txt(anti_link_enabled(cfg)), inline=True)
+    e.add_field(name="Anti-Spam", value=status_txt(cfg.get("anti_spam")), inline=True)
+    e.add_field(name="Lockdown", value=status_txt(cfg.get("lockdown")), inline=True)
+    e.add_field(name="Staff Alert", value=status_txt(cfg.get("staff_alert_enabled")), inline=True)
+    return e
+
+def build_security_embed(guild):
+    cfg = get_cfg(guild.id)
+    e = E("Parametres de securite", couleur=0x5865F2)
+    e.description = "Active/desactive les protections. Le panel se met a jour instantanement."
+    e.add_field(name="Lockdown", value=status_txt(cfg.get("lockdown")), inline=True)
+    e.add_field(name="Anti-Raid", value=status_txt(cfg.get("antiraid")), inline=True)
+    e.add_field(name="Anti-Lien", value=status_txt(anti_link_enabled(cfg)), inline=True)
+    e.add_field(name="Anti-Spam", value=status_txt(cfg.get("anti_spam")), inline=True)
+    e.add_field(name="Staff Alert", value=status_txt(cfg.get("staff_alert_enabled")), inline=True)
+    return e
+
+def build_insultes_embed(guild):
+    e = E("Gestion des insultes", couleur=0xED4245)
+    e.description = "Mots filtres et roles immunises. Utilise les menus pour choisir directement un role."
+    e.add_field(name="Mots par defaut", value=f"`{len(INSULTES_BASE)}`", inline=True)
+    e.add_field(name="Mots personnalises", value=f"`{len(get_custom(guild.id))}`", inline=True)
+    e.add_field(name="Roles immunises", value=_role_lines(guild, get_roles_imm(guild.id), "Aucun role immunise."), inline=False)
+    return e
+
+def build_staff_embed(guild):
+    e = E("Gestion des roles Staff", couleur=0x5865F2)
+    e.description = "Choisis directement les roles staff avec les menus ci-dessous."
+    e.add_field(name="Roles staff", value=_role_lines(guild, get_staff_roles(guild.id), "Aucun role staff configure. Les administrateurs gardent l'acces."), inline=False)
+    return e
+
+def build_salons_embed(guild, selected_label="Tickets"):
+    cfg = get_cfg(guild.id)
+    e = E("Configuration des salons", couleur=0x5865F2)
+    e.description = f"Systeme selectionne : **{selected_label}**. Choisis ensuite le salon dans le menu."
+    salons = [("salon_logs", "Logs"), ("salon_suggestions", "Suggestions"),
+              ("salon_reports", "Reports"), ("salon_patchnotes", "Patch Notes"),
+              ("salon_tickets", "Tickets"), ("salon_staff_alert", "Staff Alert")]
+    for key, label in salons:
+        val = cfg.get(key)
+        ch = guild.get_channel(val) if val else None
+        e.add_field(name=label, value=ch.mention if ch else "Non defini", inline=True)
+    return e
+
+def build_personnalisation_embed(guild):
+    cfg = get_cfg(guild.id)
+    e = EG("Personnalisation des embeds", "Choisis une couleur avec la palette ou utilise les boutons Upload pour les visuels.", gid=str(guild.id))
+    e.add_field(name="Couleur", value=f"`#{cfg.get('embed_color', 0x5865F2):06X}`", inline=True)
+    e.add_field(name="Footer", value=cfg.get("embed_footer", "ModBot - Protection de votre communaute")[:100], inline=True)
+    e.add_field(name="Logo", value="Configure" if cfg.get("embed_logo") else "Non defini", inline=True)
+    e.add_field(name="Banniere", value="Configuree" if cfg.get("embed_banner") else "Non definie", inline=True)
+    e.add_field(name="Icone footer", value="Configuree" if cfg.get("embed_footer_icon") else "Non definie", inline=True)
+    return e
+
+async def refresh_interaction_message(interaction, embed, view):
+    try:
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=view)
+        else:
+            await interaction.response.edit_message(embed=embed, view=view)
+        return
+    except Exception:
+        pass
+    try:
+        await interaction.message.edit(embed=embed, view=view)
+    except Exception:
+        pass
+
 #  STAFF ROLES
 # ════════════════════════════════════════════════
 
@@ -381,21 +494,90 @@ _voice: dict = {}  # {gid: {uid: join_ts}}
 # ════════════════════════════════════════════════
 
 async def translate_text(text: str, to_lang: str) -> dict:
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False}
+    text = text[:4500]
+    timeout = aiohttp.ClientTimeout(total=12)
     try:
-        async with aiohttp.ClientSession() as s:
-            params = {"q": text[:500], "langpair": f"auto|{to_lang}"}
-            async with s.get("https://api.mymemory.translated.net/get",
-                              params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            params = {"client": "gtx", "sl": "auto", "tl": to_lang, "dt": "t", "q": text}
+            async with s.get("https://translate.googleapis.com/translate_a/single", params=params) as r:
                 if r.status == 200:
-                    data = await r.json()
-                    return {"ok": True,
-                            "text": data["responseData"]["translatedText"],
-                            "details": data.get("responseDetails", "")}
+                    data = await r.json(content_type=None)
+                    translated = "".join(part[0] for part in data[0] if part and part[0]).strip()
+                    if translated:
+                        return {"ok": True, "text": html.unescape(translated), "details": f"Source: {data[2]}" if len(data) > 2 else ""}
+    except Exception:
+        pass
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            params = {"q": text[:500], "langpair": f"auto|{to_lang}"}
+            async with s.get("https://api.mymemory.translated.net/get", params=params) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    translated = data.get("responseData", {}).get("translatedText", "")
+                    if translated:
+                        return {"ok": True, "text": html.unescape(translated), "details": data.get("responseDetails", "")}
     except Exception:
         pass
     return {"ok": False}
 
-# ════════════════════════════════════════════════
+MESSAGE_LINK_RE = re.compile(r"discord(?:app)?\.com/channels/(?P<guild>\d+|@me)/(?P<channel>\d+)/(?P<message>\d+)")
+
+def parse_message_reference(value):
+    value = (value or "").strip()
+    m = MESSAGE_LINK_RE.search(value)
+    if m:
+        return int(m.group("message")), int(m.group("channel"))
+    digits = re.sub(r"\D", "", value)
+    return (int(digits), None) if digits else (None, None)
+
+def extract_translatable_text(msg):
+    parts = []
+    if msg.content and msg.content.strip():
+        parts.append(msg.content.strip())
+    for emb in msg.embeds:
+        if emb.title:
+            parts.append(emb.title)
+        if emb.description:
+            parts.append(emb.description)
+        for field in emb.fields:
+            if field.name:
+                parts.append(field.name)
+            if field.value:
+                parts.append(field.value)
+    return "\n".join(parts).strip()
+
+async def fetch_message_for_translate(interaction, message_ref, salon=None):
+    msg_id, channel_id = parse_message_reference(message_ref)
+    if not msg_id:
+        return None, "Reference de message invalide."
+    channels = []
+    if channel_id:
+        ch = interaction.guild.get_channel(channel_id)
+        if not ch:
+            try:
+                ch = await bot.fetch_channel(channel_id)
+            except Exception:
+                ch = None
+        if ch:
+            channels.append(ch)
+    if salon and salon not in channels:
+        channels.append(salon)
+    if interaction.channel and interaction.channel not in channels:
+        channels.append(interaction.channel)
+    if not channel_id and not salon:
+        for ch in interaction.guild.text_channels:
+            if ch not in channels:
+                channels.append(ch)
+    for ch in channels:
+        try:
+            return await ch.fetch_message(msg_id), None
+        except Exception:
+            continue
+    return None, "Message introuvable dans les salons accessibles au bot."
+
 #  BOT
 # ════════════════════════════════════════════════
 
@@ -562,39 +744,37 @@ class VueReport(discord.ui.View):
 #  VIEW — TICKETS (persistante ✅)
 # ════════════════════════════════════════════════
 
+_tickets_closing: set = set()
+
 class VueNotation(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    def __init__(self, gid=None):
+        super().__init__(timeout=None)
+        self.gid = str(gid) if gid else None
 
     async def _noter(self, interaction: discord.Interaction, note: int):
-        await _safe_defer(interaction)
+        gid = self.gid or (str(interaction.guild.id) if interaction.guild else None)
         self.clear_items()
-        et = "⭐" * note
-        gid = str(interaction.guild.id)
-        e = EG("⭐ Notation enregistrée", f"**{interaction.user}** → **{et} {note}/5**\nMerci !", 0xFFD700, gid)
+        etoiles = "*" * note
+        e = EG("Notation enregistree", f"Merci, ta note **{etoiles} {note}/5** a ete enregistree.", 0xFFD700, gid)
         try:
-            await interaction.message.edit(embed=e, view=self)
-        except Exception:
-            pass
-        try:
-            dm = EG("⭐ Merci pour ta notation !", couleur=0xFFD700, gid=gid)
-            dm.description = f"Tu as noté notre support **{et} {note}/5** !"
-            await interaction.user.send(embed=dm)
-        except Exception:
-            pass
-        try:
-            await interaction.followup.send(f"Merci {et} !", ephemeral=True)
+            await interaction.response.edit_message(embed=e, view=None)
+        except discord.InteractionResponded:
+            try:
+                await interaction.message.edit(embed=e, view=None)
+            except Exception:
+                pass
         except Exception:
             pass
 
-    @discord.ui.button(label="1 ⭐", style=discord.ButtonStyle.secondary, custom_id="nt1")
+    @discord.ui.button(label="1", style=discord.ButtonStyle.secondary, custom_id="nt1")
     async def n1(self, i, b): await self._noter(i, 1)
-    @discord.ui.button(label="2 ⭐", style=discord.ButtonStyle.secondary, custom_id="nt2")
+    @discord.ui.button(label="2", style=discord.ButtonStyle.secondary, custom_id="nt2")
     async def n2(self, i, b): await self._noter(i, 2)
-    @discord.ui.button(label="3 ⭐", style=discord.ButtonStyle.secondary, custom_id="nt3")
+    @discord.ui.button(label="3", style=discord.ButtonStyle.secondary, custom_id="nt3")
     async def n3(self, i, b): await self._noter(i, 3)
-    @discord.ui.button(label="4 ⭐", style=discord.ButtonStyle.primary, custom_id="nt4")
+    @discord.ui.button(label="4", style=discord.ButtonStyle.primary, custom_id="nt4")
     async def n4(self, i, b): await self._noter(i, 4)
-    @discord.ui.button(label="5 ⭐", style=discord.ButtonStyle.success, custom_id="nt5")
+    @discord.ui.button(label="5", style=discord.ButtonStyle.success, custom_id="nt5")
     async def n5(self, i, b): await self._noter(i, 5)
 
 class VueTicket(discord.ui.View):
@@ -604,14 +784,14 @@ class VueTicket(discord.ui.View):
 
     def _peut(self, i: discord.Interaction) -> bool:
         if self.uid:
-            return i.user.guild_permissions.manage_channels or str(i.user.id) == self.uid
-        return i.user.guild_permissions.manage_channels
+            return i.user.guild_permissions.manage_channels or str(i.user.id) == self.uid or is_staff(i.user, i.guild.id)
+        return i.user.guild_permissions.manage_channels or is_staff(i.user, i.guild.id)
 
-    @discord.ui.button(label="📄 Transcript", style=discord.ButtonStyle.secondary, custom_id="tkt_trs", row=0)
+    @discord.ui.button(label="Transcript", style=discord.ButtonStyle.secondary, custom_id="tkt_trs", row=0)
     async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._peut(interaction):
             try:
-                await interaction.response.send_message("❌ Permission refusée.", ephemeral=True)
+                await interaction.response.send_message("Permission refusee.", ephemeral=True)
             except Exception:
                 pass
             return
@@ -620,78 +800,81 @@ class VueTicket(discord.ui.View):
         f = await make_transcript(interaction.channel, tdata)
         nom = f"transcript-{interaction.channel.name}-{now().strftime('%Y%m%d-%H%M')}.txt"
         gid = str(interaction.guild.id)
-        e = EG("📄 Transcript généré", couleur=0x5865F2, gid=gid)
-        e.add_field(name="📋 Ticket", value=interaction.channel.name, inline=True)
-        e.add_field(name="📅 Date", value=fmt(), inline=True)
-        e.add_field(name="👮 Par", value=str(interaction.user), inline=True)
+        e = EG("Transcript genere", couleur=0x5865F2, gid=gid)
+        e.add_field(name="Ticket", value=interaction.channel.name, inline=True)
+        e.add_field(name="Date", value=fmt(), inline=True)
+        e.add_field(name="Par", value=str(interaction.user), inline=True)
         try:
             await interaction.followup.send(embed=e, file=discord.File(f, filename=nom), ephemeral=True)
         except Exception:
             pass
 
-    @discord.ui.button(label="🔒 Fermer", style=discord.ButtonStyle.danger, custom_id="tkt_close", row=0)
+    @discord.ui.button(label="Fermer", style=discord.ButtonStyle.danger, custom_id="tkt_close", row=0)
     async def fermer(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._peut(interaction):
             try:
-                await interaction.response.send_message("❌ Permission refusée.", ephemeral=True)
+                await interaction.response.send_message("Permission refusee.", ephemeral=True)
             except Exception:
                 pass
             return
-        # Defer AVANT toute opération async — ✅ FIX 404
-        await _safe_defer(interaction, ephemeral=False)
-        gid = str(interaction.guild.id)
-        tdata = load_tickets().get("tickets", {}).get(str(interaction.channel.id), {})
-
-        # Générer transcript
-        f_bytes = await make_transcript(interaction.channel, tdata)
-        nom = f"transcript-{interaction.channel.name}-{now().strftime('%Y%m%d-%H%M')}.txt"
-
-        # Notation
-        e_note = EG("⭐ Note ton expérience", "Évalue notre support de 1 à 5 étoiles.", 0xFFD700, gid)
-        await interaction.channel.send(embed=e_note, view=VueNotation())
-
-        # Message fermeture + transcript en public
-        e_cl = EG("🔒 Fermeture du ticket", f"Fermé par {interaction.user.mention}\n**Suppression dans 20s.**", 0xED4245, gid)
-        try:
-            f_bytes.seek(0)
-            await interaction.followup.send(embed=e_cl, file=discord.File(f_bytes, filename=nom))
-        except Exception:
-            pass
-
-        # Envoyer transcript au créateur en DM — ✅ Amélioration
-        uid = tdata.get("user_id")
-        if uid:
+        cid = str(interaction.channel.id)
+        if cid in _tickets_closing:
             try:
-                u = await bot.fetch_user(int(uid))
-                dm = EG("🎫 Ticket fermé", gid=gid)
-                dm.description = f"Ton ticket **{tdata.get('nom','?')}** a été fermé.\nVoici le transcript de vos échanges."
-                f_bytes.seek(0)
-                await u.send(embed=dm, file=discord.File(f_bytes, filename=nom))
+                await interaction.response.send_message("Fermeture deja en cours.", ephemeral=True)
+            except Exception:
+                pass
+            return
+        _tickets_closing.add(cid)
+        try:
+            await _safe_defer(interaction, ephemeral=False)
+            gid = str(interaction.guild.id)
+            tickets_data = load_tickets()
+            tdata = tickets_data.get("tickets", {}).get(cid, {})
+            f_bytes = await make_transcript(interaction.channel, tdata)
+            nom = f"transcript-{interaction.channel.name}-{now().strftime('%Y%m%d-%H%M')}.txt"
+
+            e_cl = EG("Fermeture du ticket", f"Ferme par {interaction.user.mention}\nSuppression dans 20s.", 0xED4245, gid)
+            try:
+                await interaction.followup.send(embed=e_cl)
             except Exception:
                 pass
 
-        # Envoyer transcript dans logs — ✅ Amélioration
-        try:
-            ch_id = get_ch(gid, "salon_logs", DEFAULT_LOGS)
-            log_ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
-            le = E("📄 LOG — Transcript ticket", couleur=0x5865F2)
-            le.add_field(name="🎫 Ticket", value=tdata.get("nom","?"), inline=True)
-            le.add_field(name="👤 Créateur", value=tdata.get("pseudo","?"), inline=True)
-            le.add_field(name="🗂️ Catégorie", value=tdata.get("categorie","?"), inline=True)
-            f_bytes.seek(0)
-            await log_ch.send(embed=le, file=discord.File(f_bytes, filename=nom))
-        except Exception:
-            pass
+            uid = tdata.get("user_id")
+            if uid:
+                try:
+                    u = await bot.fetch_user(int(uid))
+                    dm = EG("Ticket ferme", gid=gid)
+                    dm.description = (f"Ton ticket **{tdata.get('nom','?')}** a ete ferme.\n"
+                                      "Voici le transcript de vos echanges. Tu peux aussi noter le support ci-dessous.")
+                    f_bytes.seek(0)
+                    await u.send(embed=dm, file=discord.File(f_bytes, filename=nom), view=VueNotation(gid))
+                except Exception:
+                    pass
 
-        await asyncio.sleep(20)
-        try:
-            await interaction.channel.delete()
-        except Exception:
-            pass
+            try:
+                ch_id = get_ch(gid, "salon_logs", DEFAULT_LOGS)
+                log_ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+                le = E("LOG - Ticket ferme", couleur=0x5865F2)
+                le.add_field(name="Ticket", value=tdata.get("nom", "?"), inline=True)
+                le.add_field(name="Createur", value=tdata.get("pseudo", "?"), inline=True)
+                le.add_field(name="Categorie", value=tdata.get("categorie", "?"), inline=True)
+                le.add_field(name="Ferme par", value=str(interaction.user), inline=True)
+                f_bytes.seek(0)
+                await log_ch.send(embed=le, file=discord.File(f_bytes, filename=nom))
+            except Exception:
+                pass
 
-# ════════════════════════════════════════════════
-#  VIEW — TICKET CATÉGORIE (persistante ✅)
-# ════════════════════════════════════════════════
+            if cid in tickets_data.get("tickets", {}):
+                tickets_data["tickets"].pop(cid, None)
+                save_tickets(tickets_data)
+
+            await asyncio.sleep(20)
+            try:
+                await interaction.channel.delete()
+            except Exception:
+                pass
+        finally:
+            _tickets_closing.discard(cid)
 
 class VueChoixCategorie(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -734,37 +917,119 @@ class VueSelectionReport(discord.ui.View):
 class VueMassDMConfirm(discord.ui.View):
     def __init__(self, cibles, embed):
         super().__init__(timeout=120)
-        self.cibles = cibles
         self.embed = embed
+        self.cibles = []
+        seen = set()
+        for m in cibles:
+            if not m or getattr(m, "bot", False) or m.id in seen:
+                continue
+            seen.add(m.id)
+            self.cibles.append(m)
 
-    @discord.ui.button(label="✅ Confirmer l'envoi", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Confirmer l'envoi", style=discord.ButtonStyle.success)
     async def confirmer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _safe_defer(interaction)
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("Admin uniquement.", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
         sent = failed = 0
         for m in self.cibles:
             try:
-                await m.send(embed=self.embed)
+                await m.send(embed=self.embed, allowed_mentions=discord.AllowedMentions.none())
                 sent += 1
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.4)
             except Exception:
                 failed += 1
         self.clear_items()
-        e = E("✅ Envoi terminé", couleur=0x43B581)
-        e.add_field(name="✅ Envoyés", value=f"`{sent}`", inline=True)
-        e.add_field(name="❌ Échecs", value=f"`{failed}`", inline=True)
+        e = E("Envoi termine", couleur=0x43B581)
+        e.add_field(name="Envoyes", value=f"`{sent}`", inline=True)
+        e.add_field(name="Echecs", value=f"`{failed}`", inline=True)
         try:
-            await interaction.followup.send(embed=e, ephemeral=True)
+            await interaction.edit_original_response(embeds=[e], view=None)
         except Exception:
-            pass
+            try:
+                await interaction.followup.send(embed=e, ephemeral=True)
+            except Exception:
+                pass
 
-    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.danger)
     async def annuler(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.clear_items()
         try:
-            await interaction.response.send_message(embed=E("❌ Envoi annulé"), ephemeral=True)
+            await interaction.response.edit_message(embed=E("Envoi annule"), view=None)
         except Exception:
             pass
 
-# ════════════════════════════════════════════════
+class VueSuggestionLauncher(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Envoyer une suggestion", style=discord.ButtonStyle.primary, custom_id="suggest_open")
+    async def ouvrir(self, i: discord.Interaction, b):
+        try:
+            await i.response.send_modal(ModalSuggestion())
+        except Exception:
+            pass
+
+async def publish_or_update_system_message(guild, channel, key, suffix, embed, view=None):
+    cfg = get_cfg(guild.id)
+    msg_key = f"{key}_{suffix}_message_id"
+    ch_key = f"{key}_{suffix}_channel_id"
+    old_msg_id = cfg.get(msg_key)
+    old_ch_id = cfg.get(ch_key)
+    if old_msg_id and old_ch_id and int(old_ch_id) != int(channel.id):
+        try:
+            old_ch = guild.get_channel(int(old_ch_id)) or await bot.fetch_channel(int(old_ch_id))
+            old_msg = await old_ch.fetch_message(int(old_msg_id))
+            await old_msg.delete()
+        except Exception:
+            pass
+    if old_msg_id and (not old_ch_id or int(old_ch_id) == int(channel.id)):
+        try:
+            msg = await channel.fetch_message(int(old_msg_id))
+            await msg.edit(embed=embed, view=view)
+            update_cfg(guild.id, msg_key, msg.id)
+            update_cfg(guild.id, ch_key, channel.id)
+            return msg
+        except Exception:
+            pass
+    msg = await channel.send(embed=embed, view=view)
+    update_cfg(guild.id, msg_key, msg.id)
+    update_cfg(guild.id, ch_key, channel.id)
+    return msg
+
+async def setup_configured_channel(guild, channel, key, label):
+    gid = str(guild.id)
+    if key == "salon_tickets":
+        e = EG("Ouvrir un ticket de support", "Selectionne la categorie de ta demande.", gid=gid)
+        await publish_or_update_system_message(guild, channel, key, "panel", e, VueChoixCategorie())
+        status = EG("Systeme Tickets actif", f"Le panel tickets est pret dans {channel.mention}.", 0x43B581, gid)
+        await publish_or_update_system_message(guild, channel, key, "status", status)
+        return "Le systeme Tickets est actif et le panel est disponible."
+    if key == "salon_suggestions":
+        e = EG("Suggestions", "Clique sur le bouton pour envoyer une suggestion.", gid=gid)
+        await publish_or_update_system_message(guild, channel, key, "panel", e, VueSuggestionLauncher())
+        status = EG("Systeme Suggestions actif", f"Les suggestions sont pretes dans {channel.mention}.", 0x43B581, gid)
+        await publish_or_update_system_message(guild, channel, key, "status", status)
+        return "Le systeme Suggestions est actif."
+    if key == "salon_reports":
+        e = EG("Reports", "Choisis le type de report avec les boutons ci-dessous.", gid=gid)
+        await publish_or_update_system_message(guild, channel, key, "panel", e, VueSelectionReport())
+        status = EG("Systeme Reports actif", f"Les reports sont prets dans {channel.mention}.", 0x43B581, gid)
+        await publish_or_update_system_message(guild, channel, key, "status", status)
+        return "Le systeme Reports est actif."
+    if key == "salon_logs":
+        status = EG("Systeme Logs actif", f"Les logs seront envoyes dans {channel.mention}.", 0x43B581, gid)
+        await publish_or_update_system_message(guild, channel, key, "status", status)
+        return "Le systeme Logs est actif."
+    if key == "salon_patchnotes":
+        status = EG("Systeme Patch Notes actif", f"Les patch notes seront publiees dans {channel.mention}.", 0x43B581, gid)
+        await publish_or_update_system_message(guild, channel, key, "status", status)
+        return "Le systeme Patch Notes est actif."
+    return f"{label} configure dans {channel.mention}."
+
 #  PANEL MODALS
 # ════════════════════════════════════════════════
 
@@ -850,7 +1115,7 @@ class ModalLockSalon(discord.ui.Modal, title="🔒 Lockdown salon"):
         except Exception as ex:
             await i.followup.send(f"❌ Erreur : {ex}", ephemeral=True)
 
-class ModalDefinirSalon(discord.ui.Modal, title="📌 Définir un salon"):
+class ModalDefinirSalon(discord.ui.Modal, title="Definir un salon"):
     salon_id = discord.ui.TextInput(label="ID du salon", placeholder="Ex : 123456789012345678", max_length=20)
 
     def __init__(self, key, label):
@@ -863,13 +1128,14 @@ class ModalDefinirSalon(discord.ui.Modal, title="📌 Définir un salon"):
         try:
             ch = i.guild.get_channel(int(self.salon_id.value))
             if not ch:
-                return await i.followup.send("❌ Salon introuvable.", ephemeral=True)
+                return await i.followup.send("Salon introuvable.", ephemeral=True)
             update_cfg(i.guild.id, self.key, ch.id)
-            await i.followup.send(embed=E("✅ Salon défini !", f"**{self.lbl}** → {ch.mention}", 0x43B581), ephemeral=True)
+            msg = await setup_configured_channel(i.guild, ch, self.key, self.lbl)
+            await i.followup.send(embed=E("Salon defini", f"**{self.lbl}** -> {ch.mention}\n{msg}", 0x43B581), ephemeral=True)
         except Exception as ex:
-            await i.followup.send(f"❌ Erreur : {ex}", ephemeral=True)
+            await i.followup.send(f"Erreur : {ex}", ephemeral=True)
 
-class ModalCreerSalon(discord.ui.Modal, title="➕ Créer un salon"):
+class ModalCreerSalon(discord.ui.Modal, title="Creer un salon"):
     nom = discord.ui.TextInput(label="Nom du salon", placeholder="Ex : logs-modbot", max_length=50)
 
     def __init__(self, key, label):
@@ -882,287 +1148,217 @@ class ModalCreerSalon(discord.ui.Modal, title="➕ Créer un salon"):
         try:
             ch = await i.guild.create_text_channel(self.nom.value)
             update_cfg(i.guild.id, self.key, ch.id)
-            await i.followup.send(embed=E("✅ Salon créé !", f"{ch.mention} → **{self.lbl}**", 0x43B581), ephemeral=True)
+            msg = await setup_configured_channel(i.guild, ch, self.key, self.lbl)
+            await i.followup.send(embed=E("Salon cree", f"{ch.mention} -> **{self.lbl}**\n{msg}", 0x43B581), ephemeral=True)
         except Exception as ex:
-            await i.followup.send(f"❌ Erreur : {ex}", ephemeral=True)
+            await i.followup.send(f"Erreur : {ex}", ephemeral=True)
 
-class ModalPersonnalisation(discord.ui.Modal, title="🎨 Personnalisation embed"):
-    footer = discord.ui.TextInput(label="Texte footer", placeholder="Ex : Mon Serveur • Modération", required=False, max_length=100)
-    color  = discord.ui.TextInput(label="Couleur hex (ex: 5865F2)", placeholder="5865F2", required=False, max_length=8)
-    logo   = discord.ui.TextInput(label="URL Logo (thumbnail)", placeholder="https://...", required=False, max_length=300)
+class ModalPersonnalisation(discord.ui.Modal, title="Texte du footer"):
+    footer = discord.ui.TextInput(label="Texte footer", placeholder="Ex : Mon Serveur - Moderation", required=False, max_length=100)
 
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
         gid = i.guild.id
         if self.footer.value:
             update_cfg(gid, "embed_footer", self.footer.value)
-        if self.color.value:
-            try:
-                c = int(self.color.value.lstrip("#"), 16)
-                update_cfg(gid, "embed_color", c)
-            except Exception:
-                pass
-        if self.logo.value:
-            update_cfg(gid, "embed_logo", self.logo.value)
-        cfg = get_cfg(gid)
-        e = E("✅ Personnalisation sauvegardée !", couleur=cfg.get("embed_color", 0x5865F2))
-        e.set_footer(text=cfg.get("embed_footer", "ModBot"))
-        if cfg.get("embed_logo"):
-            e.set_thumbnail(url=cfg["embed_logo"])
-        e.description = "Voici un aperçu de vos embeds personnalisés."
-        await i.followup.send(embed=e, ephemeral=True)
+        await i.followup.send(embed=build_personnalisation_embed(i.guild), ephemeral=True)
 
-# ════════════════════════════════════════════════
 #  PANEL VIEWS
 # ════════════════════════════════════════════════
 
-class VuePanelInsultes(discord.ui.View):
-    def __init__(self): super().__init__(timeout=180)
+class SelectRoleImmunite(discord.ui.RoleSelect):
+    def __init__(self, action, row):
+        self.action = action
+        placeholder = "Choisir le role a immuniser" if action == "add" else "Choisir le role a retirer"
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, row=row)
 
-    @discord.ui.button(label="➕ Ajouter mot", style=discord.ButtonStyle.danger, row=0)
+    async def callback(self, i: discord.Interaction):
+        role = self.values[0]
+        if self.action == "add":
+            add_role_imm(i.guild.id, role.id)
+        else:
+            del_role_imm(i.guild.id, role.id)
+        await refresh_interaction_message(i, build_insultes_embed(i.guild), self.view)
+
+class VuePanelInsultes(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(SelectRoleImmunite("add", row=1))
+        self.add_item(SelectRoleImmunite("remove", row=2))
+
+    @discord.ui.button(label="Ajouter mot", style=discord.ButtonStyle.danger, row=0)
     async def aj(self, i: discord.Interaction, b):
         try: await i.response.send_modal(ModalAjouterMot())
         except Exception: pass
 
-    @discord.ui.button(label="➖ Retirer mot", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Retirer mot", style=discord.ButtonStyle.secondary, row=0)
     async def rm(self, i: discord.Interaction, b):
         try: await i.response.send_modal(ModalRetirerMot())
         except Exception: pass
 
-    @discord.ui.button(label="📋 Voir liste", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Voir liste", style=discord.ButtonStyle.primary, row=0)
     async def lst(self, i: discord.Interaction, b):
         try:
             await i.response.defer(ephemeral=True)
         except Exception:
             return
         custom = get_custom(i.guild.id)
-        e = E("🚫 Mots filtrés", couleur=0xED4245)
-        base_str = " • ".join([f"`{x}`" for x in INSULTES_BASE])
+        e = E("Mots filtres", couleur=0xED4245)
+        base_str = " - ".join([f"`{x}`" for x in INSULTES_BASE])
         if len(base_str) > 1024: base_str = base_str[:1020] + "..."
-        e.add_field(name=f"📋 Par défaut ({len(INSULTES_BASE)})", value=base_str, inline=False)
-        cs = (" • ".join([f"`{x}`" for x in custom])) if custom else "*Aucun*"
-        e.add_field(name=f"➕ Personnalisés ({len(custom)})", value=cs, inline=False)
-        await i.followup.send(embed=e, ephemeral=True)
-
-    @discord.ui.button(label="🛡️ Immuniser rôle", style=discord.ButtonStyle.success, row=1)
-    async def imm(self, i: discord.Interaction, b):
-        try: await i.response.send_modal(ModalImmuniserRole())
-        except Exception: pass
-
-    @discord.ui.button(label="❌ Retirer immunité", style=discord.ButtonStyle.secondary, row=1)
-    async def rimm(self, i: discord.Interaction, b):
-        try: await i.response.send_modal(ModalRetirerImmunite())
-        except Exception: pass
-
-    @discord.ui.button(label="📋 Rôles immunisés", style=discord.ButtonStyle.primary, row=1)
-    async def lstimm(self, i: discord.Interaction, b):
-        try:
-            await i.response.defer(ephemeral=True)
-        except Exception:
-            return
-        roles = get_roles_imm(i.guild.id)
-        e = E("🛡️ Rôles immunisés", couleur=0x43B581)
-        if roles:
-            lignes = []
-            for rid in roles:
-                role = i.guild.get_role(int(rid))
-                lignes.append(f"• {role.mention if role else rid}")
-            e.description = "\n".join(lignes)
-        else:
-            e.description = "*Aucun rôle immunisé.*"
+        e.add_field(name=f"Par defaut ({len(INSULTES_BASE)})", value=base_str, inline=False)
+        cs = (" - ".join([f"`{x}`" for x in custom])) if custom else "Aucun"
+        e.add_field(name=f"Personnalises ({len(custom)})", value=cs, inline=False)
         await i.followup.send(embed=e, ephemeral=True)
 
 class VuePanelSecurite(discord.ui.View):
     def __init__(self): super().__init__(timeout=180)
 
-    @discord.ui.button(label="🔒 Lockdown serveur", style=discord.ButtonStyle.danger, row=0)
+    async def _refresh(self, i):
+        await refresh_interaction_message(i, build_security_embed(i.guild), self)
+
+    @discord.ui.button(label="Lockdown serveur", style=discord.ButtonStyle.danger, row=0)
     async def lock_srv(self, i: discord.Interaction, b):
-        await _safe_defer(i)
-        count = 0
+        try: await i.response.defer(ephemeral=True)
+        except Exception: pass
         for ch in i.guild.text_channels:
             try:
                 await ch.set_permissions(i.guild.default_role, send_messages=False)
-                count += 1
             except Exception:
                 pass
         update_cfg(i.guild.id, "lockdown", True)
-        await i.followup.send(embed=E("🔒 LOCKDOWN ACTIVÉ", f"**{count} salons** verrouillés.", 0xED4245), ephemeral=True)
+        await self._refresh(i)
 
-    @discord.ui.button(label="🔓 Unlock serveur", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Unlock serveur", style=discord.ButtonStyle.success, row=0)
     async def unlock_srv(self, i: discord.Interaction, b):
-        await _safe_defer(i)
-        count = 0
+        try: await i.response.defer(ephemeral=True)
+        except Exception: pass
         for ch in i.guild.text_channels:
             try:
                 await ch.set_permissions(i.guild.default_role, send_messages=None)
-                count += 1
             except Exception:
                 pass
         update_cfg(i.guild.id, "lockdown", False)
-        await i.followup.send(embed=E("🔓 LOCKDOWN DÉSACTIVÉ", f"**{count} salons** déverrouillés.", 0x43B581), ephemeral=True)
+        await self._refresh(i)
 
-    @discord.ui.button(label="🔒 Lock un salon", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(label="Lock un salon", style=discord.ButtonStyle.danger, row=0)
     async def lock_ch(self, i: discord.Interaction, b):
         try: await i.response.send_modal(ModalLockSalon("lock"))
         except Exception: pass
 
-    @discord.ui.button(label="🔓 Unlock salon", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Unlock salon", style=discord.ButtonStyle.success, row=0)
     async def unlock_ch(self, i: discord.Interaction, b):
         try: await i.response.send_modal(ModalLockSalon("unlock"))
         except Exception: pass
 
-    @discord.ui.button(label="🛡️ Anti-Raid ON", style=discord.ButtonStyle.success, row=1)
-    async def raid_on(self, i: discord.Interaction, b):
-        update_cfg(i.guild.id, "antiraid", True)
-        try:
-            await i.response.send_message(embed=E("🛡️ Anti-Raid ACTIVÉ ✅",
-                "• Comptes < 7 jours → expulsés\n• +5 membres en 10s → alerte", 0x43B581), ephemeral=True)
-        except Exception: pass
+    @discord.ui.button(label="Anti-Raid", style=discord.ButtonStyle.primary, row=1)
+    async def raid_toggle(self, i: discord.Interaction, b):
+        cfg = get_cfg(i.guild.id)
+        update_cfg(i.guild.id, "antiraid", not cfg.get("antiraid"))
+        await self._refresh(i)
 
-    @discord.ui.button(label="🛡️ Anti-Raid OFF", style=discord.ButtonStyle.secondary, row=1)
-    async def raid_off(self, i: discord.Interaction, b):
-        update_cfg(i.guild.id, "antiraid", False)
-        try:
-            await i.response.send_message(embed=E("🛡️ Anti-Raid DÉSACTIVÉ ❌", couleur=0xED4245), ephemeral=True)
-        except Exception: pass
+    @discord.ui.button(label="Anti-Lien", style=discord.ButtonStyle.primary, row=1)
+    async def link_toggle(self, i: discord.Interaction, b):
+        cfg = get_cfg(i.guild.id)
+        new = not anti_link_enabled(cfg)
+        update_cfg(i.guild.id, "anti_lien", new)
+        update_cfg(i.guild.id, "anti_invite", new)
+        await self._refresh(i)
 
-    @discord.ui.button(label="🚫 Anti-Invite ON", style=discord.ButtonStyle.danger, row=1)
-    async def inv_on(self, i: discord.Interaction, b):
-        update_cfg(i.guild.id, "anti_invite", True)
-        try:
-            await i.response.send_message(embed=E("🚫 Anti-Invite ACTIVÉ ✅", "Les liens Discord seront supprimés.", 0x43B581), ephemeral=True)
-        except Exception: pass
+    @discord.ui.button(label="Anti-Spam", style=discord.ButtonStyle.primary, row=1)
+    async def spam_toggle(self, i: discord.Interaction, b):
+        cfg = get_cfg(i.guild.id)
+        update_cfg(i.guild.id, "anti_spam", not cfg.get("anti_spam"))
+        await self._refresh(i)
 
-    @discord.ui.button(label="🚫 Anti-Invite OFF", style=discord.ButtonStyle.secondary, row=1)
-    async def inv_off(self, i: discord.Interaction, b):
-        update_cfg(i.guild.id, "anti_invite", False)
-        try:
-            await i.response.send_message(embed=E("🚫 Anti-Invite DÉSACTIVÉ ❌", couleur=0xED4245), ephemeral=True)
-        except Exception: pass
+    @discord.ui.button(label="Staff Alert", style=discord.ButtonStyle.primary, row=2)
+    async def alert_toggle(self, i: discord.Interaction, b):
+        cfg = get_cfg(i.guild.id)
+        update_cfg(i.guild.id, "staff_alert_enabled", not cfg.get("staff_alert_enabled"))
+        await self._refresh(i)
 
-    @discord.ui.button(label="🔇 Anti-Spam ON", style=discord.ButtonStyle.danger, row=2)
-    async def spam_on(self, i: discord.Interaction, b):
-        update_cfg(i.guild.id, "anti_spam", True)
-        try:
-            await i.response.send_message(embed=E("🔇 Anti-Spam ACTIVÉ ✅", "Limite : 5 messages en 5 secondes.", 0x43B581), ephemeral=True)
-        except Exception: pass
+SALON_SYSTEMS = {
+    "salon_tickets": "Tickets",
+    "salon_suggestions": "Suggestions",
+    "salon_reports": "Reports",
+    "salon_logs": "Logs",
+    "salon_patchnotes": "Patch Notes",
+    "salon_staff_alert": "Staff Alert",
+}
 
-    @discord.ui.button(label="🔇 Anti-Spam OFF", style=discord.ButtonStyle.secondary, row=2)
-    async def spam_off(self, i: discord.Interaction, b):
-        update_cfg(i.guild.id, "anti_spam", False)
-        try:
-            await i.response.send_message(embed=E("🔇 Anti-Spam DÉSACTIVÉ ❌", couleur=0xED4245), ephemeral=True)
-        except Exception: pass
+class SelectSystemeSalon(discord.ui.Select):
+    def __init__(self, parent):
+        self.parent_view = parent
+        options = [discord.SelectOption(label=label, value=key) for key, label in SALON_SYSTEMS.items()]
+        super().__init__(placeholder="Choisir le systeme", options=options, min_values=1, max_values=1, row=0)
 
-    @discord.ui.button(label="🔔 Staff Alert ON", style=discord.ButtonStyle.success, row=2)
-    async def alert_on(self, i: discord.Interaction, b):
-        update_cfg(i.guild.id, "staff_alert_enabled", True)
-        try:
-            await i.response.send_message(embed=E("🔔 Staff Alert ACTIVÉ ✅", couleur=0x43B581), ephemeral=True)
-        except Exception: pass
+    async def callback(self, i: discord.Interaction):
+        self.parent_view.selected_key = self.values[0]
+        self.parent_view.selected_label = SALON_SYSTEMS[self.values[0]]
+        await refresh_interaction_message(i, build_salons_embed(i.guild, self.parent_view.selected_label), self.parent_view)
 
-    @discord.ui.button(label="🔔 Staff Alert OFF", style=discord.ButtonStyle.secondary, row=2)
-    async def alert_off(self, i: discord.Interaction, b):
-        update_cfg(i.guild.id, "staff_alert_enabled", False)
+class SelectSalonConfig(discord.ui.ChannelSelect):
+    def __init__(self, parent):
+        self.parent_view = parent
+        super().__init__(placeholder="Choisir le salon", channel_types=[discord.ChannelType.text], min_values=1, max_values=1, row=1)
+
+    async def callback(self, i: discord.Interaction):
+        ch = self.values[0]
+        await _safe_defer(i)
+        update_cfg(i.guild.id, self.parent_view.selected_key, ch.id)
+        msg = await setup_configured_channel(i.guild, ch, self.parent_view.selected_key, self.parent_view.selected_label)
+        await refresh_interaction_message(i, build_salons_embed(i.guild, self.parent_view.selected_label), self.parent_view)
         try:
-            await i.response.send_message(embed=E("🔔 Staff Alert DÉSACTIVÉ ❌", couleur=0xED4245), ephemeral=True)
-        except Exception: pass
+            await i.followup.send(embed=E("Salon configure", f"**{self.parent_view.selected_label}** -> {ch.mention}\n{msg}", 0x43B581), ephemeral=True)
+        except Exception:
+            pass
 
 class VuePanelSalons(discord.ui.View):
-    def __init__(self): super().__init__(timeout=180)
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.selected_key = "salon_tickets"
+        self.selected_label = "Tickets"
+        self.add_item(SelectSystemeSalon(self))
+        self.add_item(SelectSalonConfig(self))
 
-    @discord.ui.button(label="📊 Voir salons", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Voir salons", style=discord.ButtonStyle.primary, row=2)
     async def voir(self, i: discord.Interaction, b):
         try:
-            await i.response.defer(ephemeral=True)
+            await i.response.send_message(embed=build_salons_embed(i.guild, self.selected_label), ephemeral=True)
         except Exception:
-            return
-        cfg = get_cfg(i.guild.id)
-        e = E("📌 Salons configurés", couleur=0x5865F2)
-        salons = [("salon_logs","Logs"), ("salon_suggestions","Suggestions"),
-                  ("salon_reports","Reports"), ("salon_patchnotes","Patch Notes"),
-                  ("salon_tickets","Tickets"), ("salon_staff_alert","Staff Alert")]
-        for key, label in salons:
-            val = cfg.get(key)
-            ch = i.guild.get_channel(val) if val else None
-            e.add_field(name=f"#{label}", value=ch.mention if ch else "*Non défini*", inline=True)
-        await i.followup.send(embed=e, ephemeral=True)
+            pass
 
-    @discord.ui.button(label="📝 Définir Logs", style=discord.ButtonStyle.secondary, row=0)
-    async def def_logs(self, i, b):
-        try: await i.response.send_modal(ModalDefinirSalon("salon_logs", "Logs"))
-        except Exception: pass
-    @discord.ui.button(label="➕ Créer Logs", style=discord.ButtonStyle.success, row=0)
-    async def cr_logs(self, i, b):
-        try: await i.response.send_modal(ModalCreerSalon("salon_logs", "Logs"))
+    @discord.ui.button(label="Creer le salon", style=discord.ButtonStyle.success, row=2)
+    async def creer(self, i: discord.Interaction, b):
+        try: await i.response.send_modal(ModalCreerSalon(self.selected_key, self.selected_label))
         except Exception: pass
 
-    @discord.ui.button(label="📝 Définir Suggestions", style=discord.ButtonStyle.secondary, row=1)
-    async def def_sug(self, i, b):
-        try: await i.response.send_modal(ModalDefinirSalon("salon_suggestions", "Suggestions"))
-        except Exception: pass
-    @discord.ui.button(label="➕ Créer Suggestions", style=discord.ButtonStyle.success, row=1)
-    async def cr_sug(self, i, b):
-        try: await i.response.send_modal(ModalCreerSalon("salon_suggestions", "Suggestions"))
-        except Exception: pass
+class SelectRoleStaff(discord.ui.RoleSelect):
+    def __init__(self, action, row):
+        self.action = action
+        placeholder = "Choisir le role staff a ajouter" if action == "add" else "Choisir le role staff a retirer"
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, row=row)
 
-    @discord.ui.button(label="📝 Définir Reports", style=discord.ButtonStyle.secondary, row=2)
-    async def def_rep(self, i, b):
-        try: await i.response.send_modal(ModalDefinirSalon("salon_reports", "Reports"))
-        except Exception: pass
-    @discord.ui.button(label="➕ Créer Reports", style=discord.ButtonStyle.success, row=2)
-    async def cr_rep(self, i, b):
-        try: await i.response.send_modal(ModalCreerSalon("salon_reports", "Reports"))
-        except Exception: pass
-
-    @discord.ui.button(label="📝 Définir Patch Notes", style=discord.ButtonStyle.secondary, row=3)
-    async def def_pn(self, i, b):
-        try: await i.response.send_modal(ModalDefinirSalon("salon_patchnotes", "Patch Notes"))
-        except Exception: pass
-    @discord.ui.button(label="➕ Créer Patch Notes", style=discord.ButtonStyle.success, row=3)
-    async def cr_pn(self, i, b):
-        try: await i.response.send_modal(ModalCreerSalon("salon_patchnotes", "Patch Notes"))
-        except Exception: pass
-
-    @discord.ui.button(label="📝 Définir Tickets", style=discord.ButtonStyle.secondary, row=4)
-    async def def_tkt(self, i, b):
-        try: await i.response.send_modal(ModalDefinirSalon("salon_tickets", "Tickets"))
-        except Exception: pass
-    @discord.ui.button(label="➕ Créer Tickets", style=discord.ButtonStyle.success, row=4)
-    async def cr_tkt(self, i, b):
-        try: await i.response.send_modal(ModalCreerSalon("salon_tickets", "Tickets"))
-        except Exception: pass
+    async def callback(self, i: discord.Interaction):
+        role = self.values[0]
+        if self.action == "add":
+            add_staff_role(i.guild.id, role.id)
+        else:
+            del_staff_role(i.guild.id, role.id)
+        await refresh_interaction_message(i, build_staff_embed(i.guild), self.view)
 
 class VuePanelStaff(discord.ui.View):
-    def __init__(self): super().__init__(timeout=180)
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(SelectRoleStaff("add", row=0))
+        self.add_item(SelectRoleStaff("remove", row=1))
 
-    @discord.ui.button(label="➕ Ajouter rôle staff", style=discord.ButtonStyle.success, row=0)
-    async def aj(self, i: discord.Interaction, b):
-        try: await i.response.send_modal(ModalAjouterStaffRole())
-        except Exception: pass
-
-    @discord.ui.button(label="➖ Retirer rôle staff", style=discord.ButtonStyle.danger, row=0)
-    async def rm(self, i: discord.Interaction, b):
-        try: await i.response.send_modal(ModalRetirerStaffRole())
-        except Exception: pass
-
-    @discord.ui.button(label="📋 Voir rôles staff", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Voir roles staff", style=discord.ButtonStyle.primary, row=2)
     async def lst(self, i: discord.Interaction, b):
         try:
-            await i.response.defer(ephemeral=True)
+            await i.response.send_message(embed=build_staff_embed(i.guild), ephemeral=True)
         except Exception:
-            return
-        roles = get_staff_roles(i.guild.id)
-        e = E("👮 Rôles Staff configurés", couleur=0x5865F2)
-        if roles:
-            lignes = []
-            for rid in roles:
-                role = i.guild.get_role(int(rid))
-                lignes.append(f"• {role.mention if role else rid}")
-            e.description = "\n".join(lignes)
-        else:
-            e.description = "*Aucun rôle staff configuré.*\nLes administrateurs ont toujours accès."
-        await i.followup.send(embed=e, ephemeral=True)
+            pass
 
 class VuePanelStats(discord.ui.View):
     def __init__(self): super().__init__(timeout=180)
@@ -1203,108 +1399,148 @@ class VuePanelStats(discord.ui.View):
         e.set_footer(text=f"{len(liste)} ban(s) • ModBot")
         await i.followup.send(embed=e, ephemeral=True)
 
-class VuePanelPersonnalisation(discord.ui.View):
-    def __init__(self): super().__init__(timeout=180)
+class SelectCouleurEmbed(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Bleu Discord", value="5865F2"),
+            discord.SelectOption(label="Vert", value="43B581"),
+            discord.SelectOption(label="Rouge", value="ED4245"),
+            discord.SelectOption(label="Orange", value="FFA500"),
+            discord.SelectOption(label="Jaune", value="FFD700"),
+            discord.SelectOption(label="Violet", value="9B59B6"),
+            discord.SelectOption(label="Rose", value="E91E63"),
+            discord.SelectOption(label="Noir", value="2B2D31"),
+        ]
+        super().__init__(placeholder="Palette de couleurs", options=options, min_values=1, max_values=1, row=0)
 
-    @discord.ui.button(label="🎨 Configurer embeds", style=discord.ButtonStyle.primary, row=0)
+    async def callback(self, i: discord.Interaction):
+        update_cfg(i.guild.id, "embed_color", int(self.values[0], 16))
+        await refresh_interaction_message(i, build_personnalisation_embed(i.guild), self.view)
+
+class VuePanelPersonnalisation(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(SelectCouleurEmbed())
+
+    async def _upload_image(self, i: discord.Interaction, key, label):
+        try:
+            await i.response.send_message(f"Envoie maintenant l'image pour **{label}** dans ce salon. Delai : 2 minutes.", ephemeral=True)
+        except Exception:
+            return
+        def check(m):
+            return m.author.id == i.user.id and m.channel.id == i.channel.id and len(m.attachments) > 0
+        try:
+            msg = await bot.wait_for("message", timeout=120, check=check)
+        except asyncio.TimeoutError:
+            return await i.followup.send("Upload annule : aucun fichier recu.", ephemeral=True)
+        att = msg.attachments[0]
+        is_image = (att.content_type and att.content_type.startswith("image/")) or att.filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+        if not is_image:
+            return await i.followup.send("Le fichier envoye n'est pas une image valide.", ephemeral=True)
+        update_cfg(i.guild.id, key, att.url)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        try:
+            await i.message.edit(embed=build_personnalisation_embed(i.guild), view=self)
+        except Exception:
+            pass
+        await i.followup.send(embed=E("Visuel enregistre", f"**{label}** a ete mis a jour.", 0x43B581), ephemeral=True)
+
+    @discord.ui.button(label="Upload logo", style=discord.ButtonStyle.primary, row=1)
+    async def upload_logo(self, i: discord.Interaction, b):
+        await self._upload_image(i, "embed_logo", "logo")
+
+    @discord.ui.button(label="Upload banniere", style=discord.ButtonStyle.primary, row=1)
+    async def upload_banner(self, i: discord.Interaction, b):
+        await self._upload_image(i, "embed_banner", "banniere")
+
+    @discord.ui.button(label="Upload icone footer", style=discord.ButtonStyle.primary, row=1)
+    async def upload_footer_icon(self, i: discord.Interaction, b):
+        await self._upload_image(i, "embed_footer_icon", "icone footer")
+
+    @discord.ui.button(label="Modifier footer", style=discord.ButtonStyle.secondary, row=2)
     async def config(self, i: discord.Interaction, b):
         try: await i.response.send_modal(ModalPersonnalisation())
         except Exception: pass
 
-    @discord.ui.button(label="🔄 Réinitialiser", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=2)
     async def reset(self, i: discord.Interaction, b):
-        try:
-            await i.response.defer(ephemeral=True)
-        except Exception:
-            return
         cfg = get_cfg(i.guild.id)
-        for k in ("embed_color", "embed_footer", "embed_logo"):
+        for k in ("embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon"):
             cfg.pop(k, None)
         set_cfg(i.guild.id, cfg)
-        await i.followup.send(embed=E("✅ Personnalisation réinitialisée.", couleur=0x43B581), ephemeral=True)
+        await refresh_interaction_message(i, build_personnalisation_embed(i.guild), self)
 
-    @discord.ui.button(label="👁️ Aperçu", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Apercu", style=discord.ButtonStyle.secondary, row=2)
     async def apercu(self, i: discord.Interaction, b):
         try:
-            await i.response.defer(ephemeral=True)
+            await i.response.send_message(embed=build_personnalisation_embed(i.guild), ephemeral=True)
         except Exception:
-            return
-        gid = str(i.guild.id)
-        e = EG("👁️ Aperçu de vos embeds", f"Voici comment apparaîtront vos embeds sur **{i.guild.name}**.", gid=gid)
-        e.add_field(name="📊 Exemple champ 1", value="Valeur exemple", inline=True)
-        e.add_field(name="📊 Exemple champ 2", value="Valeur exemple", inline=True)
-        await i.followup.send(embed=e, ephemeral=True)
+            pass
 
 class VuePanel(discord.ui.View):
     def __init__(self): super().__init__(timeout=300)
 
     def _admin(self, i): return i.user.guild_permissions.administrator
 
-    async def _sub(self, i: discord.Interaction, titre, desc, view):
-        """Open a sub-panel safely"""
+    async def _sub(self, i: discord.Interaction, embed, view):
         try:
-            e = E(titre, desc)
-            await i.response.send_message(embed=e, view=view, ephemeral=True)
+            await i.response.send_message(embed=embed, view=view, ephemeral=True)
         except discord.InteractionResponded:
             pass
         except Exception:
             pass
 
-    @discord.ui.button(label="🚫 Insultes", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(label="Insultes", style=discord.ButtonStyle.danger, row=0)
     async def insultes(self, i: discord.Interaction, b):
         if not self._admin(i):
-            try: await i.response.send_message("❌ Admin uniquement.", ephemeral=True)
+            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        await self._sub(i, "🚫 Gestion des insultes", "Mots filtrés et rôles immunisés.", VuePanelInsultes())
+        await self._sub(i, build_insultes_embed(i.guild), VuePanelInsultes())
 
-    @discord.ui.button(label="🛡️ Sécurité", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Securite", style=discord.ButtonStyle.primary, row=0)
     async def securite(self, i: discord.Interaction, b):
         if not self._admin(i):
-            try: await i.response.send_message("❌ Admin uniquement.", ephemeral=True)
+            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        cfg = get_cfg(i.guild.id)
-        desc = (f"🔒 Lockdown : **{'🟢 Actif' if cfg.get('lockdown') else '🔴 Inactif'}**\n"
-                f"🛡️ Anti-Raid : **{'🟢 Actif' if cfg.get('antiraid') else '🔴 Inactif'}**\n"
-                f"🚫 Anti-Invite : **{'🟢 Actif' if cfg.get('anti_invite') else '🔴 Inactif'}**\n"
-                f"🔇 Anti-Spam : **{'🟢 Actif' if cfg.get('anti_spam') else '🔴 Inactif'}**\n"
-                f"🔔 Staff Alert : **{'🟢 Actif' if cfg.get('staff_alert_enabled') else '🔴 Inactif'}**")
-        await self._sub(i, "🛡️ Paramètres de sécurité", desc, VuePanelSecurite())
+        await self._sub(i, build_security_embed(i.guild), VuePanelSecurite())
 
-    @discord.ui.button(label="📌 Salons", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Salons", style=discord.ButtonStyle.success, row=0)
     async def salons(self, i: discord.Interaction, b):
         if not self._admin(i):
-            try: await i.response.send_message("❌ Admin uniquement.", ephemeral=True)
+            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        await self._sub(i, "📌 Configuration des salons", "Définis ou crée les salons.", VuePanelSalons())
+        await self._sub(i, build_salons_embed(i.guild, "Tickets"), VuePanelSalons())
 
-    @discord.ui.button(label="📊 Stats & Bans", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Stats & Bans", style=discord.ButtonStyle.secondary, row=0)
     async def stats(self, i: discord.Interaction, b):
         if not self._admin(i):
-            try: await i.response.send_message("❌ Admin uniquement.", ephemeral=True)
+            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        await self._sub(i, "📊 Statistiques & Bannissements", "", VuePanelStats())
+        await self._sub(i, E("Statistiques & Bannissements"), VuePanelStats())
 
-    @discord.ui.button(label="👮 Staff", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Staff", style=discord.ButtonStyle.primary, row=1)
     async def staff(self, i: discord.Interaction, b):
         if not self._admin(i):
-            try: await i.response.send_message("❌ Admin uniquement.", ephemeral=True)
+            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        await self._sub(i, "👮 Gestion des rôles Staff", "Définir les rôles qui ont des permissions staff.", VuePanelStaff())
+        await self._sub(i, build_staff_embed(i.guild), VuePanelStaff())
 
-    @discord.ui.button(label="🎨 Personnalisation", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Personnalisation", style=discord.ButtonStyle.secondary, row=1)
     async def perso(self, i: discord.Interaction, b):
         if not self._admin(i):
-            try: await i.response.send_message("❌ Admin uniquement.", ephemeral=True)
+            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        await self._sub(i, "🎨 Personnalisation des embeds", "Logo, couleur, footer personnalisés par serveur.", VuePanelPersonnalisation())
+        await self._sub(i, build_personnalisation_embed(i.guild), VuePanelPersonnalisation())
 
-# ════════════════════════════════════════════════
 #  MODALS PRINCIPAUX
 # ════════════════════════════════════════════════
 
@@ -1624,25 +1860,21 @@ async def on_voice_state_update(member, before, after):
 
 @bot.event
 async def on_ready():
-    # Vues persistantes UNIQUEMENT (timeout=None + custom_id partout)
+    # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
-              VueChoixCategorie(), VueSelectionReport()]:
+              VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher()]:
         try:
             bot.add_view(v)
         except Exception as err:
-            print(f"⚠️ add_view {type(v).__name__}: {err}")
+            print(f"add_view {type(v).__name__}: {err}")
     try:
         synced = await bot.tree.sync()
-        print(f"✅ ModBot connecté : {bot.user}")
-        print(f"✅ {len(synced)} commandes synchronisées")
+        print(f"ModBot connecte : {bot.user}")
+        print(f"{len(synced)} commandes synchronisees")
     except Exception as e:
-        print(f"❌ Erreur sync : {e}")
+        print(f"Erreur sync : {e}")
     await bot.change_presence(
-        activity=discord.Activity(type=discord.ActivityType.watching, name="votre serveur 👮"))
-
-# ════════════════════════════════════════════════
-#  ON MESSAGE — ✅ FIX double traitement + anti-spam + captcha
-# ════════════════════════════════════════════════
+        activity=discord.Activity(type=discord.ActivityType.watching, name="votre serveur"))
 
 _en_cours: set = set()
 
@@ -1684,16 +1916,23 @@ async def on_message(message):
                             pass
                 return  # Ne pas traiter le reste pour les messages captcha
 
-        # Anti-invite
-        if cfg.get("anti_invite") and INVITE_RE.search(message.content):
+        # Anti-lien
+        if anti_link_enabled(cfg) and contains_forbidden_link(message.content):
             if not message.author.guild_permissions.manage_messages:
                 try:
                     await message.delete()
                 except Exception:
                     pass
-                e = EG("🚫 Invitation supprimée",
-                        f"{message.author.mention}, les liens d'invitation ne sont pas autorisés.", 0xED4245, gid)
-                await message.channel.send(embed=e, delete_after=8)
+                e = EG("Lien supprime", f"{message.author.mention}, les liens ne sont pas autorises.", 0xED4245, gid)
+                try:
+                    await message.channel.send(embed=e, delete_after=8, allowed_mentions=discord.AllowedMentions.none())
+                except Exception:
+                    pass
+                le = E("LOG - Anti-Lien", couleur=0xED4245)
+                le.add_field(name="Membre", value=str(message.author), inline=True)
+                le.add_field(name="ID", value=f"`{message.author.id}`", inline=True)
+                le.add_field(name="Salon", value=message.channel.mention, inline=True)
+                await send_log(message.guild, le)
                 return
 
         # Anti-spam
@@ -1883,23 +2122,13 @@ async def cmd_ticket(i: discord.Interaction):
     try: await i.response.send_message(embed=e, view=VueChoixCategorie(), ephemeral=True)
     except Exception: pass
 
-@bot.tree.command(name="panel", description="⚙️ Panneau d'administration ModBot")
+@bot.tree.command(name="panel", description="Panneau d'administration ModBot")
 @app_commands.checks.has_permissions(administrator=True)
 async def cmd_panel(i: discord.Interaction):
-    gid = str(i.guild.id)
-    custom = get_custom(gid); cfg = get_cfg(gid)
-    e = E("⚙️ Panneau d'administration — ModBot", couleur=0x5865F2)
-    e.set_thumbnail(url=bot.user.display_avatar.url)
-    e.description = (f"Panneau de contrôle de **ModBot** sur **{i.guild.name}**.\n"
-                      f"Toutes les modifications sont **sauvegardées par serveur**.")
-    e.add_field(name="🚫 Mots filtrés", value=f"`{len(INSULTES_BASE)+len(custom)}`", inline=True)
-    e.add_field(name="🛡️ Anti-Raid", value=f"{'🟢 Actif' if cfg.get('antiraid') else '🔴 Inactif'}", inline=True)
-    e.add_field(name="🚫 Anti-Invite", value=f"{'🟢 Actif' if cfg.get('anti_invite') else '🔴 Inactif'}", inline=True)
-    e.add_field(name="🔇 Anti-Spam", value=f"{'🟢 Actif' if cfg.get('anti_spam') else '🔴 Inactif'}", inline=True)
-    e.add_field(name="🔒 Lockdown", value=f"{'🟢 Actif' if cfg.get('lockdown') else '🔴 Inactif'}", inline=True)
-    e.add_field(name="🔔 Staff Alert", value=f"{'🟢 Actif' if cfg.get('staff_alert_enabled') else '🔴 Inactif'}", inline=True)
-    try: await i.response.send_message(embed=e, view=VuePanel(), ephemeral=True)
-    except Exception: pass
+    try:
+        await i.response.send_message(embed=build_main_panel_embed(i.guild), view=VuePanel(), ephemeral=True)
+    except Exception:
+        pass
 
 @bot.tree.command(name="warn", description="⚠️ Donner un avertissement à un membre")
 @app_commands.describe(membre="Le membre à avertir")
@@ -1994,27 +2223,28 @@ async def cmd_massdm(i: discord.Interaction, membre: discord.Member = None):
     try: await i.response.send_modal(ModalMassDM(cibles))
     except Exception: pass
 
-@bot.tree.command(name="translate", description="🌐 Traduire un message")
-@app_commands.describe(message_id="ID du message à traduire", langue="Langue cible")
+@bot.tree.command(name="translate", description="Traduire un message")
+@app_commands.describe(message_id="ID ou lien du message a traduire", langue="Langue cible", salon="Salon si tu utilises seulement l'ID")
 @app_commands.choices(langue=LANGUES_CHOICES)
-async def cmd_translate(i: discord.Interaction, message_id: str, langue: str):
+async def cmd_translate(i: discord.Interaction, message_id: str, langue: str, salon: discord.TextChannel = None):
     await _safe_defer(i)
     gid = str(i.guild.id)
-    try:
-        msg = await i.channel.fetch_message(int(message_id))
-    except Exception:
-        return await i.followup.send("❌ Message introuvable dans ce salon.", ephemeral=True)
-    if not msg.content:
-        return await i.followup.send("❌ Ce message ne contient pas de texte.", ephemeral=True)
-    result = await translate_text(msg.content, langue)
+    msg, err = await fetch_message_for_translate(i, message_id, salon)
+    if err:
+        return await i.followup.send(f"Erreur : {err}", ephemeral=True)
+    source = extract_translatable_text(msg)
+    if not source:
+        return await i.followup.send("Ce message ne contient pas de texte traduisible.", ephemeral=True)
+    result = await translate_text(source, langue)
     if not result["ok"]:
-        return await i.followup.send("❌ Service de traduction indisponible.", ephemeral=True)
-    e = EG("🌐 Traduction", gid=gid)
-    e.add_field(name="📝 Texte original", value=msg.content[:500], inline=False)
-    e.add_field(name="✅ Traduction", value=result["text"][:500], inline=False)
+        return await i.followup.send("Service de traduction indisponible.", ephemeral=True)
+    e = EG("Traduction", gid=gid)
+    e.add_field(name="Texte original", value=source[:900], inline=False)
+    e.add_field(name="Traduction", value=result["text"][:900], inline=False)
     if result.get("details"):
-        e.add_field(name="🔍 Détails", value=result["details"][:200], inline=True)
-    e.add_field(name="👤 Message de", value=str(msg.author), inline=True)
+        e.add_field(name="Details", value=result["details"][:200], inline=True)
+    e.add_field(name="Message de", value=str(msg.author), inline=True)
+    e.add_field(name="Salon", value=getattr(msg.channel, "mention", str(msg.channel)), inline=True)
     await i.followup.send(embed=e, ephemeral=True)
 
 @bot.tree.command(name="avert-count", description="📋 Voir les avertissements d'un membre")
@@ -2150,5 +2380,8 @@ async def cmd_info(i: discord.Interaction):
 # ════════════════════════════════════════════════
 #  LANCEMENT
 # ════════════════════════════════════════════════
+
+if not TOKEN:
+    raise RuntimeError("TOKEN manquant : configure la variable d'environnement TOKEN.")
 
 bot.run(TOKEN)
