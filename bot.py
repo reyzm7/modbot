@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 #  CONFIGURATION
 # ════════════════════════════════════════════════
 
-TOKEN               = os.environ.get("TOKEN", "VOTRE_TOKEN_ICI")
+TOKEN               = os.environ.get("TOKEN", "MTUxMDQwNTIzNTU0NDQyNDYyMA.GOV36l.gSYczZeuVfcNuLNfPXW07N7jROgmZn3JQu2o0Q")
 MAX_AVERT           = 4   # 1=warn  2=mute4h  3=mute24h  4=ban
 LIEN_DEBAN          = "https://discord.gg/CK8CbFtYuv"
 DEFAULT_LOGS        = 1510422154725036062
