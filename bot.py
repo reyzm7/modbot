@@ -169,6 +169,7 @@ SLASH_DESCRIPTIONS = {
     "info-bot": {"fr": "Informations sur le bot", "en": "Bot information"},
     "clear-message": {"fr": "Supprimer 1 a 100 messages du salon", "en": "Delete 1 to 100 channel messages"},
     "clear-all": {"fr": "Supprimer tous les messages du salon", "en": "Delete every channel message"},
+    "clean-doublons": {"fr": "Nettoyer les doublons des messages systeme", "en": "Clean duplicate system messages"},
 }
 
 F_DATA    = "data.json"
@@ -1457,32 +1458,171 @@ async def delete_system_message(guild, key, suffix):
     cfg.pop(ch_key, None)
     set_cfg(guild.id, cfg)
 
+def _has_component_id(message, custom_id):
+    for row in getattr(message, "components", []) or []:
+        for child in getattr(row, "children", []) or []:
+            if getattr(child, "custom_id", None) == custom_id:
+                return True
+    return False
+
+SYSTEM_MESSAGE_RULES = {
+    "salon_tickets": {
+        "component_ids": ["tkt_category_select"],
+        "markers": [
+            "systeme tickets actif",
+            "système tickets actif",
+            "panel tickets est pret",
+            "panel tickets est prêt",
+            "ticket system",
+            "ouvre ton ticket",
+            "ouvrir un ticket de support",
+            "open your ticket",
+            "select the reason",
+            "selectionne la categorie",
+            "sélectionne la catégorie",
+            "selectionner la raison",
+            "sélectionner la raison",
+            "support technique et administratif",
+            "technical and administrative support",
+        ],
+    },
+    "salon_suggestions": {
+        "component_ids": ["suggest_open"],
+        "markers": [
+            "systeme suggestions actif",
+            "système suggestions actif",
+            "les suggestions sont pretes",
+            "les suggestions sont prêtes",
+            "envoyer une suggestion",
+            "faire une suggestion",
+            "submit a suggestion",
+            "suggestions",
+        ],
+    },
+    "salon_reports": {
+        "component_ids": ["rp_bv", "rp_bh", "rp_jv", "rp_jh"],
+        "markers": [
+            "systeme reports actif",
+            "système reports actif",
+            "les reports sont prets",
+            "les reports sont prêts",
+            "que souhaites-tu reporter",
+            "choisis le type de report",
+            "report a bug",
+            "reports",
+        ],
+    },
+    "salon_logs": {
+        "component_ids": [],
+        "markers": [
+            "systeme logs actif",
+            "système logs actif",
+            "les logs seront envoyes",
+            "les logs seront envoyés",
+        ],
+    },
+    "salon_patchnotes": {
+        "component_ids": [],
+        "markers": [
+            "systeme patch notes actif",
+            "système patch notes actif",
+            "les patch notes seront publiees",
+            "les patch notes seront publiées",
+        ],
+    },
+}
+
+def _message_search_blob(message):
+    parts = [message.content or ""]
+    for emb in getattr(message, "embeds", []) or []:
+        parts.extend([
+            emb.title or "",
+            emb.description or "",
+            getattr(emb.author, "name", "") or "",
+            getattr(emb.footer, "text", "") or "",
+        ])
+        for field in emb.fields:
+            parts.append(field.name or "")
+            parts.append(field.value or "")
+    return "\n".join(parts).lower()
+
+def _is_system_message(message, key):
+    try:
+        if not bot.user or message.author.id != bot.user.id:
+            return False
+    except Exception:
+        return False
+    rules = SYSTEM_MESSAGE_RULES.get(key, {})
+    for custom_id in rules.get("component_ids", []):
+        if _has_component_id(message, custom_id):
+            return True
+    blob = _message_search_blob(message)
+    return any(marker in blob for marker in rules.get("markers", []))
+
+async def cleanup_system_messages(guild, channel, key, keep_id=None, limit=500):
+    deleted = 0
+    try:
+        async for message in channel.history(limit=limit):
+            if keep_id and message.id == keep_id:
+                continue
+            if not _is_system_message(message, key):
+                continue
+            try:
+                await message.delete()
+                deleted += 1
+                await asyncio.sleep(0.15)
+            except Exception:
+                pass
+    except Exception:
+            pass
+    return deleted
+
+async def cleanup_configured_system_messages(guild):
+    cfg = get_cfg(guild.id)
+    for key in ("salon_tickets", "salon_suggestions", "salon_reports", "salon_logs", "salon_patchnotes"):
+        ch_id = cfg.get(key)
+        if not ch_id:
+            continue
+        try:
+            channel = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+        except Exception:
+            continue
+        if key in ("salon_tickets", "salon_suggestions", "salon_reports"):
+            await delete_system_message(guild, key, "status")
+            keep_id = get_cfg(guild.id).get(f"{key}_panel_message_id")
+        else:
+            keep_id = get_cfg(guild.id).get(f"{key}_status_message_id")
+        await cleanup_system_messages(guild, channel, key, keep_id=keep_id)
+
 async def setup_configured_channel(guild, channel, key, label):
     gid = str(guild.id)
     if key == "salon_tickets":
         await delete_system_message(guild, key, "status")
         e = build_ticket_panel_embed(guild)
-        await publish_or_update_system_message(guild, channel, key, "panel", e, VueChoixCategorie(gid))
+        msg = await publish_or_update_system_message(guild, channel, key, "panel", e, VueChoixCategorie(gid))
+        await cleanup_system_messages(guild, channel, key, keep_id=msg.id)
         return "Le systeme Tickets est actif et le panel est disponible."
     if key == "salon_suggestions":
+        await delete_system_message(guild, key, "status")
         e = EG("Suggestions", "Clique sur le bouton pour envoyer une suggestion.", gid=gid)
-        await publish_or_update_system_message(guild, channel, key, "panel", e, VueSuggestionLauncher())
-        status = EG("Systeme Suggestions actif", f"Les suggestions sont pretes dans {channel.mention}.", 0x43B581, gid)
-        await publish_or_update_system_message(guild, channel, key, "status", status)
+        msg = await publish_or_update_system_message(guild, channel, key, "panel", e, VueSuggestionLauncher())
+        await cleanup_system_messages(guild, channel, key, keep_id=msg.id)
         return "Le systeme Suggestions est actif."
     if key == "salon_reports":
+        await delete_system_message(guild, key, "status")
         e = EG("Reports", "Choisis le type de report avec les boutons ci-dessous.", gid=gid)
-        await publish_or_update_system_message(guild, channel, key, "panel", e, VueSelectionReport())
-        status = EG("Systeme Reports actif", f"Les reports sont prets dans {channel.mention}.", 0x43B581, gid)
-        await publish_or_update_system_message(guild, channel, key, "status", status)
+        msg = await publish_or_update_system_message(guild, channel, key, "panel", e, VueSelectionReport())
+        await cleanup_system_messages(guild, channel, key, keep_id=msg.id)
         return "Le systeme Reports est actif."
     if key == "salon_logs":
         status = EG("Systeme Logs actif", f"Les logs seront envoyes dans {channel.mention}.", 0x43B581, gid)
-        await publish_or_update_system_message(guild, channel, key, "status", status)
+        msg = await publish_or_update_system_message(guild, channel, key, "status", status)
+        await cleanup_system_messages(guild, channel, key, keep_id=msg.id)
         return "Le systeme Logs est actif."
     if key == "salon_patchnotes":
         status = EG("Systeme Patch Notes actif", f"Les patch notes seront publiees dans {channel.mention}.", 0x43B581, gid)
-        await publish_or_update_system_message(guild, channel, key, "status", status)
+        msg = await publish_or_update_system_message(guild, channel, key, "status", status)
+        await cleanup_system_messages(guild, channel, key, keep_id=msg.id)
         return "Le systeme Patch Notes est actif."
     return f"{label} configure dans {channel.mention}."
 
@@ -1493,7 +1633,8 @@ async def refresh_ticket_panel_message(guild):
         channel = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
     except Exception:
         return None
-    await publish_or_update_system_message(
+    await delete_system_message(guild, "salon_tickets", "status")
+    msg = await publish_or_update_system_message(
         guild,
         channel,
         "salon_tickets",
@@ -1501,6 +1642,7 @@ async def refresh_ticket_panel_message(guild):
         build_ticket_panel_embed(guild),
         VueChoixCategorie(gid),
     )
+    await cleanup_system_messages(guild, channel, "salon_tickets", keep_id=msg.id)
     return channel
 
 #  PANEL MODALS
@@ -2658,6 +2800,10 @@ async def on_ready():
                 await sync_guild_command_language(guild)
             except Exception as err:
                 print(f"sync langue {guild.id}: {err}")
+            try:
+                await cleanup_configured_system_messages(guild)
+            except Exception as err:
+                print(f"cleanup doublons {guild.id}: {err}")
         print(f"ModBot connecte : {bot.user}")
         print(f"{len(synced)} commandes synchronisees")
     except Exception as e:
@@ -2981,6 +3127,16 @@ async def cmd_panel(i: discord.Interaction):
         await i.response.send_message(embed=build_main_panel_embed(i.guild), view=VuePanel(i.guild.id), ephemeral=True)
     except Exception:
         pass
+
+@bot.tree.command(name="clean-doublons", description="Nettoyer les doublons des messages systeme")
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_clean_doublons(i: discord.Interaction):
+    await _safe_defer(i)
+    gid = str(i.guild.id)
+    await cleanup_configured_system_messages(i.guild)
+    title = "Doublons nettoyes" if get_lang(gid) == "fr" else "Duplicates cleaned"
+    desc = "Les anciens messages systeme en double ont ete supprimes dans les salons configures." if get_lang(gid) == "fr" else "Duplicate system messages were removed from configured channels."
+    await i.followup.send(embed=EG(title, desc, 0x43B581, gid), ephemeral=True)
 
 @bot.tree.command(name="clear-message", description="Supprimer 1 a 100 messages du salon")
 @app_commands.describe(nombre="Nombre de messages a supprimer entre 1 et 100")
