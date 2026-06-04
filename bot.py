@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json, os, re, asyncio, io, aiohttp, random, string, html
+import json, os, re, asyncio, io, aiohttp, random, string, html, unicodedata
 from datetime import datetime, timezone, timedelta
 
 # ════════════════════════════════════════════════
@@ -38,6 +38,91 @@ LANGUES_CHOICES = [
     app_commands.Choice(name="🇷🇺 Russe",       value="ru"),
     app_commands.Choice(name="🇸🇦 Arabe",       value="ar"),
 ]
+
+BOT_LANGUAGE_CHOICES = [
+    discord.SelectOption(label="Français", value="fr", emoji="🇫🇷", description="Messages et panels en français"),
+    discord.SelectOption(label="English", value="en", emoji="🇬🇧", description="Bot messages and panels in English"),
+]
+
+BOT_LANGUAGES = {
+    "fr": "🇫🇷 Français",
+    "en": "🇬🇧 English",
+}
+DEFAULT_LANG = "fr"
+
+TEXTS = {
+    "main_panel_title": {"fr": "Panel d'administration", "en": "Administration panel"},
+    "main_panel_desc": {
+        "fr": "Panneau de controle de **{bot_name}** sur **{guild_name}**. Les modifications sont sauvegardees par serveur et les etats se rafraichissent ici.",
+        "en": "Control panel for **{bot_name}** on **{guild_name}**. Changes are saved per server and statuses refresh here.",
+    },
+    "language": {"fr": "Langue", "en": "Language"},
+    "language_panel_title": {"fr": "Langue du bot", "en": "Bot language"},
+    "language_panel_desc": {"fr": "Choisis la langue utilisee par le bot sur ce serveur.", "en": "Choose the language used by the bot on this server."},
+    "language_current": {"fr": "Langue actuelle", "en": "Current language"},
+    "language_updated": {"fr": "Langue mise a jour", "en": "Language updated"},
+    "slash_sync_ok": {"fr": "Les descriptions des slash commandes ont ete synchronisees pour ce serveur.", "en": "Slash command descriptions were synced for this server."},
+    "slash_sync_fail": {"fr": "La langue est sauvegardee, mais la synchronisation des slash commandes a echoue : {error}", "en": "The language was saved, but slash command sync failed: {error}"},
+    "ticket_panel_author": {"fr": "{guild_name} Ticket System", "en": "{guild_name} Ticket System"},
+    "ticket_panel_title": {"fr": "Ouvre ton ticket", "en": "Open your ticket"},
+    "ticket_panel_desc": {
+        "fr": "Merci de selectionner la raison de ta demande via le menu ci-dessous. Un membre du staff viendra rapidement te repondre. Pense a rester clair, respectueux et precis.",
+        "en": "Select the reason for your request from the menu below. A staff member will reply as soon as possible. Please stay clear, respectful and precise.",
+    },
+    "ticket_rules_title": {"fr": "Rappel avant de creer un ticket", "en": "Reminder before creating a ticket"},
+    "ticket_rules_desc": {
+        "fr": "Ne spammez pas le systeme - Precisez bien votre souci dans le ticket - Une seule demande par ticket - Si vous ouvrez un ticket sans raison, il sera ferme automatiquement.",
+        "en": "Do not spam the system - Explain your issue clearly in the ticket - One request per ticket - Tickets opened without a reason may be closed automatically.",
+    },
+    "ticket_menu_placeholder": {"fr": "Merci de selectionner la raison de ta demande", "en": "Select the reason for your request"},
+    "ticket_panel_footer": {"fr": "{guild_name} - Support technique et administratif", "en": "{guild_name} - Technical and administrative support"},
+    "ticket_config_title": {"fr": "Configuration du systeme de ticket", "en": "Ticket system configuration"},
+    "ticket_config_desc": {"fr": "Modifie le message publie et les options du menu ticket.", "en": "Edit the published message and ticket menu options."},
+    "ticket_deployed_title": {"fr": "Systeme tickets deploye", "en": "Ticket system deployed"},
+    "ticket_deployed_desc": {"fr": "Le message de ticket a ete poste ou mis a jour dans {channel}.", "en": "The ticket message was posted or updated in {channel}."},
+    "ticket_created_title": {"fr": "Ticket cree !", "en": "Ticket created!"},
+    "ticket_created_desc": {"fr": "Ton ticket : {channel}", "en": "Your ticket: {channel}"},
+    "ticket_welcome_title": {"fr": "Ticket - {category}", "en": "Ticket - {category}"},
+    "ticket_welcome_desc": {"fr": "Bienvenue {user} ! Un membre du staff arrivera tres prochainement.", "en": "Welcome {user}! A staff member will be with you soon."},
+    "category": {"fr": "Categorie", "en": "Category"},
+    "creator": {"fr": "Createur", "en": "Creator"},
+    "opened_at": {"fr": "Ouvert le", "en": "Opened at"},
+    "reason": {"fr": "Motif", "en": "Reason"},
+    "priority": {"fr": "Priorite", "en": "Priority"},
+    "priority_1": {"fr": "1 - faible", "en": "1 - low"},
+    "priority_2": {"fr": "2 - normale", "en": "2 - normal"},
+    "priority_3": {"fr": "3 - haute", "en": "3 - high"},
+    "permission_denied": {"fr": "Permission refusee.", "en": "Permission denied."},
+    "clear_done": {"fr": "{count} message(s) supprime(s).", "en": "{count} message(s) deleted."},
+    "clear_invalid": {"fr": "Choisis un nombre entre 1 et 100.", "en": "Choose a number between 1 and 100."},
+    "clear_all_confirm": {"fr": "Confirmer la suppression de tous les messages de ce salon ?", "en": "Confirm deleting every message in this channel?"},
+    "clear_all_done": {"fr": "Nettoyage termine : {count} message(s) supprime(s).", "en": "Cleanup finished: {count} message(s) deleted."},
+    "channel_not_supported": {"fr": "Ce salon ne supporte pas cette action.", "en": "This channel does not support this action."},
+}
+
+SLASH_DESCRIPTIONS = {
+    "insultes": {"fr": "Voir la liste des mots interdits", "en": "View the forbidden word list"},
+    "suggest": {"fr": "Faire une suggestion", "en": "Submit a suggestion"},
+    "report": {"fr": "Signaler un bug ou un joueur", "en": "Report a bug or a player"},
+    "patchnotes": {"fr": "Publier des patch notes", "en": "Publish patch notes"},
+    "ticket": {"fr": "Deployer le systeme de ticket dans ce salon", "en": "Deploy the ticket system in this channel"},
+    "panel": {"fr": "Panneau d'administration du bot", "en": "Bot administration panel"},
+    "warn": {"fr": "Donner un avertissement a un membre", "en": "Warn a member"},
+    "ban": {"fr": "Bannir manuellement un membre", "en": "Manually ban a member"},
+    "deban": {"fr": "Debannir un membre par son ID", "en": "Unban a member by ID"},
+    "annonce": {"fr": "Publier une annonce officielle", "en": "Publish an official announcement"},
+    "massdm": {"fr": "Envoyer un DM en masse", "en": "Send a mass DM"},
+    "translate": {"fr": "Traduire un message", "en": "Translate a message"},
+    "avert-count": {"fr": "Voir les avertissements d'un membre", "en": "View a member's warnings"},
+    "profilestats": {"fr": "Voir les statistiques d'un membre", "en": "View a member's statistics"},
+    "serverstats": {"fr": "Voir les statistiques du serveur", "en": "View server statistics"},
+    "modstats": {"fr": "Voir les statistiques de moderation", "en": "View moderation statistics"},
+    "ban-list": {"fr": "Voir la liste des membres bannis", "en": "View the ban list"},
+    "reset-avert": {"fr": "Reinitialiser les avertissements", "en": "Reset warnings"},
+    "info-bot": {"fr": "Informations sur le bot", "en": "Bot information"},
+    "clear-message": {"fr": "Supprimer 1 a 100 messages du salon", "en": "Delete 1 to 100 channel messages"},
+    "clear-all": {"fr": "Supprimer tous les messages du salon", "en": "Delete every channel message"},
+}
 
 F_DATA    = "data.json"
 F_BANS    = "bans.json"
@@ -103,11 +188,42 @@ def get_ch(gid, key, default):
     v = get_cfg(gid).get(key)
     return v if v else default
 
+def get_lang(gid):
+    cfg = get_cfg(gid) if gid else {}
+    lang = cfg.get("langue") or DEFAULT_LANG
+    return lang if lang in BOT_LANGUAGES else DEFAULT_LANG
+
+def tr(gid, key, **kwargs):
+    lang = get_lang(gid)
+    data = TEXTS.get(key, {})
+    text = data.get(lang) or data.get(DEFAULT_LANG) or key
+    try:
+        return text.format(**kwargs)
+    except Exception:
+        return text
+
+def format_lang(gid):
+    return BOT_LANGUAGES.get(get_lang(gid), BOT_LANGUAGES[DEFAULT_LANG])
+
+def get_bot_display_name(gid=None, guild=None):
+    cfg = get_cfg(gid) if gid else {}
+    name = (cfg.get("bot_name") or "").strip()
+    if name:
+        return name[:80]
+    if guild and guild.me:
+        return guild.me.display_name
+    try:
+        return bot.user.display_name if bot.user else "ModBot"
+    except Exception:
+        return "ModBot"
+
 def get_ecfg(gid):
     cfg = get_cfg(gid)
+    bot_name = get_bot_display_name(gid)
     return {
+        "name":        bot_name,
         "color":       cfg.get("embed_color",  0x5865F2),
-        "footer":      cfg.get("embed_footer", "ModBot - Protection de votre communaute"),
+        "footer":      cfg.get("embed_footer") or f"{bot_name} - Protection de votre communaute",
         "logo":        cfg.get("embed_logo", None),
         "banner":      cfg.get("embed_banner", None),
         "footer_icon": cfg.get("embed_footer_icon", None),
@@ -159,20 +275,24 @@ def build_main_panel_embed(guild):
     gid = str(guild.id)
     custom = get_custom(gid)
     cfg = get_cfg(gid)
-    e = E("Panel d'administration - ModBot", couleur=0x5865F2)
+    bot_name = get_bot_display_name(gid, guild)
+    e = E(f"{tr(gid, 'main_panel_title')} - {bot_name}", couleur=0x5865F2)
+    logo = cfg.get("embed_logo")
     try:
-        if bot.user:
+        if logo:
+            e.set_thumbnail(url=logo)
+        elif bot.user:
             e.set_thumbnail(url=bot.user.display_avatar.url)
     except Exception:
         pass
-    e.description = (f"Panneau de controle de **ModBot** sur **{guild.name}**.\n"
-                     "Les modifications sont sauvegardees par serveur et les etats se rafraichissent ici.")
+    e.description = tr(gid, "main_panel_desc", bot_name=bot_name, guild_name=guild.name)
     e.add_field(name="Mots filtres", value=f"`{len(INSULTES_BASE)+len(custom)}`", inline=True)
     e.add_field(name="Anti-Raid", value=status_txt(cfg.get("antiraid")), inline=True)
     e.add_field(name="Anti-Lien", value=status_txt(anti_link_enabled(cfg)), inline=True)
     e.add_field(name="Anti-Spam", value=status_txt(cfg.get("anti_spam")), inline=True)
     e.add_field(name="Lockdown", value=status_txt(cfg.get("lockdown")), inline=True)
     e.add_field(name="Staff Alert", value=status_txt(cfg.get("staff_alert_enabled")), inline=True)
+    e.add_field(name=tr(gid, "language"), value=format_lang(gid), inline=True)
     return e
 
 def build_security_embed(guild):
@@ -213,45 +333,134 @@ def build_salons_embed(guild, selected_label="Tickets"):
         e.add_field(name=label, value=ch.mention if ch else "Non defini", inline=True)
     return e
 
+MAX_TICKET_OPTIONS = 25
+PRIORITY_INFO = {
+    1: {"emoji": "🟢", "color": 0x43B581},
+    2: {"emoji": "🟡", "color": 0xFFD700},
+    3: {"emoji": "🔴", "color": 0xED4245},
+}
+
 DEFAULT_TICKET_QUESTIONS = [
-    {"label": "🔓 Déban", "desc": "Contester un bannissement"},
-    {"label": "❓ Question", "desc": "Poser une question"},
-    {"label": "🤖 Mise en place du bot", "desc": "Installer ModBot"},
-    {"label": "🏛️ Fondation", "desc": "Soutenir la fondation"},
+    {"label": "Support technique", "desc": "Probleme technique, bug ou aide avec le bot", "priority": 2},
+    {"label": "Question", "desc": "Poser une question au staff", "priority": 1},
+    {"label": "Deban", "desc": "Contester un bannissement", "priority": 3},
+    {"label": "Administration", "desc": "Demande administrative ou organisation", "priority": 2},
 ]
+
+def clean_short_text(value, fallback, max_len):
+    value = str(value or "").strip()
+    return (value or fallback)[:max_len]
+
+def normalize_priority(value, default=1):
+    try:
+        p = int(str(value).strip())
+    except Exception:
+        p = default
+    return min(3, max(1, p))
+
+def priority_emoji(priority):
+    return PRIORITY_INFO.get(normalize_priority(priority), PRIORITY_INFO[1])["emoji"]
+
+def priority_label(gid, priority):
+    priority = normalize_priority(priority)
+    return f"{priority_emoji(priority)} {tr(gid, f'priority_{priority}')}"
+
+def normalize_ticket_question(item, fallback=None):
+    fallback = fallback or {}
+    return {
+        "label": clean_short_text(item.get("label") if isinstance(item, dict) else None, fallback.get("label") or "Ticket", 80),
+        "desc": clean_short_text(item.get("desc") if isinstance(item, dict) else None, fallback.get("desc") or "Ouvrir un ticket", 100),
+        "priority": normalize_priority(item.get("priority") if isinstance(item, dict) else None, fallback.get("priority", 1)),
+    }
 
 def get_ticket_questions(gid):
     cfg = get_cfg(gid) if gid else {}
-    saved = cfg.get("ticket_questions") or []
+    saved = cfg.get("ticket_questions")
+    source = saved if isinstance(saved, list) and saved else DEFAULT_TICKET_QUESTIONS
     questions = []
-    for idx, default in enumerate(DEFAULT_TICKET_QUESTIONS):
-        item = saved[idx] if idx < len(saved) and isinstance(saved[idx], dict) else {}
-        questions.append({
-            "label": (item.get("label") or default["label"])[:80],
-            "desc": (item.get("desc") or default["desc"])[:1000],
-        })
-    return questions
+    for idx, item in enumerate(source[:MAX_TICKET_OPTIONS]):
+        fallback = DEFAULT_TICKET_QUESTIONS[idx] if idx < len(DEFAULT_TICKET_QUESTIONS) else DEFAULT_TICKET_QUESTIONS[0]
+        questions.append(normalize_ticket_question(item if isinstance(item, dict) else {}, fallback))
+    return questions or [normalize_ticket_question(DEFAULT_TICKET_QUESTIONS[0])]
+
+def set_ticket_questions(gid, questions):
+    cfg = get_cfg(gid)
+    cfg["ticket_questions"] = [normalize_ticket_question(q) for q in questions[:MAX_TICKET_OPTIONS]]
+    set_cfg(gid, cfg)
+
+def ticket_option_summary(gid, questions):
+    lines = []
+    for idx, q in enumerate(questions, start=1):
+        lines.append(f"`{idx}` {priority_emoji(q['priority'])} **{q['label']}** - {q['desc'][:80]}")
+    value = "\n".join(lines) if lines else "Aucune option configuree."
+    return value[:1024]
+
+def slugify_ticket_label(label):
+    raw = unicodedata.normalize("NFKD", str(label)).encode("ascii", "ignore").decode("ascii")
+    raw = re.sub(r"[^a-zA-Z0-9]+", "-", raw.lower()).strip("-")
+    return raw or "ticket"
+
+def ticket_channel_name(label, number, priority):
+    dot = priority_emoji(priority)
+    prefix = f"{dot}-ticket-"
+    num = str(number)
+    slug = slugify_ticket_label(label)
+    max_slug = max(8, 92 - len(prefix) - len(num))
+    return f"{prefix}{slug[:max_slug]}-{num}"
 
 def build_ticket_panel_embed(guild):
     gid = str(guild.id)
     cfg = get_cfg(gid)
-    e = EG(
-        cfg.get("ticket_panel_title", "🎫 Ouvrir un ticket de support"),
-        cfg.get("ticket_panel_desc", "Sélectionne la catégorie de ta demande."),
-        gid=gid,
-    )
-    for q in get_ticket_questions(gid):
-        e.add_field(name=q["label"], value=q["desc"] or "Ouvrir un ticket", inline=True)
+    logo = cfg.get("embed_logo") or (guild.icon.url if guild.icon else None)
+    author = cfg.get("ticket_panel_author") or tr(gid, "ticket_panel_author", guild_name=guild.name)
+    title = cfg.get("ticket_panel_title") or tr(gid, "ticket_panel_title")
+    desc = cfg.get("ticket_panel_desc") or tr(gid, "ticket_panel_desc")
+    e = EG(title, desc, gid=gid)
+    try:
+        if logo:
+            e.set_author(name=author[:256], icon_url=logo)
+        else:
+            e.set_author(name=author[:256])
+    except Exception:
+        pass
+    rules_title = cfg.get("ticket_rules_title") or tr(gid, "ticket_rules_title")
+    rules_desc = cfg.get("ticket_rules_desc") or tr(gid, "ticket_rules_desc")
+    if rules_desc:
+        e.add_field(name=rules_title[:256], value=rules_desc[:1024], inline=False)
+    footer = cfg.get("ticket_panel_footer") or tr(gid, "ticket_panel_footer", guild_name=guild.name)
+    try:
+        if logo:
+            e.set_footer(text=footer[:2048], icon_url=logo)
+        else:
+            e.set_footer(text=footer[:2048])
+    except Exception:
+        pass
+    return e
+
+def build_ticket_config_embed(guild):
+    gid = str(guild.id)
+    cfg = get_cfg(gid)
+    questions = get_ticket_questions(gid)
+    e = E(tr(gid, "ticket_config_title"), tr(gid, "ticket_config_desc"), 0x5865F2)
+    e.add_field(name="Message", value=(
+        f"**Auteur :** {(cfg.get('ticket_panel_author') or tr(gid, 'ticket_panel_author', guild_name=guild.name))[:80]}\n"
+        f"**Titre :** {(cfg.get('ticket_panel_title') or tr(gid, 'ticket_panel_title'))[:80]}\n"
+        f"**Options :** `{len(questions)}/{MAX_TICKET_OPTIONS}`"
+    ), inline=False)
+    e.add_field(name="Options du menu", value=ticket_option_summary(gid, questions), inline=False)
     return e
 
 def build_personnalisation_embed(guild):
     cfg = get_cfg(guild.id)
-    e = EG("Personnalisation des embeds", "Choisis une couleur avec la palette ou utilise les boutons Upload pour les visuels.", gid=str(guild.id))
+    gid = str(guild.id)
+    e = EG("Personnalisation du bot", "Configure l'apparence utilisee par le bot sur ce serveur.", gid=gid)
+    e.add_field(name="Nom du bot", value=get_bot_display_name(gid, guild), inline=True)
     e.add_field(name="Couleur", value=f"`#{cfg.get('embed_color', 0x5865F2):06X}`", inline=True)
-    e.add_field(name="Footer", value=cfg.get("embed_footer", "ModBot - Protection de votre communaute")[:100], inline=True)
-    e.add_field(name="Logo", value="Configure" if cfg.get("embed_logo") else "Non defini", inline=True)
-    e.add_field(name="Banniere", value="Configuree" if cfg.get("embed_banner") else "Non definie", inline=True)
+    e.add_field(name="Footer", value=cfg.get("embed_footer", f"{get_bot_display_name(gid, guild)} - Protection de votre communaute")[:100], inline=True)
+    e.add_field(name="Logo du bot", value="Configure" if cfg.get("embed_logo") else "Non defini", inline=True)
+    e.add_field(name="Banniere du bot", value="Configuree" if cfg.get("embed_banner") else "Non definie", inline=True)
     e.add_field(name="Icone footer", value="Configuree" if cfg.get("embed_footer_icon") else "Non definie", inline=True)
+    e.add_field(name=tr(gid, "language"), value=format_lang(gid), inline=True)
     return e
 
 async def refresh_interaction_message(interaction, embed, view):
@@ -907,31 +1116,41 @@ class VueTicket(discord.ui.View):
         finally:
             _tickets_closing.discard(cid)
 
+class TicketCategorySelect(discord.ui.Select):
+    def __init__(self, gid=None):
+        self.gid = str(gid) if gid else None
+        questions = get_ticket_questions(self.gid)
+        options = []
+        for idx, q in enumerate(questions[:MAX_TICKET_OPTIONS]):
+            options.append(discord.SelectOption(
+                label=q["label"][:100],
+                description=(q.get("desc") or "Ouvrir un ticket")[:100],
+                value=str(idx),
+                emoji=priority_emoji(q.get("priority", 1)),
+            ))
+        if not options:
+            options = [discord.SelectOption(label="Ticket", description="Ouvrir un ticket", value="0", emoji="🟢")]
+        placeholder = tr(self.gid, "ticket_menu_placeholder") if self.gid else TEXTS["ticket_menu_placeholder"][DEFAULT_LANG]
+        super().__init__(placeholder=placeholder[:150], options=options, min_values=1, max_values=1, custom_id="tkt_category_select", row=0)
+
+    async def callback(self, i: discord.Interaction):
+        questions = get_ticket_questions(i.guild.id)
+        try:
+            idx = int(self.values[0])
+        except Exception:
+            idx = 0
+        if idx < 0 or idx >= len(questions):
+            return await i.response.send_message("Option de ticket introuvable.", ephemeral=True)
+        try:
+            await i.response.send_modal(ModalMotifTicket(questions[idx]))
+        except Exception:
+            pass
+
 class VueChoixCategorie(discord.ui.View):
     def __init__(self, gid=None):
         super().__init__(timeout=None)
         self.gid = str(gid) if gid else None
-        questions = get_ticket_questions(self.gid)
-        buttons = [self.deban, self.question, self.setup, self.fondation]
-        for button, question in zip(buttons, questions):
-            button.label = question["label"][:80]
-
-    async def _open(self, i, index):
-        questions = get_ticket_questions(i.guild.id)
-        cat = questions[index]["label"]
-        try:
-            await i.response.send_modal(ModalMotifTicket(cat))
-        except Exception:
-            pass
-
-    @discord.ui.button(label="🔓 Déban", style=discord.ButtonStyle.danger, custom_id="tkt_dbn", row=0)
-    async def deban(self, i, b): await self._open(i, 0)
-    @discord.ui.button(label="❓ Question", style=discord.ButtonStyle.primary, custom_id="tkt_qst", row=0)
-    async def question(self, i, b): await self._open(i, 1)
-    @discord.ui.button(label="🤖 Mise en place du bot", style=discord.ButtonStyle.success, custom_id="tkt_bot", row=1)
-    async def setup(self, i, b): await self._open(i, 2)
-    @discord.ui.button(label="🏛️ Fondation", style=discord.ButtonStyle.secondary, custom_id="tkt_fnd", row=1)
-    async def fondation(self, i, b): await self._open(i, 3)
+        self.add_item(TicketCategorySelect(self.gid))
 
 # ════════════════════════════════════════════════
 #  VIEW — REPORT (persistante ✅) — 4 boutons directs
@@ -1044,8 +1263,6 @@ async def setup_configured_channel(guild, channel, key, label):
     if key == "salon_tickets":
         e = build_ticket_panel_embed(guild)
         await publish_or_update_system_message(guild, channel, key, "panel", e, VueChoixCategorie(gid))
-        status = EG("Systeme Tickets actif", f"Le panel tickets est pret dans {channel.mention}.", 0x43B581, gid)
-        await publish_or_update_system_message(guild, channel, key, "status", status)
         return "Le systeme Tickets est actif et le panel est disponible."
     if key == "salon_suggestions":
         e = EG("Suggestions", "Clique sur le bouton pour envoyer une suggestion.", gid=gid)
@@ -1068,6 +1285,23 @@ async def setup_configured_channel(guild, channel, key, label):
         await publish_or_update_system_message(guild, channel, key, "status", status)
         return "Le systeme Patch Notes est actif."
     return f"{label} configure dans {channel.mention}."
+
+async def refresh_ticket_panel_message(guild):
+    gid = str(guild.id)
+    ch_id = get_ch(gid, "salon_tickets", DEFAULT_TICKETS)
+    try:
+        channel = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+    except Exception:
+        return None
+    await publish_or_update_system_message(
+        guild,
+        channel,
+        "salon_tickets",
+        "panel",
+        build_ticket_panel_embed(guild),
+        VueChoixCategorie(gid),
+    )
+    return channel
 
 #  PANEL MODALS
 # ════════════════════════════════════════════════
@@ -1191,6 +1425,117 @@ class ModalCreerSalon(discord.ui.Modal, title="Creer un salon"):
             await i.followup.send(embed=E("Salon cree", f"{ch.mention} -> **{self.lbl}**\n{msg}", 0x43B581), ephemeral=True)
         except Exception as ex:
             await i.followup.send(f"Erreur : {ex}", ephemeral=True)
+
+class ModalBotIdentity(discord.ui.Modal, title="Identite du bot"):
+    nom = discord.ui.TextInput(label="Nom du bot sur ce serveur", placeholder="Ex : DraftBot", required=False, max_length=32)
+
+    async def on_submit(self, i: discord.Interaction):
+        await _safe_defer(i)
+        name = str(self.nom.value or "").strip()
+        cfg = get_cfg(i.guild.id)
+        if name:
+            cfg["bot_name"] = name[:32]
+        else:
+            cfg.pop("bot_name", None)
+        set_cfg(i.guild.id, cfg)
+        try:
+            await i.guild.me.edit(nick=(name[:32] if name else None), reason="Personnalisation du bot")
+        except Exception:
+            pass
+        await i.followup.send(embed=build_personnalisation_embed(i.guild), ephemeral=True)
+
+class ModalTicketPanelText(discord.ui.Modal, title="Message du panel ticket"):
+    author = discord.ui.TextInput(label="Auteur / petit titre", placeholder="Ex : VPG Belgique Ticket System", required=False, max_length=120)
+    title_input = discord.ui.TextInput(label="Titre", placeholder="Ex : Ouvre ton ticket", required=False, max_length=120)
+    description = discord.ui.TextInput(label="Description du haut", placeholder="Texte affiche sous le titre", required=False, style=discord.TextStyle.paragraph, max_length=1000)
+    rules_title = discord.ui.TextInput(label="Titre du rappel", placeholder="Ex : Rappel avant de creer un ticket", required=False, max_length=120)
+    rules_desc = discord.ui.TextInput(label="Description du rappel", placeholder="Regles ou rappel affiche dans le message", required=False, style=discord.TextStyle.paragraph, max_length=1000)
+
+    async def on_submit(self, i: discord.Interaction):
+        await _safe_defer(i)
+        cfg = get_cfg(i.guild.id)
+        values = {
+            "ticket_panel_author": self.author.value,
+            "ticket_panel_title": self.title_input.value,
+            "ticket_panel_desc": self.description.value,
+            "ticket_rules_title": self.rules_title.value,
+            "ticket_rules_desc": self.rules_desc.value,
+        }
+        for key, value in values.items():
+            value = str(value or "").strip()
+            if value:
+                cfg[key] = value
+        set_cfg(i.guild.id, cfg)
+        await refresh_ticket_panel_message(i.guild)
+        await i.followup.send(embed=build_ticket_config_embed(i.guild), ephemeral=True)
+
+class ModalAjouterTicketOption(discord.ui.Modal, title="Ajouter une option ticket"):
+    label = discord.ui.TextInput(label="Nom affiche", placeholder="Ex : Support technique", max_length=80)
+    desc = discord.ui.TextInput(label="Description", placeholder="Ex : Probleme technique ou bug", required=False, max_length=100)
+    priority = discord.ui.TextInput(label="Priorite 1, 2 ou 3", placeholder="1 = vert, 2 = jaune, 3 = rouge", required=False, max_length=1)
+
+    async def on_submit(self, i: discord.Interaction):
+        await _safe_defer(i)
+        gid = str(i.guild.id)
+        questions = get_ticket_questions(gid)
+        if len(questions) >= MAX_TICKET_OPTIONS:
+            return await i.followup.send(f"Maximum {MAX_TICKET_OPTIONS} options.", ephemeral=True)
+        questions.append(normalize_ticket_question({
+            "label": self.label.value,
+            "desc": self.desc.value,
+            "priority": self.priority.value,
+        }))
+        set_ticket_questions(gid, questions)
+        await refresh_ticket_panel_message(i.guild)
+        await i.followup.send(embed=build_ticket_config_embed(i.guild), ephemeral=True)
+
+class ModalModifierTicketOption(discord.ui.Modal, title="Modifier une option ticket"):
+    index = discord.ui.TextInput(label="Numero de l'option", placeholder="Ex : 1", max_length=2)
+    label = discord.ui.TextInput(label="Nouveau nom", placeholder="Laisse vide pour garder", required=False, max_length=80)
+    desc = discord.ui.TextInput(label="Nouvelle description", placeholder="Laisse vide pour garder", required=False, max_length=100)
+    priority = discord.ui.TextInput(label="Priorite 1, 2 ou 3", placeholder="Laisse vide pour garder", required=False, max_length=1)
+
+    async def on_submit(self, i: discord.Interaction):
+        await _safe_defer(i)
+        gid = str(i.guild.id)
+        questions = get_ticket_questions(gid)
+        try:
+            idx = int(str(self.index.value).strip()) - 1
+        except Exception:
+            return await i.followup.send("Numero invalide.", ephemeral=True)
+        if idx < 0 or idx >= len(questions):
+            return await i.followup.send("Option introuvable.", ephemeral=True)
+        q = dict(questions[idx])
+        if str(self.label.value or "").strip():
+            q["label"] = str(self.label.value).strip()
+        if str(self.desc.value or "").strip():
+            q["desc"] = str(self.desc.value).strip()
+        if str(self.priority.value or "").strip():
+            q["priority"] = normalize_priority(self.priority.value, q.get("priority", 1))
+        questions[idx] = normalize_ticket_question(q)
+        set_ticket_questions(gid, questions)
+        await refresh_ticket_panel_message(i.guild)
+        await i.followup.send(embed=build_ticket_config_embed(i.guild), ephemeral=True)
+
+class ModalSupprimerTicketOption(discord.ui.Modal, title="Supprimer une option ticket"):
+    index = discord.ui.TextInput(label="Numero de l'option", placeholder="Ex : 2", max_length=2)
+
+    async def on_submit(self, i: discord.Interaction):
+        await _safe_defer(i)
+        gid = str(i.guild.id)
+        questions = get_ticket_questions(gid)
+        if len(questions) <= 1:
+            return await i.followup.send("Garde au moins une option de ticket.", ephemeral=True)
+        try:
+            idx = int(str(self.index.value).strip()) - 1
+        except Exception:
+            return await i.followup.send("Numero invalide.", ephemeral=True)
+        if idx < 0 or idx >= len(questions):
+            return await i.followup.send("Option introuvable.", ephemeral=True)
+        removed = questions.pop(idx)
+        set_ticket_questions(gid, questions)
+        await refresh_ticket_panel_message(i.guild)
+        await i.followup.send(embed=E("Option supprimee", f"**{removed['label']}** a ete retiree.", 0x43B581), ephemeral=True)
 
 class ModalPersonnalisation(discord.ui.Modal, title="Texte du footer"):
     footer = discord.ui.TextInput(label="Texte footer", placeholder="Ex : Mon Serveur - Moderation", required=False, max_length=100)
@@ -1360,6 +1705,15 @@ class VuePanelSalons(discord.ui.View):
         self.add_item(SelectSystemeSalon(self))
         self.add_item(SelectSalonConfig(self))
 
+    async def _tickets_only(self, i):
+        if self.selected_key == "salon_tickets":
+            return True
+        try:
+            await i.response.send_message("Selectionne d'abord le systeme Tickets.", ephemeral=True)
+        except Exception:
+            pass
+        return False
+
     @discord.ui.button(label="Voir salons", style=discord.ButtonStyle.primary, row=2)
     async def voir(self, i: discord.Interaction, b):
         try:
@@ -1371,6 +1725,48 @@ class VuePanelSalons(discord.ui.View):
     async def creer(self, i: discord.Interaction, b):
         try: await i.response.send_modal(ModalCreerSalon(self.selected_key, self.selected_label))
         except Exception: pass
+
+    @discord.ui.button(label="Message ticket", style=discord.ButtonStyle.primary, row=3)
+    async def ticket_message(self, i: discord.Interaction, b):
+        if not await self._tickets_only(i): return
+        try: await i.response.send_modal(ModalTicketPanelText())
+        except Exception: pass
+
+    @discord.ui.button(label="Ajouter option", style=discord.ButtonStyle.success, row=3)
+    async def ticket_add(self, i: discord.Interaction, b):
+        if not await self._tickets_only(i): return
+        try: await i.response.send_modal(ModalAjouterTicketOption())
+        except Exception: pass
+
+    @discord.ui.button(label="Modifier option", style=discord.ButtonStyle.secondary, row=3)
+    async def ticket_edit(self, i: discord.Interaction, b):
+        if not await self._tickets_only(i): return
+        try: await i.response.send_modal(ModalModifierTicketOption())
+        except Exception: pass
+
+    @discord.ui.button(label="Supprimer option", style=discord.ButtonStyle.danger, row=3)
+    async def ticket_delete(self, i: discord.Interaction, b):
+        if not await self._tickets_only(i): return
+        try: await i.response.send_modal(ModalSupprimerTicketOption())
+        except Exception: pass
+
+    @discord.ui.button(label="Apercu tickets", style=discord.ButtonStyle.secondary, row=4)
+    async def ticket_preview(self, i: discord.Interaction, b):
+        if not await self._tickets_only(i): return
+        try:
+            await i.response.send_message(embed=build_ticket_config_embed(i.guild), ephemeral=True)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Actualiser panel", style=discord.ButtonStyle.primary, row=4)
+    async def ticket_refresh(self, i: discord.Interaction, b):
+        if not await self._tickets_only(i): return
+        await _safe_defer(i)
+        ch = await refresh_ticket_panel_message(i.guild)
+        if ch:
+            await i.followup.send(embed=E("Panel actualise", f"Message ticket mis a jour dans {ch.mention}.", 0x43B581), ephemeral=True)
+        else:
+            await i.followup.send("Salon ticket introuvable. Choisis un salon ticket d'abord.", ephemeral=True)
 
 class SelectRoleStaff(discord.ui.RoleSelect):
     def __init__(self, action, row):
@@ -1487,15 +1883,20 @@ class VuePanelPersonnalisation(discord.ui.View):
             pass
         await i.followup.send(embed=E("Visuel enregistre", f"**{label}** a ete mis a jour.", 0x43B581), ephemeral=True)
 
+    @discord.ui.button(label="Nom du bot", style=discord.ButtonStyle.secondary, row=1)
+    async def bot_name(self, i: discord.Interaction, b):
+        try: await i.response.send_modal(ModalBotIdentity())
+        except Exception: pass
+
     @discord.ui.button(label="Upload logo", style=discord.ButtonStyle.primary, row=1)
     async def upload_logo(self, i: discord.Interaction, b):
-        await self._upload_image(i, "embed_logo", "logo")
+        await self._upload_image(i, "embed_logo", "logo du bot")
 
     @discord.ui.button(label="Upload banniere", style=discord.ButtonStyle.primary, row=1)
     async def upload_banner(self, i: discord.Interaction, b):
-        await self._upload_image(i, "embed_banner", "banniere")
+        await self._upload_image(i, "embed_banner", "banniere du bot")
 
-    @discord.ui.button(label="Upload icone footer", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Upload icone footer", style=discord.ButtonStyle.primary, row=2)
     async def upload_footer_icon(self, i: discord.Interaction, b):
         await self._upload_image(i, "embed_footer_icon", "icone footer")
 
@@ -1507,9 +1908,13 @@ class VuePanelPersonnalisation(discord.ui.View):
     @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=2)
     async def reset(self, i: discord.Interaction, b):
         cfg = get_cfg(i.guild.id)
-        for k in ("embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon"):
+        for k in ("embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon", "bot_name"):
             cfg.pop(k, None)
         set_cfg(i.guild.id, cfg)
+        try:
+            await i.guild.me.edit(nick=None, reason="Reinitialisation personnalisation du bot")
+        except Exception:
+            pass
         await refresh_interaction_message(i, build_personnalisation_embed(i.guild), self)
 
     @discord.ui.button(label="Apercu", style=discord.ButtonStyle.secondary, row=2)
@@ -1518,6 +1923,30 @@ class VuePanelPersonnalisation(discord.ui.View):
             await i.response.send_message(embed=build_personnalisation_embed(i.guild), ephemeral=True)
         except Exception:
             pass
+
+class SelectLangueBot(discord.ui.Select):
+    def __init__(self):
+        super().__init__(placeholder="Choisir la langue", options=BOT_LANGUAGE_CHOICES, min_values=1, max_values=1, row=0)
+
+    async def callback(self, i: discord.Interaction):
+        await _safe_defer(i)
+        update_cfg(i.guild.id, "langue", self.values[0])
+        ok, err = await sync_guild_command_language(i.guild)
+        e = build_language_embed(i.guild)
+        e.add_field(
+            name=tr(i.guild.id, "language_updated"),
+            value=tr(i.guild.id, "slash_sync_ok") if ok else tr(i.guild.id, "slash_sync_fail", error=err),
+            inline=False,
+        )
+        try:
+            await i.edit_original_response(embed=e, view=self.view)
+        except Exception:
+            await i.followup.send(embed=e, ephemeral=True)
+
+class VuePanelLangue(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(SelectLangueBot())
 
 class VuePanel(discord.ui.View):
     def __init__(self): super().__init__(timeout=300)
@@ -1579,6 +2008,14 @@ class VuePanel(discord.ui.View):
             except Exception: pass
             return
         await self._sub(i, build_personnalisation_embed(i.guild), VuePanelPersonnalisation())
+
+    @discord.ui.button(label="Langue", style=discord.ButtonStyle.secondary, row=1)
+    async def langue(self, i: discord.Interaction, b):
+        if not self._admin(i):
+            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
+            except Exception: pass
+            return
+        await self._sub(i, build_language_embed(i.guild), VuePanelLangue())
 
 #  MODALS PRINCIPAUX
 # ════════════════════════════════════════════════
@@ -1674,23 +2111,28 @@ class ModalPatchnotes(discord.ui.Modal, title="📋 Patch Notes"):
         await i.followup.send(embed=E("✅ Publiées !", couleur=0x43B581), ephemeral=True)
 
 class ModalMotifTicket(discord.ui.Modal, title="🎫 Ouvrir un ticket"):
-    motif = discord.ui.TextInput(label="Décris ton motif", placeholder="Explique ta demande...",
+    motif = discord.ui.TextInput(label="Decris ton motif", placeholder="Explique ta demande...",
                                   style=discord.TextStyle.paragraph, max_length=500)
 
     def __init__(self, categorie):
         super().__init__()
-        self.categorie = categorie
+        if isinstance(categorie, dict):
+            self.categorie = normalize_ticket_question(categorie)
+        else:
+            self.categorie = normalize_ticket_question({"label": str(categorie)})
 
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
         gid = str(i.guild.id)
         tickets = load_tickets()
-        cat_key = self.categorie.lower().replace(" ", "_")
+        label = self.categorie["label"]
+        priority = normalize_priority(self.categorie.get("priority", 1))
+        cat_key = slugify_ticket_label(label)
         if gid not in tickets["compteur"]: tickets["compteur"][gid] = {}
         if cat_key not in tickets["compteur"][gid]: tickets["compteur"][gid][cat_key] = 0
         tickets["compteur"][gid][cat_key] += 1
         num = str(tickets["compteur"][gid][cat_key]).zfill(4)
-        nom = f"ticket-{cat_key}-{num}"
+        nom = ticket_channel_name(label, num, priority)
         ch_id = get_ch(gid, "salon_tickets", DEFAULT_TICKETS)
         ref = i.guild.get_channel(ch_id)
         cat_discord = ref.category if ref else None
@@ -1709,19 +2151,19 @@ class ModalMotifTicket(discord.ui.Modal, title="🎫 Ouvrir un ticket"):
             return await i.followup.send(f"❌ Impossible de créer le salon : {ex}", ephemeral=True)
         tickets["tickets"][str(channel.id)] = {
             "channel_id": channel.id, "user_id": str(i.user.id),
-            "pseudo": str(i.user), "nom": nom, "categorie": self.categorie,
-            "motif": self.motif.value, "date": now().strftime("%Y-%m-%d %H:%M:%S")
+            "pseudo": str(i.user), "nom": nom, "categorie": label,
+            "priority": priority, "motif": self.motif.value, "date": now().strftime("%Y-%m-%d %H:%M:%S")
         }
         save_tickets(tickets)
-        e = EG(f"🎫 Ticket — {self.categorie}", gid=gid)
-        e.description = (f"Bienvenue {i.user.mention} ! 👋\n\n"
-                          f"Un membre de notre équipe **staff** arrivera très prochainement.\n⏱️ *Merci de patienter.*")
-        e.add_field(name="📋 Catégorie", value=f"`{self.categorie}`", inline=True)
-        e.add_field(name="👤 Créateur", value=i.user.mention, inline=True)
-        e.add_field(name="📅 Ouvert le", value=fmt(), inline=True)
-        e.add_field(name="📝 Motif", value=self.motif.value, inline=False)
+        e = EG(f"{priority_emoji(priority)} " + tr(gid, "ticket_welcome_title", category=label), gid=gid)
+        e.description = tr(gid, "ticket_welcome_desc", user=i.user.mention)
+        e.add_field(name=tr(gid, "category"), value=f"`{label}`", inline=True)
+        e.add_field(name=tr(gid, "priority"), value=priority_label(gid, priority), inline=True)
+        e.add_field(name=tr(gid, "creator"), value=i.user.mention, inline=True)
+        e.add_field(name=tr(gid, "opened_at"), value=fmt(), inline=True)
+        e.add_field(name=tr(gid, "reason"), value=self.motif.value, inline=False)
         await channel.send(embed=e, view=VueTicket(str(i.user.id)))
-        await i.followup.send(embed=EG("✅ Ticket créé !", f"Ton ticket : {channel.mention}", 0x43B581, gid), ephemeral=True)
+        await i.followup.send(embed=EG(tr(gid, "ticket_created_title"), tr(gid, "ticket_created_desc", channel=channel.mention), 0x43B581, gid), ephemeral=True)
 
 class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
     raison = discord.ui.TextInput(label="Raison", placeholder="Ex : Comportement inapproprié...", max_length=200)
@@ -1896,6 +2338,28 @@ async def on_voice_state_update(member, before, after):
 # ════════════════════════════════════════════════
 #  ON READY
 # ════════════════════════════════════════════════
+
+def build_language_embed(guild):
+    gid = str(guild.id)
+    e = E(tr(gid, "language_panel_title"), tr(gid, "language_panel_desc"), 0x5865F2)
+    e.add_field(name=tr(gid, "language_current"), value=format_lang(gid), inline=True)
+    return e
+
+async def sync_guild_command_language(guild):
+    lang = get_lang(guild.id)
+    for cmd in bot.tree.get_commands():
+        desc = SLASH_DESCRIPTIONS.get(cmd.name, {}).get(lang)
+        if not desc:
+            continue
+        try:
+            cmd.description = desc[:100]
+        except Exception:
+            pass
+    try:
+        await bot.tree.sync(guild=guild)
+        return True, None
+    except Exception as ex:
+        return False, str(ex)
 
 @bot.event
 async def on_ready():
@@ -2113,6 +2577,35 @@ async def deleteroles(ctx):
     await ctx.send(embed=e)
     track_mod(str(ctx.author.id), str(ctx.guild.id), "roles")
 
+class VueClearAllConfirm(discord.ui.View):
+    def __init__(self, owner_id, channel_id, gid):
+        super().__init__(timeout=60)
+        self.owner_id = owner_id
+        self.channel_id = channel_id
+        self.gid = str(gid)
+
+    @discord.ui.button(label="Confirmer", style=discord.ButtonStyle.danger)
+    async def confirm(self, i: discord.Interaction, b):
+        if i.user.id != self.owner_id:
+            return await i.response.send_message(tr(self.gid, "permission_denied"), ephemeral=True)
+        channel = i.guild.get_channel(self.channel_id)
+        if not channel or not hasattr(channel, "purge"):
+            return await i.response.send_message(tr(self.gid, "channel_not_supported"), ephemeral=True)
+        await _safe_defer(i)
+        try:
+            deleted = await channel.purge(limit=None, reason=f"Clear all by {i.user}")
+        except Exception as ex:
+            return await i.followup.send(f"Erreur : {ex}", ephemeral=True)
+        self.clear_items()
+        await i.followup.send(tr(self.gid, "clear_all_done", count=len(deleted)), ephemeral=True)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
+    async def cancel(self, i: discord.Interaction, b):
+        if i.user.id != self.owner_id:
+            return await i.response.send_message(tr(self.gid, "permission_denied"), ephemeral=True)
+        self.clear_items()
+        await i.response.edit_message(content="Annule.", embed=None, view=None)
+
 # ════════════════════════════════════════════════
 #  SLASH COMMANDS
 # ════════════════════════════════════════════════
@@ -2150,16 +2643,21 @@ async def cmd_patchnotes(i: discord.Interaction):
     try: await i.response.send_modal(ModalPatchnotes())
     except Exception: pass
 
-@bot.tree.command(name="ticket", description="🎫 Ouvrir un ticket de support")
+@bot.tree.command(name="ticket", description="🎫 Deployer le systeme de ticket dans ce salon")
+@app_commands.checks.has_permissions(administrator=True)
 async def cmd_ticket(i: discord.Interaction):
+    await _safe_defer(i)
     gid = str(i.guild.id)
-    e = EG("🎫 Ouvrir un ticket de support", "Sélectionne la catégorie de ta demande.", gid=gid)
-    e.add_field(name="🔓 Déban", value="Contester un bannissement", inline=True)
-    e.add_field(name="❓ Question", value="Poser une question", inline=True)
-    e.add_field(name="🤖 Mise en place du bot", value="Installer ModBot", inline=True)
-    e.add_field(name="🏛️ Fondation", value="Soutenir la fondation", inline=True)
-    try: await i.response.send_message(embed=e, view=VueChoixCategorie(), ephemeral=True)
-    except Exception: pass
+    if not hasattr(i.channel, "send"):
+        return await i.followup.send(tr(gid, "channel_not_supported"), ephemeral=True)
+    update_cfg(i.guild.id, "salon_tickets", i.channel.id)
+    await setup_configured_channel(i.guild, i.channel, "salon_tickets", "Tickets")
+    await i.followup.send(
+        embed=EG(tr(gid, "ticket_deployed_title"),
+                 tr(gid, "ticket_deployed_desc", channel=i.channel.mention),
+                 0x43B581, gid),
+        ephemeral=True,
+    )
 
 @bot.tree.command(name="panel", description="Panneau d'administration ModBot")
 @app_commands.checks.has_permissions(administrator=True)
@@ -2168,6 +2666,34 @@ async def cmd_panel(i: discord.Interaction):
         await i.response.send_message(embed=build_main_panel_embed(i.guild), view=VuePanel(), ephemeral=True)
     except Exception:
         pass
+
+@bot.tree.command(name="clear-message", description="Supprimer 1 a 100 messages du salon")
+@app_commands.describe(nombre="Nombre de messages a supprimer entre 1 et 100")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def cmd_clear_message(i: discord.Interaction, nombre: int):
+    gid = str(i.guild.id)
+    if nombre < 1 or nombre > 100:
+        return await i.response.send_message(tr(gid, "clear_invalid"), ephemeral=True)
+    if not hasattr(i.channel, "purge"):
+        return await i.response.send_message(tr(gid, "channel_not_supported"), ephemeral=True)
+    await _safe_defer(i)
+    try:
+        deleted = await i.channel.purge(limit=nombre, reason=f"Clear message by {i.user}")
+    except Exception as ex:
+        return await i.followup.send(f"Erreur : {ex}", ephemeral=True)
+    await i.followup.send(tr(gid, "clear_done", count=len(deleted)), ephemeral=True)
+
+@bot.tree.command(name="clear-all", description="Supprimer tous les messages du salon")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def cmd_clear_all(i: discord.Interaction):
+    gid = str(i.guild.id)
+    if not hasattr(i.channel, "purge"):
+        return await i.response.send_message(tr(gid, "channel_not_supported"), ephemeral=True)
+    await i.response.send_message(
+        tr(gid, "clear_all_confirm"),
+        view=VueClearAllConfirm(i.user.id, i.channel.id, gid),
+        ephemeral=True,
+    )
 
 @bot.tree.command(name="warn", description="⚠️ Donner un avertissement à un membre")
 @app_commands.describe(membre="Le membre à avertir")
@@ -2408,6 +2934,7 @@ async def cmd_info(i: discord.Interaction):
     e.add_field(name="📋 Commandes", value=(
         "`/insultes` `/suggest` `/report` `/ticket` `/warn` `/ban` `/deban`\n"
         "`/annonce` `/massdm` `/translate` `/panel` `/patchnotes`\n"
+        "`/clear-message` `/clear-all`\n"
         "`/avert-count` `/ban-list` `/reset-avert` `/profilestats`\n"
         "`/serverstats` `/modstats` `/info-bot`\n"
         "`!addroles` `!deleteroles`"
