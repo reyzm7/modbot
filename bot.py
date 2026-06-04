@@ -21,6 +21,7 @@ DEFAULT_EMBED_COLOR = 0x5865F2
 BASE_DIR            = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOGO_FILE   = os.path.join(BASE_DIR, "assets", "default_logo.png")
 DEFAULT_BANNER_FILE = os.path.join(BASE_DIR, "assets", "default_banner.png")
+DEFAULT_PROFILE_BANNER_FILE = os.path.join(BASE_DIR, "assets", "default_bot_banner_680x240.png")
 
 INSULTES_BASE = [
     "tg","fdp","pd","ntm","ftg","connard","connasse","salope","pute",
@@ -338,7 +339,7 @@ async def restore_default_personnalisation(guild, cfg):
 
     installation_logo, installation_banner, installation_logo_raw, installation_banner_raw = await get_installation_asset_defaults()
     logo_raw = installation_logo_raw or read_asset_bytes(DEFAULT_LOGO_FILE)
-    banner_raw = installation_banner_raw or read_asset_bytes(DEFAULT_BANNER_FILE)
+    banner_raw = installation_banner_raw or read_asset_bytes(DEFAULT_PROFILE_BANNER_FILE) or read_asset_bytes(DEFAULT_BANNER_FILE)
 
     try:
         await guild.me.edit(nick=DEFAULT_BOT_NAME, reason="Reset personnalisation ModBot")
@@ -365,23 +366,29 @@ async def restore_default_personnalisation(guild, cfg):
             except Exception:
                 pass
 
-        try:
-            fresh_user = await bot.fetch_user(bot.user.id)
-        except Exception:
-            fresh_user = bot.user
-
         profile_logo = None
         profile_banner = None
-        try:
-            profile_logo = fresh_user.display_avatar.url
-        except Exception:
-            pass
-        try:
-            banner = getattr(fresh_user, "banner", None)
-            if banner:
-                profile_banner = banner.url
-        except Exception:
-            pass
+        attempts = 5 if (avatar_applied or banner_applied) else 1
+        for attempt in range(attempts):
+            try:
+                fresh_user = await bot.fetch_user(bot.user.id)
+            except Exception:
+                fresh_user = bot.user
+
+            try:
+                profile_logo = fresh_user.display_avatar.url
+            except Exception:
+                pass
+            try:
+                banner = getattr(fresh_user, "banner", None)
+                if banner:
+                    profile_banner = banner.url
+            except Exception:
+                pass
+
+            if (not avatar_applied or profile_logo) and (not banner_applied or profile_banner):
+                break
+            await asyncio.sleep(1)
 
         logo_url = installation_logo or (profile_logo if avatar_applied else None)
         banner_url = installation_banner or (profile_banner if banner_applied else None)
