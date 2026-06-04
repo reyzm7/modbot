@@ -338,65 +338,17 @@ async def restore_default_personnalisation(guild, cfg):
     cfg["embed_footer"] = f"{DEFAULT_BOT_NAME} - Protection de votre communaute"
 
     installation_logo, installation_banner, installation_logo_raw, installation_banner_raw = await get_installation_asset_defaults()
-    logo_raw = installation_logo_raw or read_asset_bytes(DEFAULT_LOGO_FILE)
-    banner_raw = installation_banner_raw or read_asset_bytes(DEFAULT_PROFILE_BANNER_FILE) or read_asset_bytes(DEFAULT_BANNER_FILE)
 
     try:
         await guild.me.edit(nick=DEFAULT_BOT_NAME, reason="Reset personnalisation ModBot")
     except Exception:
         pass
 
-    if bot.user:
-        avatar_applied = False
-        banner_applied = False
-        try:
-            await bot.user.edit(username=DEFAULT_BOT_NAME)
-        except Exception:
-            pass
-        if logo_raw:
-            try:
-                await bot.user.edit(avatar=logo_raw)
-                avatar_applied = True
-            except Exception:
-                pass
-        if banner_raw:
-            try:
-                await bot.user.edit(banner=banner_raw)
-                banner_applied = True
-            except Exception:
-                pass
-
-        profile_logo = None
-        profile_banner = None
-        attempts = 5 if (avatar_applied or banner_applied) else 1
-        for attempt in range(attempts):
-            try:
-                fresh_user = await bot.fetch_user(bot.user.id)
-            except Exception:
-                fresh_user = bot.user
-
-            try:
-                profile_logo = fresh_user.display_avatar.url
-            except Exception:
-                pass
-            try:
-                banner = getattr(fresh_user, "banner", None)
-                if banner:
-                    profile_banner = banner.url
-            except Exception:
-                pass
-
-            if (not avatar_applied or profile_logo) and (not banner_applied or profile_banner):
-                break
-            await asyncio.sleep(1)
-
-        logo_url = installation_logo or (profile_logo if avatar_applied else None)
-        banner_url = installation_banner or (profile_banner if banner_applied else None)
-        if logo_url:
-            cfg["embed_logo"] = logo_url
-            cfg["embed_footer_icon"] = logo_url
-        if banner_url:
-            cfg["embed_banner"] = banner_url
+    if installation_logo:
+        cfg["embed_logo"] = installation_logo
+        cfg["embed_footer_icon"] = installation_logo
+    if installation_banner:
+        cfg["embed_banner"] = installation_banner
 
     return cfg
 
@@ -2207,11 +2159,6 @@ class ModalBotIdentity(discord.ui.Modal, title="Identite du bot"):
         else:
             cfg.pop("bot_name", None)
         set_cfg(i.guild.id, cfg)
-        if name and bot.user:
-            try:
-                await bot.user.edit(username=name[:32])
-            except Exception:
-                pass
         try:
             await i.guild.me.edit(nick=(name[:32] if name else None), reason="Personnalisation du bot")
         except Exception:
@@ -2864,21 +2811,7 @@ class VuePanelPersonnalisation(discord.ui.View):
         is_image = (att.content_type and att.content_type.startswith("image/")) or att.filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
         if not is_image:
             return await i.followup.send("Le fichier envoye n'est pas une image valide.", ephemeral=True)
-        try:
-            raw = await att.read(use_cached=True)
-        except TypeError:
-            raw = await att.read()
-        except Exception:
-            raw = None
         update_cfg(i.guild.id, key, att.url)
-        if raw and bot.user:
-            try:
-                if key == "embed_logo":
-                    await bot.user.edit(avatar=raw)
-                elif key == "embed_banner":
-                    await bot.user.edit(banner=raw)
-            except Exception:
-                pass
         try:
             await msg.delete()
         except Exception:
