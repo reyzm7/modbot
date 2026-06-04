@@ -60,8 +60,8 @@ TEXTS = {
     "language_panel_title": {"fr": "Langue du bot", "en": "Bot language"},
     "language_panel_desc": {"fr": "Choisis la langue utilisee par le bot sur ce serveur.", "en": "Choose the language used by the bot on this server."},
     "language_current": {"fr": "Langue actuelle", "en": "Current language"},
-    "language_updated": {"fr": "Langue mise a jour", "en": "Language updated"},
-    "slash_sync_ok": {"fr": "Les descriptions des slash commandes ont ete synchronisees pour ce serveur.", "en": "Slash command descriptions were synced for this server."},
+    "language_updated": {"fr": "✅ Langue mise a jour", "en": "✅ Language updated"},
+    "slash_sync_ok": {"fr": "🔄 Les descriptions des slash commandes ont ete synchronisees pour ce serveur.", "en": "🔄 Slash command descriptions were synced for this server."},
     "slash_sync_fail": {"fr": "La langue est sauvegardee, mais la synchronisation des slash commandes a echoue : {error}", "en": "The language was saved, but slash command sync failed: {error}"},
     "ticket_panel_author": {"fr": "{guild_name} Ticket System", "en": "{guild_name} Ticket System"},
     "ticket_panel_title": {"fr": "Ouvre ton ticket", "en": "Open your ticket"},
@@ -78,10 +78,10 @@ TEXTS = {
     "ticket_panel_footer": {"fr": "{guild_name} - Support technique et administratif", "en": "{guild_name} - Technical and administrative support"},
     "ticket_config_title": {"fr": "Configuration du systeme de ticket", "en": "Ticket system configuration"},
     "ticket_config_desc": {"fr": "Modifie le message publie et les options du menu ticket.", "en": "Edit the published message and ticket menu options."},
-    "ticket_deployed_title": {"fr": "Systeme tickets deploye", "en": "Ticket system deployed"},
-    "ticket_deployed_desc": {"fr": "Le message de ticket a ete poste ou mis a jour dans {channel}.", "en": "The ticket message was posted or updated in {channel}."},
-    "ticket_created_title": {"fr": "Ticket cree !", "en": "Ticket created!"},
-    "ticket_created_desc": {"fr": "Ton ticket : {channel}", "en": "Your ticket: {channel}"},
+    "ticket_deployed_title": {"fr": "✅ Systeme tickets deploye", "en": "✅ Ticket system deployed"},
+    "ticket_deployed_desc": {"fr": "📌 Le message de ticket a ete poste ou mis a jour dans {channel}.", "en": "📌 The ticket message was posted or updated in {channel}."},
+    "ticket_created_title": {"fr": "🎫 Ticket cree !", "en": "🎫 Ticket created!"},
+    "ticket_created_desc": {"fr": "✅ Ton ticket : {channel}", "en": "✅ Your ticket: {channel}"},
     "ticket_welcome_title": {"fr": "Ticket - {category}", "en": "Ticket - {category}"},
     "ticket_welcome_desc": {"fr": "Bienvenue {user} ! Un membre du staff arrivera tres prochainement.", "en": "Welcome {user}! A staff member will be with you soon."},
     "ticket_open_content": {"fr": "Bienvenue {user}, votre demande de ticket a ete creee.", "en": "Welcome {user}, your ticket request has been created."},
@@ -94,10 +94,10 @@ TEXTS = {
     "priority_2": {"fr": "2 - normale", "en": "2 - normal"},
     "priority_3": {"fr": "3 - haute", "en": "3 - high"},
     "permission_denied": {"fr": "Permission refusee.", "en": "Permission denied."},
-    "clear_done": {"fr": "{count} message(s) supprime(s).", "en": "{count} message(s) deleted."},
+    "clear_done": {"fr": "✅ {count} message(s) supprime(s).", "en": "✅ {count} message(s) deleted."},
     "clear_invalid": {"fr": "Choisis un nombre entre 1 et 100.", "en": "Choose a number between 1 and 100."},
     "clear_all_confirm": {"fr": "Confirmer la suppression de tous les messages de ce salon ?", "en": "Confirm deleting every message in this channel?"},
-    "clear_all_done": {"fr": "{count} message(s) supprime(s).", "en": "{count} message(s) deleted."},
+    "clear_all_done": {"fr": "✅ {count} message(s) supprime(s).", "en": "✅ {count} message(s) deleted."},
     "channel_not_supported": {"fr": "Ce salon ne supporte pas cette action.", "en": "This channel does not support this action."},
     "ticket_closed_title": {"fr": "Ticket ferme", "en": "Ticket closed"},
     "ticket_closed_desc": {"fr": "{user} a close le ticket.", "en": "{user} closed the ticket."},
@@ -106,10 +106,10 @@ TEXTS = {
     "ticket_delete_log_title": {"fr": "Suppression de ticket", "en": "Ticket deletion"},
     "transcript_dm_title": {"fr": "Transcript - {ticket}", "en": "Transcript - {ticket}"},
     "transcript_dm_desc": {"fr": "Voici le transcript complet du ticket **{ticket}**.", "en": "Here is the full transcript for ticket **{ticket}**."},
-    "transcript_sent": {"fr": "Transcript envoye en MP.", "en": "Transcript sent by DM."},
+    "transcript_sent": {"fr": "📬 Transcript envoye en MP.", "en": "📬 Transcript sent by DM."},
     "transcript_dm_error": {"fr": "Impossible de t'envoyer le transcript en MP. Verifie tes messages prives.", "en": "I could not send the transcript by DM. Check your private messages."},
-    "priority_updated": {"fr": "Priorite mise a jour", "en": "Priority updated"},
-    "priority_updated_desc": {"fr": "{user} a defini la priorite sur {priority}.", "en": "{user} set the priority to {priority}."},
+    "priority_updated": {"fr": "🎚️ Priorite mise a jour", "en": "🎚️ Priority updated"},
+    "priority_updated_desc": {"fr": "✅ {user} a defini la priorite sur {priority}.", "en": "✅ {user} set the priority to {priority}."},
     "rating_panel_title": {"fr": "Evaluations du support", "en": "Support ratings"},
     "rating_panel_desc": {"fr": "Moyenne des notes donnees par les joueurs apres fermeture des tickets.", "en": "Average score given by players after tickets are closed."},
     "rating_average": {"fr": "Moyenne", "en": "Average"},
@@ -169,7 +169,6 @@ SLASH_DESCRIPTIONS = {
     "info-bot": {"fr": "Informations sur le bot", "en": "Bot information"},
     "clear-message": {"fr": "Supprimer 1 a 100 messages du salon", "en": "Delete 1 to 100 channel messages"},
     "clear-all": {"fr": "Supprimer tous les messages du salon", "en": "Delete every channel message"},
-    "clean-doublons": {"fr": "Nettoyer les doublons des messages systeme", "en": "Clean duplicate system messages"},
 }
 
 F_DATA    = "data.json"
@@ -3300,7 +3299,10 @@ async def delete_messages_safely(channel, limit=None, reason=""):
     deleted = 0
     async for msg in channel.history(limit=limit):
         try:
-            await msg.delete(reason=reason)
+            try:
+                await msg.delete(reason=reason)
+            except TypeError:
+                await msg.delete()
             deleted += 1
             await asyncio.sleep(0.15)
         except discord.NotFound:
@@ -3413,16 +3415,6 @@ async def cmd_panel(i: discord.Interaction):
         await i.response.send_message(embed=build_main_panel_embed(i.guild), view=VuePanel(i.guild.id), ephemeral=True)
     except Exception:
         pass
-
-@bot.tree.command(name="clean-doublons", description="Nettoyer les doublons des messages systeme")
-@app_commands.checks.has_permissions(administrator=True)
-async def cmd_clean_doublons(i: discord.Interaction):
-    await _safe_defer(i)
-    gid = str(i.guild.id)
-    await cleanup_configured_system_messages(i.guild)
-    title = "Doublons nettoyes" if get_lang(gid) == "fr" else "Duplicates cleaned"
-    desc = "Les anciens messages systeme en double ont ete supprimes dans les salons configures." if get_lang(gid) == "fr" else "Duplicate system messages were removed from configured channels."
-    await i.followup.send(embed=EG(title, desc, 0x43B581, gid), ephemeral=True)
 
 @bot.tree.command(name="clear-message", description="Supprimer 1 a 100 messages du salon")
 @app_commands.describe(nombre="Nombre de messages a supprimer entre 1 et 100")
