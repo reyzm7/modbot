@@ -16,6 +16,11 @@ DEFAULT_SUGGESTIONS = 1510422091340709898
 DEFAULT_REPORTS     = 1510422117290868926
 DEFAULT_PATCHNOTES  = 1510440693070430324
 DEFAULT_TICKETS     = 1510600280016818357
+DEFAULT_BOT_NAME    = "ModBot"
+DEFAULT_EMBED_COLOR = 0x5865F2
+BASE_DIR            = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_LOGO_FILE   = os.path.join(BASE_DIR, "assets", "default_logo.png")
+DEFAULT_BANNER_FILE = os.path.join(BASE_DIR, "assets", "default_banner.png")
 
 INSULTES_BASE = [
     "tg","fdp","pd","ntm","ftg","connard","connasse","salope","pute",
@@ -274,16 +279,79 @@ def get_bot_display_name(gid=None, guild=None):
     if guild and guild.me:
         return guild.me.display_name
     try:
-        return bot.user.display_name if bot.user else "ModBot"
+        return bot.user.display_name if bot.user else DEFAULT_BOT_NAME
     except Exception:
-        return "ModBot"
+        return DEFAULT_BOT_NAME
+
+def read_asset_bytes(path):
+    try:
+        if path and os.path.exists(path):
+            with open(path, "rb") as fp:
+                return fp.read()
+    except Exception:
+        pass
+    return None
+
+async def restore_default_personnalisation(guild, cfg):
+    for k in (
+        "embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon", "bot_name",
+        "bot_logo", "bot_banner", "avatar_url", "banner_url", "footer_icon", "custom_footer",
+    ):
+        cfg.pop(k, None)
+
+    cfg["bot_name"] = DEFAULT_BOT_NAME
+    cfg["embed_color"] = DEFAULT_EMBED_COLOR
+    cfg["embed_footer"] = f"{DEFAULT_BOT_NAME} - Protection de votre communaute"
+
+    logo_raw = read_asset_bytes(DEFAULT_LOGO_FILE)
+    banner_raw = read_asset_bytes(DEFAULT_BANNER_FILE)
+
+    try:
+        await guild.me.edit(nick=DEFAULT_BOT_NAME, reason="Reset personnalisation ModBot")
+    except Exception:
+        pass
+
+    if bot.user:
+        try:
+            await bot.user.edit(username=DEFAULT_BOT_NAME)
+        except Exception:
+            pass
+        if logo_raw:
+            try:
+                await bot.user.edit(avatar=logo_raw)
+            except Exception:
+                pass
+        if banner_raw:
+            try:
+                await bot.user.edit(banner=banner_raw)
+            except Exception:
+                pass
+
+        try:
+            fresh_user = await bot.fetch_user(bot.user.id)
+        except Exception:
+            fresh_user = bot.user
+
+        try:
+            cfg["embed_logo"] = fresh_user.display_avatar.url
+            cfg["embed_footer_icon"] = fresh_user.display_avatar.url
+        except Exception:
+            pass
+        try:
+            banner = getattr(fresh_user, "banner", None)
+            if banner:
+                cfg["embed_banner"] = banner.url
+        except Exception:
+            pass
+
+    return cfg
 
 def get_ecfg(gid):
     cfg = get_cfg(gid)
     bot_name = get_bot_display_name(gid)
     return {
         "name":        bot_name,
-        "color":       cfg.get("embed_color",  0x5865F2),
+        "color":       cfg.get("embed_color",  DEFAULT_EMBED_COLOR),
         "footer":      cfg.get("embed_footer") or f"{bot_name} - Protection de votre communaute",
         "logo":        cfg.get("embed_logo", None),
         "banner":      cfg.get("embed_banner", None),
@@ -2360,11 +2428,26 @@ class VuePanelSecurite(discord.ui.View):
 
     @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=2)
     async def reset(self, i: discord.Interaction, b):
+        await _safe_defer(i)
         cfg = get_cfg(i.guild.id)
+        restored = 0
+        for state_key in ("lockdown_view_state", "single_lock_view_state"):
+            saved = cfg.get(state_key) if isinstance(cfg.get(state_key), dict) else {}
+            for cid, previous in list(saved.items()):
+                try:
+                    ch = i.guild.get_channel(int(cid))
+                    if not ch or not channel_can_lockdown(ch):
+                        continue
+                    await apply_lockdown_permissions(ch, i.guild.default_role, False, previous)
+                    restored += 1
+                except Exception:
+                    pass
+            cfg.pop(state_key, None)
         for key in ("lockdown", "antiraid", "anti_lien", "anti_invite", "anti_spam", "staff_alert_enabled"):
             cfg[key] = False
         set_cfg(i.guild.id, cfg)
         await self._refresh(i)
+        await i.followup.send(embed=EG("♻️ Securite reinitialisee", f"✅ Tous les modules de securite sont inactifs.\n🔓 `{restored}` salon(s) restaure(s).", 0x43B581, i.guild.id), ephemeral=True)
 
 SALON_SYSTEMS = {
     "salon_tickets": "Tickets",
@@ -2446,18 +2529,25 @@ class VuePanelSalons(discord.ui.View):
     @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=3)
     async def reset(self, i: discord.Interaction, b):
         await _safe_defer(i)
-        try:
-            await delete_system_message(i.guild, self.selected_key, "panel")
-            await delete_system_message(i.guild, self.selected_key, "status")
-        except Exception:
-            pass
         cfg = get_cfg(i.guild.id)
-        cfg.pop(self.selected_key, None)
-        for suffix in ("panel", "status"):
-            cfg.pop(f"{self.selected_key}_{suffix}_message_id", None)
-            cfg.pop(f"{self.selected_key}_{suffix}_channel_id", None)
+        count = 0
+        for key in SALON_SYSTEMS:
+            try:
+                await delete_system_message(i.guild, key, "panel")
+                await delete_system_message(i.guild, key, "status")
+            except Exception:
+                pass
+            if key in cfg:
+                count += 1
+            cfg.pop(key, None)
+            for suffix in ("panel", "status"):
+                cfg.pop(f"{key}_{suffix}_message_id", None)
+                cfg.pop(f"{key}_{suffix}_channel_id", None)
         set_cfg(i.guild.id, cfg)
+        self.selected_key = "salon_tickets"
+        self.selected_label = "Tickets"
         await refresh_interaction_message(i, build_salons_embed(i.guild, self.selected_label), self)
+        await i.followup.send(embed=EG("♻️ Salons reinitialises", f"✅ Tous les salons des systemes ont ete remis a zero.\n📍 `{count}` configuration(s) retiree(s).", 0x43B581, i.guild.id), ephemeral=True)
 
 class SelectSupportTicketRole(discord.ui.RoleSelect):
     def __init__(self, gid=None):
@@ -2581,15 +2671,21 @@ class VuePanelTickets(discord.ui.View):
     @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=4)
     async def reset(self, i: discord.Interaction, b):
         await _safe_defer(i)
+        try:
+            await delete_system_message(i.guild, "salon_tickets", "panel")
+            await delete_system_message(i.guild, "salon_tickets", "status")
+        except Exception:
+            pass
         cfg = get_cfg(i.guild.id)
         for key in (
             "ticket_panel_author", "ticket_panel_title", "ticket_panel_desc",
             "ticket_rules_title", "ticket_rules_desc", "ticket_questions",
-            "ticket_banner", "ticket_support_role",
+            "ticket_banner", "ticket_support_role", "salon_tickets",
+            "salon_tickets_panel_message_id", "salon_tickets_panel_channel_id",
+            "salon_tickets_status_message_id", "salon_tickets_status_channel_id",
         ):
             cfg.pop(key, None)
         set_cfg(i.guild.id, cfg)
-        await refresh_ticket_panel_message(i.guild)
         await i.followup.send(embed=build_ticket_config_embed(i.guild), ephemeral=True)
 
 class SelectRoleStaff(discord.ui.RoleSelect):
@@ -2763,27 +2859,15 @@ class VuePanelPersonnalisation(discord.ui.View):
 
     @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=2)
     async def reset(self, i: discord.Interaction, b):
+        await _safe_defer(i)
         cfg = get_cfg(i.guild.id)
-        for k in (
-            "embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon", "bot_name",
-            "bot_logo", "bot_banner", "avatar_url", "banner_url", "footer_icon", "custom_footer",
-        ):
-            cfg.pop(k, None)
+        cfg = await restore_default_personnalisation(i.guild, cfg)
         set_cfg(i.guild.id, cfg)
+        await refresh_interaction_message(i, build_personnalisation_embed(i.guild), self)
         try:
-            await i.guild.me.edit(nick=None, reason="Reinitialisation personnalisation du bot")
+            await i.followup.send(embed=EG("♻️ Personnalisation reinitialisee", "Nom, logo et banniere remis sur les valeurs par defaut ModBot.", 0x43B581, i.guild.id), ephemeral=True)
         except Exception:
             pass
-        if bot.user:
-            try:
-                await bot.user.edit(avatar=None)
-            except Exception:
-                pass
-            try:
-                await bot.user.edit(banner=None)
-            except Exception:
-                pass
-        await refresh_interaction_message(i, build_personnalisation_embed(i.guild), self)
 
     @discord.ui.button(label="Apercu", style=discord.ButtonStyle.secondary, row=2)
     async def apercu(self, i: discord.Interaction, b):
