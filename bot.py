@@ -84,6 +84,7 @@ TEXTS = {
     "ticket_created_desc": {"fr": "Ton ticket : {channel}", "en": "Your ticket: {channel}"},
     "ticket_welcome_title": {"fr": "Ticket - {category}", "en": "Ticket - {category}"},
     "ticket_welcome_desc": {"fr": "Bienvenue {user} ! Un membre du staff arrivera tres prochainement.", "en": "Welcome {user}! A staff member will be with you soon."},
+    "ticket_open_content": {"fr": "Bienvenue {user}, votre demande de ticket a ete creee.", "en": "Welcome {user}, your ticket request has been created."},
     "category": {"fr": "Categorie", "en": "Category"},
     "creator": {"fr": "Createur", "en": "Creator"},
     "opened_at": {"fr": "Ouvert le", "en": "Opened at"},
@@ -98,6 +99,52 @@ TEXTS = {
     "clear_all_confirm": {"fr": "Confirmer la suppression de tous les messages de ce salon ?", "en": "Confirm deleting every message in this channel?"},
     "clear_all_done": {"fr": "Nettoyage termine : {count} message(s) supprime(s).", "en": "Cleanup finished: {count} message(s) deleted."},
     "channel_not_supported": {"fr": "Ce salon ne supporte pas cette action.", "en": "This channel does not support this action."},
+    "ticket_closed_title": {"fr": "Ticket ferme", "en": "Ticket closed"},
+    "ticket_closed_desc": {"fr": "{user} a close le ticket.", "en": "{user} closed the ticket."},
+    "ticket_deleted_title": {"fr": "Ticket supprime", "en": "Ticket deleted"},
+    "ticket_deleted_desc": {"fr": "{user} a supprime le ticket {ticket}.", "en": "{user} deleted ticket {ticket}."},
+    "ticket_delete_log_title": {"fr": "Suppression de ticket", "en": "Ticket deletion"},
+    "transcript_dm_title": {"fr": "Transcript - {ticket}", "en": "Transcript - {ticket}"},
+    "transcript_dm_desc": {"fr": "Voici le transcript complet du ticket **{ticket}**.", "en": "Here is the full transcript for ticket **{ticket}**."},
+    "transcript_sent": {"fr": "Transcript envoye en MP.", "en": "Transcript sent by DM."},
+    "transcript_dm_error": {"fr": "Impossible de t'envoyer le transcript en MP. Verifie tes messages prives.", "en": "I could not send the transcript by DM. Check your private messages."},
+    "priority_updated": {"fr": "Priorite mise a jour", "en": "Priority updated"},
+    "priority_updated_desc": {"fr": "{user} a defini la priorite sur {priority}.", "en": "{user} set the priority to {priority}."},
+    "rating_panel_title": {"fr": "Evaluations du support", "en": "Support ratings"},
+    "rating_panel_desc": {"fr": "Moyenne des notes donnees par les joueurs apres fermeture des tickets.", "en": "Average score given by players after tickets are closed."},
+    "rating_average": {"fr": "Moyenne", "en": "Average"},
+    "rating_count": {"fr": "Nombre d'avis", "en": "Ratings"},
+    "rating_empty": {"fr": "Aucune evaluation pour le moment.", "en": "No ratings yet."},
+    "btn_insultes": {"fr": "Insultes", "en": "Bad words"},
+    "btn_security": {"fr": "Securite", "en": "Security"},
+    "btn_channels": {"fr": "Salons", "en": "Channels"},
+    "btn_ticket_interface": {"fr": "Ticket", "en": "Ticket"},
+    "btn_stats": {"fr": "Stats & Bans", "en": "Stats & Bans"},
+    "btn_staff": {"fr": "Staff", "en": "Staff"},
+    "btn_personnalisation": {"fr": "Personnalisation", "en": "Customization"},
+    "btn_language": {"fr": "Langue", "en": "Language"},
+    "btn_rating": {"fr": "Rating", "en": "Rating"},
+    "btn_close_ticket": {"fr": "Fermer le ticket", "en": "Close ticket"},
+    "btn_delete_ticket": {"fr": "Supprimer", "en": "Delete"},
+    "btn_transcript": {"fr": "Transcript", "en": "Transcript"},
+    "btn_confirm": {"fr": "Confirmer", "en": "Confirm"},
+    "btn_cancel": {"fr": "Annuler", "en": "Cancel"},
+    "btn_ticket_message": {"fr": "Message ticket", "en": "Ticket message"},
+    "btn_add_option": {"fr": "Ajouter option", "en": "Add option"},
+    "btn_edit_option": {"fr": "Modifier option", "en": "Edit option"},
+    "btn_delete_option": {"fr": "Supprimer option", "en": "Delete option"},
+    "btn_ticket_preview": {"fr": "Apercu tickets", "en": "Ticket preview"},
+    "btn_ticket_refresh": {"fr": "Actualiser panel", "en": "Refresh panel"},
+    "btn_ticket_deploy_here": {"fr": "Poster ici", "en": "Post here"},
+    "btn_view_channels": {"fr": "Voir salons", "en": "View channels"},
+    "btn_create_channel": {"fr": "Creer le salon", "en": "Create channel"},
+    "btn_bot_name": {"fr": "Nom du bot", "en": "Bot name"},
+    "btn_upload_logo": {"fr": "Upload logo", "en": "Upload logo"},
+    "btn_upload_banner": {"fr": "Upload banniere", "en": "Upload banner"},
+    "btn_upload_footer": {"fr": "Upload icone footer", "en": "Upload footer icon"},
+    "btn_edit_footer": {"fr": "Modifier footer", "en": "Edit footer"},
+    "btn_reset": {"fr": "Reinitialiser", "en": "Reset"},
+    "btn_preview": {"fr": "Apercu", "en": "Preview"},
 }
 
 SLASH_DESCRIPTIONS = {
@@ -130,6 +177,7 @@ F_TICKETS = "tickets.json"
 F_CONFIG  = "config.json"
 F_STATS   = "stats.json"
 F_MODS    = "mod_stats.json"
+F_RATINGS = "ratings.json"
 LINK_RE = re.compile(
     r'(?:https?://[^\s<>()]+|www\.[^\s<>()]+|(?:canary\.|ptb\.)?discord(?:app)?\.com/invite/[A-Za-z0-9-]+|discord\.gg/[A-Za-z0-9-]+|discord\.me/[A-Za-z0-9-]+|dsc\.gg/[A-Za-z0-9-]+|invite\.gg/[A-Za-z0-9-]+)',
     re.I
@@ -204,6 +252,17 @@ def tr(gid, key, **kwargs):
 
 def format_lang(gid):
     return BOT_LANGUAGES.get(get_lang(gid), BOT_LANGUAGES[DEFAULT_LANG])
+
+def localize_buttons(view, gid, mapping):
+    for child in getattr(view, "children", []):
+        if isinstance(child, discord.ui.Button):
+            key = mapping.get(child.custom_id) or mapping.get(child.label)
+            if key:
+                child.label = tr(gid, key)
+        elif isinstance(child, discord.ui.Select):
+            key = mapping.get(getattr(child, "custom_id", None))
+            if key:
+                child.placeholder = tr(gid, key)[:150]
 
 def get_bot_display_name(gid=None, guild=None):
     cfg = get_cfg(gid) if gid else {}
@@ -322,15 +381,22 @@ def build_staff_embed(guild):
 
 def build_salons_embed(guild, selected_label="Tickets"):
     cfg = get_cfg(guild.id)
-    e = E("Configuration des salons", couleur=0x5865F2)
-    e.description = f"Systeme selectionne : **{selected_label}**. Choisis ensuite le salon dans le menu."
+    gid = str(guild.id)
+    if get_lang(gid) == "fr":
+        e = E("Configuration des salons", couleur=0x5865F2)
+        e.description = f"Systeme selectionne : **{selected_label}**. Choisis ensuite le salon dans le menu."
+        empty = "Non defini"
+    else:
+        e = E("Channel configuration", couleur=0x5865F2)
+        e.description = f"Selected system: **{selected_label}**. Then choose the channel from the menu."
+        empty = "Not set"
     salons = [("salon_logs", "Logs"), ("salon_suggestions", "Suggestions"),
               ("salon_reports", "Reports"), ("salon_patchnotes", "Patch Notes"),
               ("salon_tickets", "Tickets"), ("salon_staff_alert", "Staff Alert")]
     for key, label in salons:
         val = cfg.get(key)
         ch = guild.get_channel(val) if val else None
-        e.add_field(name=label, value=ch.mention if ch else "Non defini", inline=True)
+        e.add_field(name=label, value=ch.mention if ch else empty, inline=True)
     return e
 
 MAX_TICKET_OPTIONS = 25
@@ -341,10 +407,10 @@ PRIORITY_INFO = {
 }
 
 DEFAULT_TICKET_QUESTIONS = [
-    {"label": "Support technique", "desc": "Probleme technique, bug ou aide avec le bot", "priority": 2},
-    {"label": "Question", "desc": "Poser une question au staff", "priority": 1},
-    {"label": "Deban", "desc": "Contester un bannissement", "priority": 3},
-    {"label": "Administration", "desc": "Demande administrative ou organisation", "priority": 2},
+    {"label": "Support technique", "desc": "Probleme technique, bug ou aide avec le bot"},
+    {"label": "Question", "desc": "Poser une question au staff"},
+    {"label": "Deban", "desc": "Contester un bannissement"},
+    {"label": "Administration", "desc": "Demande administrative ou organisation"},
 ]
 
 def clean_short_text(value, fallback, max_len):
@@ -370,7 +436,6 @@ def normalize_ticket_question(item, fallback=None):
     return {
         "label": clean_short_text(item.get("label") if isinstance(item, dict) else None, fallback.get("label") or "Ticket", 80),
         "desc": clean_short_text(item.get("desc") if isinstance(item, dict) else None, fallback.get("desc") or "Ouvrir un ticket", 100),
-        "priority": normalize_priority(item.get("priority") if isinstance(item, dict) else None, fallback.get("priority", 1)),
     }
 
 def get_ticket_questions(gid):
@@ -391,7 +456,7 @@ def set_ticket_questions(gid, questions):
 def ticket_option_summary(gid, questions):
     lines = []
     for idx, q in enumerate(questions, start=1):
-        lines.append(f"`{idx}` {priority_emoji(q['priority'])} **{q['label']}** - {q['desc'][:80]}")
+        lines.append(f"`{idx}` **{q['label']}** - {q['desc'][:80]}")
     value = "\n".join(lines) if lines else "Aucune option configuree."
     return value[:1024]
 
@@ -400,13 +465,20 @@ def slugify_ticket_label(label):
     raw = re.sub(r"[^a-zA-Z0-9]+", "-", raw.lower()).strip("-")
     return raw or "ticket"
 
-def ticket_channel_name(label, number, priority):
-    dot = priority_emoji(priority)
-    prefix = f"{dot}-ticket-"
+def ticket_channel_name(label, number, priority=None):
+    dot = priority_emoji(priority) if priority else ""
+    prefix = f"{dot}-ticket-" if dot else "ticket-"
     num = str(number)
     slug = slugify_ticket_label(label)
     max_slug = max(8, 92 - len(prefix) - len(num))
     return f"{prefix}{slug[:max_slug]}-{num}"
+
+def strip_priority_prefix(name):
+    return re.sub(r"^(?:🟢|🟡|🔴)-", "", str(name), count=1)
+
+def ticket_name_with_priority(name, priority):
+    base = strip_priority_prefix(name)
+    return f"{priority_emoji(priority)}-{base}"[:100]
 
 def build_ticket_panel_embed(guild):
     gid = str(guild.id)
@@ -442,24 +514,37 @@ def build_ticket_config_embed(guild):
     cfg = get_cfg(gid)
     questions = get_ticket_questions(gid)
     e = E(tr(gid, "ticket_config_title"), tr(gid, "ticket_config_desc"), 0x5865F2)
+    author_label = "Auteur" if get_lang(gid) == "fr" else "Author"
+    title_label = "Titre" if get_lang(gid) == "fr" else "Title"
+    options_label = "Options"
+    menu_label = "Options du menu" if get_lang(gid) == "fr" else "Menu options"
     e.add_field(name="Message", value=(
-        f"**Auteur :** {(cfg.get('ticket_panel_author') or tr(gid, 'ticket_panel_author', guild_name=guild.name))[:80]}\n"
-        f"**Titre :** {(cfg.get('ticket_panel_title') or tr(gid, 'ticket_panel_title'))[:80]}\n"
-        f"**Options :** `{len(questions)}/{MAX_TICKET_OPTIONS}`"
+        f"**{author_label} :** {(cfg.get('ticket_panel_author') or tr(gid, 'ticket_panel_author', guild_name=guild.name))[:80]}\n"
+        f"**{title_label} :** {(cfg.get('ticket_panel_title') or tr(gid, 'ticket_panel_title'))[:80]}\n"
+        f"**{options_label} :** `{len(questions)}/{MAX_TICKET_OPTIONS}`"
     ), inline=False)
-    e.add_field(name="Options du menu", value=ticket_option_summary(gid, questions), inline=False)
+    e.add_field(name=menu_label, value=ticket_option_summary(gid, questions), inline=False)
     return e
 
 def build_personnalisation_embed(guild):
     cfg = get_cfg(guild.id)
     gid = str(guild.id)
-    e = EG("Personnalisation du bot", "Configure l'apparence utilisee par le bot sur ce serveur.", gid=gid)
-    e.add_field(name="Nom du bot", value=get_bot_display_name(gid, guild), inline=True)
-    e.add_field(name="Couleur", value=f"`#{cfg.get('embed_color', 0x5865F2):06X}`", inline=True)
-    e.add_field(name="Footer", value=cfg.get("embed_footer", f"{get_bot_display_name(gid, guild)} - Protection de votre communaute")[:100], inline=True)
-    e.add_field(name="Logo du bot", value="Configure" if cfg.get("embed_logo") else "Non defini", inline=True)
-    e.add_field(name="Banniere du bot", value="Configuree" if cfg.get("embed_banner") else "Non definie", inline=True)
-    e.add_field(name="Icone footer", value="Configuree" if cfg.get("embed_footer_icon") else "Non definie", inline=True)
+    if get_lang(gid) == "fr":
+        e = EG("Personnalisation du bot", "Configure l'apparence utilisee par le bot sur ce serveur.", gid=gid)
+        labels = ("Nom du bot", "Couleur", "Footer", "Logo du bot", "Banniere du bot", "Icone footer")
+        configured, unset = "Configure", "Non defini"
+        banner_configured, banner_unset = "Configuree", "Non definie"
+    else:
+        e = EG("Bot customization", "Configure the bot appearance used on this server.", gid=gid)
+        labels = ("Bot name", "Color", "Footer", "Bot logo", "Bot banner", "Footer icon")
+        configured, unset = "Set", "Not set"
+        banner_configured, banner_unset = "Set", "Not set"
+    e.add_field(name=labels[0], value=get_bot_display_name(gid, guild), inline=True)
+    e.add_field(name=labels[1], value=f"`#{cfg.get('embed_color', 0x5865F2):06X}`", inline=True)
+    e.add_field(name=labels[2], value=cfg.get("embed_footer", f"{get_bot_display_name(gid, guild)} - Protection de votre communaute")[:100], inline=True)
+    e.add_field(name=labels[3], value=configured if cfg.get("embed_logo") else unset, inline=True)
+    e.add_field(name=labels[4], value=banner_configured if cfg.get("embed_banner") else banner_unset, inline=True)
+    e.add_field(name=labels[5], value=banner_configured if cfg.get("embed_footer_icon") else banner_unset, inline=True)
     e.add_field(name=tr(gid, "language"), value=format_lang(gid), inline=True)
     return e
 
@@ -648,6 +733,28 @@ def load_tickets():
 
 def save_tickets(d):
     jsave(F_TICKETS, d)
+
+def add_rating(gid, user_id, note):
+    d = jload(F_RATINGS)
+    g = str(gid)
+    d.setdefault(g, [])
+    d[g].append({
+        "user_id": str(user_id),
+        "note": int(note),
+        "date": now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    jsave(F_RATINGS, d)
+
+def get_rating_stats(gid):
+    ratings = jload(F_RATINGS).get(str(gid), [])
+    notes = [int(r.get("note", 0)) for r in ratings if 1 <= int(r.get("note", 0) or 0) <= 5]
+    if not notes:
+        return {"count": 0, "avg": 0, "last": []}
+    return {
+        "count": len(notes),
+        "avg": sum(notes) / len(notes),
+        "last": ratings[-10:],
+    }
 
 # ════════════════════════════════════════════════
 #  STATISTIQUES
@@ -866,6 +973,8 @@ async def make_transcript(channel, tdata):
         f"  Ticket    : {tdata.get('nom','?')}",
         f"  Catégorie : {tdata.get('categorie','?')}",
         f"  Créateur  : {tdata.get('pseudo','?')} (ID: {tdata.get('user_id','?')})",
+        f"  Priorité  : {priority_label(None, tdata.get('priority')) if tdata.get('priority') else 'Non definie'}",
+        f"  Statut    : {'Ferme' if tdata.get('closed') else 'Ouvert'}",
         f"  Motif     : {tdata.get('motif','?')}",
         f"  Date      : {tdata.get('date','?')}",
         f"  Export    : {fmt()}", "━"*60, ""
@@ -993,6 +1102,8 @@ class VueNotation(discord.ui.View):
 
     async def _noter(self, interaction: discord.Interaction, note: int):
         gid = self.gid or (str(interaction.guild.id) if interaction.guild else None)
+        if gid:
+            add_rating(gid, interaction.user.id, note)
         self.clear_items()
         etoiles = "*" * note
         e = EG("Notation enregistree", f"Merci, ta note **{etoiles} {note}/5** a ete enregistree.", 0xFFD700, gid)
@@ -1018,103 +1129,174 @@ class VueNotation(discord.ui.View):
     async def n5(self, i, b): await self._noter(i, 5)
 
 class VueTicket(discord.ui.View):
-    def __init__(self, uid=""):
+    def __init__(self, uid="", gid=None):
         super().__init__(timeout=None)
-        self.uid = uid
+        self.uid = str(uid) if uid else ""
+        self.gid = str(gid) if gid else None
+        labels = {
+            "tkt_trs": tr(self.gid, "btn_transcript"),
+            "tkt_close": tr(self.gid, "btn_close_ticket"),
+            "tkt_delete": tr(self.gid, "btn_delete_ticket"),
+        }
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.custom_id in labels:
+                child.label = labels[child.custom_id]
 
-    def _peut(self, i: discord.Interaction) -> bool:
-        if self.uid:
-            return i.user.guild_permissions.manage_channels or str(i.user.id) == self.uid or is_staff(i.user, i.guild.id)
-        return i.user.guild_permissions.manage_channels or is_staff(i.user, i.guild.id)
+    def _ticket_data(self, interaction):
+        tickets_data = load_tickets()
+        cid = str(interaction.channel.id)
+        return tickets_data, tickets_data.get("tickets", {}).get(cid, {})
 
-    @discord.ui.button(label="Transcript", style=discord.ButtonStyle.secondary, custom_id="tkt_trs", row=0)
-    async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._peut(interaction):
-            try:
-                await interaction.response.send_message("Permission refusee.", ephemeral=True)
-            except Exception:
-                pass
-            return
-        await _safe_defer(interaction)
-        tdata = load_tickets().get("tickets", {}).get(str(interaction.channel.id), {})
+    def _gid(self, interaction):
+        return self.gid or (str(interaction.guild.id) if interaction.guild else None)
+
+    def _owner_id(self, tdata):
+        return self.uid or str(tdata.get("user_id") or "")
+
+    def _staff(self, i: discord.Interaction) -> bool:
+        return bool(i.guild and (i.user.guild_permissions.manage_channels or is_staff(i.user, i.guild.id)))
+
+    def _peut(self, i: discord.Interaction, tdata=None) -> bool:
+        tdata = tdata or self._ticket_data(i)[1]
+        uid = self._owner_id(tdata)
+        return self._staff(i) or (uid and str(i.user.id) == uid)
+
+    async def _send_transcript_dm(self, interaction, tdata):
+        gid = self._gid(interaction)
         f = await make_transcript(interaction.channel, tdata)
-        nom = f"transcript-{interaction.channel.name}-{now().strftime('%Y%m%d-%H%M')}.txt"
-        gid = str(interaction.guild.id)
-        e = EG("Transcript genere", couleur=0x5865F2, gid=gid)
-        e.add_field(name="Ticket", value=interaction.channel.name, inline=True)
-        e.add_field(name="Date", value=fmt(), inline=True)
-        e.add_field(name="Par", value=str(interaction.user), inline=True)
+        ticket_name = tdata.get("nom") or interaction.channel.name
+        nom = f"transcript-{ticket_name}-{now().strftime('%Y%m%d-%H%M')}.txt"
+        e = EG(tr(gid, "transcript_dm_title", ticket=ticket_name), tr(gid, "transcript_dm_desc", ticket=ticket_name), 0x5865F2, gid)
+        e.add_field(name="Ticket", value=f"`{ticket_name}`", inline=True)
+        e.add_field(name=tr(gid, "category"), value=tdata.get("categorie", "?"), inline=True)
+        e.add_field(name=tr(gid, "creator"), value=tdata.get("pseudo", "?"), inline=True)
+        if tdata.get("priority"):
+            e.add_field(name=tr(gid, "priority"), value=priority_label(gid, tdata.get("priority")), inline=True)
+        e.add_field(name=tr(gid, "opened_at"), value=tdata.get("date", "?"), inline=True)
         try:
-            await interaction.followup.send(embed=e, file=discord.File(f, filename=nom), ephemeral=True)
+            f.seek(0)
+            await interaction.user.send(embed=e, file=discord.File(f, filename=nom))
+            return True
+        except Exception:
+            return False
+
+    async def _set_priority(self, interaction, priority):
+        if not self._staff(interaction):
+            return await interaction.response.send_message(tr(self._gid(interaction), "permission_denied"), ephemeral=True)
+        await _safe_defer(interaction, ephemeral=False)
+        gid = self._gid(interaction)
+        tickets_data, tdata = self._ticket_data(interaction)
+        cid = str(interaction.channel.id)
+        tdata["priority"] = normalize_priority(priority)
+        new_name = ticket_name_with_priority(interaction.channel.name, priority)
+        try:
+            await interaction.channel.edit(name=new_name, reason=f"Ticket priority set by {interaction.user}")
+            tdata["nom"] = new_name
         except Exception:
             pass
+        tickets_data.setdefault("tickets", {})[cid] = tdata
+        save_tickets(tickets_data)
+        e = EG(tr(gid, "priority_updated"), tr(gid, "priority_updated_desc", user=interaction.user.mention, priority=priority_label(gid, priority)), PRIORITY_INFO[priority]["color"], gid)
+        await interaction.followup.send(embed=e)
 
-    @discord.ui.button(label="Fermer", style=discord.ButtonStyle.danger, custom_id="tkt_close", row=0)
+    @discord.ui.button(label="🟢 P1", style=discord.ButtonStyle.success, custom_id="tkt_prio_1", row=0)
+    async def prio1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_priority(interaction, 1)
+
+    @discord.ui.button(label="🟡 P2", style=discord.ButtonStyle.primary, custom_id="tkt_prio_2", row=0)
+    async def prio2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_priority(interaction, 2)
+
+    @discord.ui.button(label="🔴 P3", style=discord.ButtonStyle.danger, custom_id="tkt_prio_3", row=0)
+    async def prio3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_priority(interaction, 3)
+
+    @discord.ui.button(label="Transcript", style=discord.ButtonStyle.secondary, custom_id="tkt_trs", row=1)
+    async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tickets_data, tdata = self._ticket_data(interaction)
+        gid = self._gid(interaction)
+        if not self._peut(interaction, tdata):
+            return await interaction.response.send_message(tr(gid, "permission_denied"), ephemeral=True)
+        await _safe_defer(interaction)
+        ok = await self._send_transcript_dm(interaction, tdata)
+        if ok:
+            e = EG(tr(gid, "transcript_sent"), couleur=0x43B581, gid=gid)
+        else:
+            e = EG(tr(gid, "transcript_dm_error"), couleur=0xED4245, gid=gid)
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.ui.button(label="Fermer le ticket", style=discord.ButtonStyle.danger, custom_id="tkt_close", row=1)
     async def fermer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._peut(interaction):
-            try:
-                await interaction.response.send_message("Permission refusee.", ephemeral=True)
-            except Exception:
-                pass
-            return
+        tickets_data, tdata = self._ticket_data(interaction)
+        gid = self._gid(interaction)
+        if not self._peut(interaction, tdata):
+            return await interaction.response.send_message(tr(gid, "permission_denied"), ephemeral=True)
         cid = str(interaction.channel.id)
         if cid in _tickets_closing:
-            try:
-                await interaction.response.send_message("Fermeture deja en cours.", ephemeral=True)
-            except Exception:
-                pass
-            return
+            return await interaction.response.send_message("Fermeture deja en cours.", ephemeral=True)
         _tickets_closing.add(cid)
         try:
             await _safe_defer(interaction, ephemeral=False)
-            gid = str(interaction.guild.id)
-            tickets_data = load_tickets()
-            tdata = tickets_data.get("tickets", {}).get(cid, {})
-            f_bytes = await make_transcript(interaction.channel, tdata)
-            nom = f"transcript-{interaction.channel.name}-{now().strftime('%Y%m%d-%H%M')}.txt"
-
-            e_cl = EG("Fermeture du ticket", f"Ferme par {interaction.user.mention}\nSuppression dans 20s.", 0xED4245, gid)
-            try:
-                await interaction.followup.send(embed=e_cl)
-            except Exception:
-                pass
-
-            uid = tdata.get("user_id")
+            uid = self._owner_id(tdata)
+            if uid:
+                try:
+                    member = interaction.guild.get_member(int(uid)) or await interaction.guild.fetch_member(int(uid))
+                    await interaction.channel.set_permissions(member, read_messages=False, send_messages=False, attach_files=False)
+                except Exception:
+                    pass
+            tdata["closed"] = True
+            tdata["closed_by"] = str(interaction.user)
+            tdata["closed_at"] = now().strftime("%Y-%m-%d %H:%M:%S")
+            tickets_data.setdefault("tickets", {})[cid] = tdata
+            save_tickets(tickets_data)
+            e = EG(tr(gid, "ticket_closed_title"), tr(gid, "ticket_closed_desc", user=interaction.user.mention), 0xED4245, gid)
+            e.add_field(name="Ticket", value=f"`{interaction.channel.name}`", inline=True)
+            e.add_field(name=tr(gid, "creator"), value=tdata.get("pseudo", "?"), inline=True)
+            await interaction.followup.send(embed=e)
             if uid:
                 try:
                     u = await bot.fetch_user(int(uid))
-                    dm = EG("Ticket ferme", gid=gid)
-                    dm.description = (f"Ton ticket **{tdata.get('nom','?')}** a ete ferme.\n"
-                                      "Voici le transcript de vos echanges. Tu peux aussi noter le support ci-dessous.")
-                    f_bytes.seek(0)
-                    await u.send(embed=dm, file=discord.File(f_bytes, filename=nom), view=VueNotation(gid))
+                    f = await make_transcript(interaction.channel, tdata)
+                    dm = EG(tr(gid, "ticket_closed_title"), f"Ton ticket **{tdata.get('nom', interaction.channel.name)}** a ete ferme.", 0xED4245, gid)
+                    f.seek(0)
+                    await u.send(embed=dm, file=discord.File(f, filename=f"transcript-{interaction.channel.name}.txt"), view=VueNotation(gid))
                 except Exception:
                     pass
-
-            try:
-                ch_id = get_ch(gid, "salon_logs", DEFAULT_LOGS)
-                log_ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
-                le = E("LOG - Ticket ferme", couleur=0x5865F2)
-                le.add_field(name="Ticket", value=tdata.get("nom", "?"), inline=True)
-                le.add_field(name="Createur", value=tdata.get("pseudo", "?"), inline=True)
-                le.add_field(name="Categorie", value=tdata.get("categorie", "?"), inline=True)
-                le.add_field(name="Ferme par", value=str(interaction.user), inline=True)
-                f_bytes.seek(0)
-                await log_ch.send(embed=le, file=discord.File(f_bytes, filename=nom))
-            except Exception:
-                pass
-
-            if cid in tickets_data.get("tickets", {}):
-                tickets_data["tickets"].pop(cid, None)
-                save_tickets(tickets_data)
-
-            await asyncio.sleep(20)
-            try:
-                await interaction.channel.delete()
-            except Exception:
-                pass
         finally:
             _tickets_closing.discard(cid)
+
+    @discord.ui.button(label="Supprimer", style=discord.ButtonStyle.danger, custom_id="tkt_delete", row=1)
+    async def supprimer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._staff(interaction):
+            return await interaction.response.send_message(tr(self._gid(interaction), "permission_denied"), ephemeral=True)
+        await _safe_defer(interaction)
+        gid = self._gid(interaction)
+        tickets_data, tdata = self._ticket_data(interaction)
+        ticket_name = tdata.get("nom") or interaction.channel.name
+        f = await make_transcript(interaction.channel, tdata)
+        filename = f"transcript-{ticket_name}-{now().strftime('%Y%m%d-%H%M')}.txt"
+        try:
+            ch_id = get_ch(gid, "salon_logs", DEFAULT_LOGS)
+            log_ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+            le = EG(tr(gid, "ticket_delete_log_title"), tr(gid, "ticket_deleted_desc", user=interaction.user.mention, ticket=f"#{ticket_name}"), 0xED4245, gid)
+            le.add_field(name="Ticket", value=f"`#{ticket_name}`", inline=True)
+            le.add_field(name=tr(gid, "creator"), value=tdata.get("pseudo", "?"), inline=True)
+            le.add_field(name=tr(gid, "category"), value=tdata.get("categorie", "?"), inline=True)
+            if tdata.get("priority"):
+                le.add_field(name=tr(gid, "priority"), value=priority_label(gid, tdata.get("priority")), inline=True)
+            le.add_field(name=tr(gid, "reason"), value=tdata.get("motif", "?")[:1000], inline=False)
+            f.seek(0)
+            await log_ch.send(embed=le, file=discord.File(f, filename=filename))
+        except Exception:
+            pass
+        tickets_data.get("tickets", {}).pop(str(interaction.channel.id), None)
+        save_tickets(tickets_data)
+        await interaction.followup.send(embed=EG(tr(gid, "ticket_deleted_title"), tr(gid, "ticket_deleted_desc", user=interaction.user.mention, ticket=f"#{ticket_name}"), 0xED4245, gid), ephemeral=True)
+        await asyncio.sleep(2)
+        try:
+            await interaction.channel.delete(reason=f"Ticket deleted by {interaction.user}")
+        except Exception:
+            pass
 
 class TicketCategorySelect(discord.ui.Select):
     def __init__(self, gid=None):
@@ -1126,10 +1308,9 @@ class TicketCategorySelect(discord.ui.Select):
                 label=q["label"][:100],
                 description=(q.get("desc") or "Ouvrir un ticket")[:100],
                 value=str(idx),
-                emoji=priority_emoji(q.get("priority", 1)),
             ))
         if not options:
-            options = [discord.SelectOption(label="Ticket", description="Ouvrir un ticket", value="0", emoji="🟢")]
+            options = [discord.SelectOption(label="Ticket", description="Ouvrir un ticket", value="0")]
         placeholder = tr(self.gid, "ticket_menu_placeholder") if self.gid else TEXTS["ticket_menu_placeholder"][DEFAULT_LANG]
         super().__init__(placeholder=placeholder[:150], options=options, min_values=1, max_values=1, custom_id="tkt_category_select", row=0)
 
@@ -1258,9 +1439,28 @@ async def publish_or_update_system_message(guild, channel, key, suffix, embed, v
     update_cfg(guild.id, ch_key, channel.id)
     return msg
 
+async def delete_system_message(guild, key, suffix):
+    cfg = get_cfg(guild.id)
+    msg_key = f"{key}_{suffix}_message_id"
+    ch_key = f"{key}_{suffix}_channel_id"
+    old_msg_id = cfg.get(msg_key)
+    old_ch_id = cfg.get(ch_key)
+    if old_msg_id and old_ch_id:
+        try:
+            old_ch = guild.get_channel(int(old_ch_id)) or await bot.fetch_channel(int(old_ch_id))
+            old_msg = await old_ch.fetch_message(int(old_msg_id))
+            await old_msg.delete()
+        except Exception:
+            pass
+    cfg = get_cfg(guild.id)
+    cfg.pop(msg_key, None)
+    cfg.pop(ch_key, None)
+    set_cfg(guild.id, cfg)
+
 async def setup_configured_channel(guild, channel, key, label):
     gid = str(guild.id)
     if key == "salon_tickets":
+        await delete_system_message(guild, key, "status")
         e = build_ticket_panel_embed(guild)
         await publish_or_update_system_message(guild, channel, key, "panel", e, VueChoixCategorie(gid))
         return "Le systeme Tickets est actif et le panel est disponible."
@@ -1472,7 +1672,6 @@ class ModalTicketPanelText(discord.ui.Modal, title="Message du panel ticket"):
 class ModalAjouterTicketOption(discord.ui.Modal, title="Ajouter une option ticket"):
     label = discord.ui.TextInput(label="Nom affiche", placeholder="Ex : Support technique", max_length=80)
     desc = discord.ui.TextInput(label="Description", placeholder="Ex : Probleme technique ou bug", required=False, max_length=100)
-    priority = discord.ui.TextInput(label="Priorite 1, 2 ou 3", placeholder="1 = vert, 2 = jaune, 3 = rouge", required=False, max_length=1)
 
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
@@ -1483,7 +1682,6 @@ class ModalAjouterTicketOption(discord.ui.Modal, title="Ajouter une option ticke
         questions.append(normalize_ticket_question({
             "label": self.label.value,
             "desc": self.desc.value,
-            "priority": self.priority.value,
         }))
         set_ticket_questions(gid, questions)
         await refresh_ticket_panel_message(i.guild)
@@ -1493,7 +1691,6 @@ class ModalModifierTicketOption(discord.ui.Modal, title="Modifier une option tic
     index = discord.ui.TextInput(label="Numero de l'option", placeholder="Ex : 1", max_length=2)
     label = discord.ui.TextInput(label="Nouveau nom", placeholder="Laisse vide pour garder", required=False, max_length=80)
     desc = discord.ui.TextInput(label="Nouvelle description", placeholder="Laisse vide pour garder", required=False, max_length=100)
-    priority = discord.ui.TextInput(label="Priorite 1, 2 ou 3", placeholder="Laisse vide pour garder", required=False, max_length=1)
 
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
@@ -1510,8 +1707,6 @@ class ModalModifierTicketOption(discord.ui.Modal, title="Modifier une option tic
             q["label"] = str(self.label.value).strip()
         if str(self.desc.value or "").strip():
             q["desc"] = str(self.desc.value).strip()
-        if str(self.priority.value or "").strip():
-            q["priority"] = normalize_priority(self.priority.value, q.get("priority", 1))
         questions[idx] = normalize_ticket_question(q)
         set_ticket_questions(gid, questions)
         await refresh_ticket_panel_message(i.guild)
@@ -1674,7 +1869,8 @@ class SelectSystemeSalon(discord.ui.Select):
     def __init__(self, parent):
         self.parent_view = parent
         options = [discord.SelectOption(label=label, value=key) for key, label in SALON_SYSTEMS.items()]
-        super().__init__(placeholder="Choisir le systeme", options=options, min_values=1, max_values=1, row=0)
+        placeholder = "Choisir le systeme" if get_lang(getattr(parent, "gid", None)) == "fr" else "Choose the system"
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1, row=0)
 
     async def callback(self, i: discord.Interaction):
         self.parent_view.selected_key = self.values[0]
@@ -1684,7 +1880,8 @@ class SelectSystemeSalon(discord.ui.Select):
 class SelectSalonConfig(discord.ui.ChannelSelect):
     def __init__(self, parent):
         self.parent_view = parent
-        super().__init__(placeholder="Choisir le salon", channel_types=[discord.ChannelType.text], min_values=1, max_values=1, row=1)
+        placeholder = "Choisir le salon" if get_lang(getattr(parent, "gid", None)) == "fr" else "Choose the channel"
+        super().__init__(placeholder=placeholder, channel_types=[discord.ChannelType.text], min_values=1, max_values=1, row=1)
 
     async def callback(self, i: discord.Interaction):
         ch = self.values[0]
@@ -1698,12 +1895,17 @@ class SelectSalonConfig(discord.ui.ChannelSelect):
             pass
 
 class VuePanelSalons(discord.ui.View):
-    def __init__(self):
+    def __init__(self, gid=None):
         super().__init__(timeout=180)
+        self.gid = str(gid) if gid else None
         self.selected_key = "salon_tickets"
         self.selected_label = "Tickets"
         self.add_item(SelectSystemeSalon(self))
         self.add_item(SelectSalonConfig(self))
+        localize_buttons(self, self.gid, {
+            "Voir salons": "btn_view_channels",
+            "Creer le salon": "btn_create_channel",
+        })
 
     async def _tickets_only(self, i):
         if self.selected_key == "salon_tickets":
@@ -1726,47 +1928,67 @@ class VuePanelSalons(discord.ui.View):
         try: await i.response.send_modal(ModalCreerSalon(self.selected_key, self.selected_label))
         except Exception: pass
 
-    @discord.ui.button(label="Message ticket", style=discord.ButtonStyle.primary, row=3)
+class VuePanelTickets(discord.ui.View):
+    def __init__(self, gid=None):
+        super().__init__(timeout=180)
+        self.gid = str(gid) if gid else None
+        localize_buttons(self, self.gid, {
+            "Message ticket": "btn_ticket_message",
+            "Ajouter option": "btn_add_option",
+            "Modifier option": "btn_edit_option",
+            "Supprimer option": "btn_delete_option",
+            "Apercu tickets": "btn_ticket_preview",
+            "Actualiser panel": "btn_ticket_refresh",
+            "Poster ici": "btn_ticket_deploy_here",
+        })
+
+    @discord.ui.button(label="Message ticket", style=discord.ButtonStyle.primary, row=0)
     async def ticket_message(self, i: discord.Interaction, b):
-        if not await self._tickets_only(i): return
         try: await i.response.send_modal(ModalTicketPanelText())
         except Exception: pass
 
-    @discord.ui.button(label="Ajouter option", style=discord.ButtonStyle.success, row=3)
+    @discord.ui.button(label="Ajouter option", style=discord.ButtonStyle.success, row=0)
     async def ticket_add(self, i: discord.Interaction, b):
-        if not await self._tickets_only(i): return
         try: await i.response.send_modal(ModalAjouterTicketOption())
         except Exception: pass
 
-    @discord.ui.button(label="Modifier option", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Modifier option", style=discord.ButtonStyle.secondary, row=0)
     async def ticket_edit(self, i: discord.Interaction, b):
-        if not await self._tickets_only(i): return
         try: await i.response.send_modal(ModalModifierTicketOption())
         except Exception: pass
 
-    @discord.ui.button(label="Supprimer option", style=discord.ButtonStyle.danger, row=3)
+    @discord.ui.button(label="Supprimer option", style=discord.ButtonStyle.danger, row=1)
     async def ticket_delete(self, i: discord.Interaction, b):
-        if not await self._tickets_only(i): return
         try: await i.response.send_modal(ModalSupprimerTicketOption())
         except Exception: pass
 
-    @discord.ui.button(label="Apercu tickets", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="Apercu tickets", style=discord.ButtonStyle.secondary, row=1)
     async def ticket_preview(self, i: discord.Interaction, b):
-        if not await self._tickets_only(i): return
         try:
             await i.response.send_message(embed=build_ticket_config_embed(i.guild), ephemeral=True)
         except Exception:
             pass
 
-    @discord.ui.button(label="Actualiser panel", style=discord.ButtonStyle.primary, row=4)
+    @discord.ui.button(label="Actualiser panel", style=discord.ButtonStyle.primary, row=1)
     async def ticket_refresh(self, i: discord.Interaction, b):
-        if not await self._tickets_only(i): return
         await _safe_defer(i)
         ch = await refresh_ticket_panel_message(i.guild)
+        gid = str(i.guild.id)
         if ch:
-            await i.followup.send(embed=E("Panel actualise", f"Message ticket mis a jour dans {ch.mention}.", 0x43B581), ephemeral=True)
+            title = "Panel actualise" if get_lang(gid) == "fr" else "Panel refreshed"
+            desc = f"Message ticket mis a jour dans {ch.mention}." if get_lang(gid) == "fr" else f"Ticket message updated in {ch.mention}."
+            await i.followup.send(embed=EG(title, desc, 0x43B581, gid), ephemeral=True)
         else:
-            await i.followup.send("Salon ticket introuvable. Choisis un salon ticket d'abord.", ephemeral=True)
+            msg = "Salon ticket introuvable. Choisis un salon ticket d'abord." if get_lang(gid) == "fr" else "Ticket channel not found. Choose a ticket channel first."
+            await i.followup.send(embed=build_simple_embed(gid, "Salon introuvable", "Channel not found", msg, 0xED4245), ephemeral=True)
+
+    @discord.ui.button(label="Poster ici", style=discord.ButtonStyle.success, row=2)
+    async def deploy_here(self, i: discord.Interaction, b):
+        await _safe_defer(i)
+        gid = str(i.guild.id)
+        update_cfg(i.guild.id, "salon_tickets", i.channel.id)
+        await setup_configured_channel(i.guild, i.channel, "salon_tickets", "Tickets")
+        await i.followup.send(embed=EG(tr(gid, "ticket_deployed_title"), tr(gid, "ticket_deployed_desc", channel=i.channel.mention), 0x43B581, gid), ephemeral=True)
 
 class SelectRoleStaff(discord.ui.RoleSelect):
     def __init__(self, action, row):
@@ -1853,9 +2075,19 @@ class SelectCouleurEmbed(discord.ui.Select):
         await refresh_interaction_message(i, build_personnalisation_embed(i.guild), self.view)
 
 class VuePanelPersonnalisation(discord.ui.View):
-    def __init__(self):
+    def __init__(self, gid=None):
         super().__init__(timeout=180)
+        self.gid = str(gid) if gid else None
         self.add_item(SelectCouleurEmbed())
+        localize_buttons(self, self.gid, {
+            "Nom du bot": "btn_bot_name",
+            "Upload logo": "btn_upload_logo",
+            "Upload banniere": "btn_upload_banner",
+            "Upload icone footer": "btn_upload_footer",
+            "Modifier footer": "btn_edit_footer",
+            "Reinitialiser": "btn_reset",
+            "Apercu": "btn_preview",
+        })
 
     async def _upload_image(self, i: discord.Interaction, key, label):
         try:
@@ -1925,8 +2157,9 @@ class VuePanelPersonnalisation(discord.ui.View):
             pass
 
 class SelectLangueBot(discord.ui.Select):
-    def __init__(self):
-        super().__init__(placeholder="Choisir la langue", options=BOT_LANGUAGE_CHOICES, min_values=1, max_values=1, row=0)
+    def __init__(self, gid=None):
+        placeholder = "Choisir la langue" if get_lang(gid) == "fr" else "Choose language"
+        super().__init__(placeholder=placeholder, options=BOT_LANGUAGE_CHOICES, min_values=1, max_values=1, row=0)
 
     async def callback(self, i: discord.Interaction):
         await _safe_defer(i)
@@ -1944,12 +2177,29 @@ class SelectLangueBot(discord.ui.Select):
             await i.followup.send(embed=e, ephemeral=True)
 
 class VuePanelLangue(discord.ui.View):
+    def __init__(self, gid=None):
+        super().__init__(timeout=180)
+        self.add_item(SelectLangueBot(gid))
+
+class VuePanelRating(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=180)
-        self.add_item(SelectLangueBot())
 
 class VuePanel(discord.ui.View):
-    def __init__(self): super().__init__(timeout=300)
+    def __init__(self, gid=None):
+        super().__init__(timeout=300)
+        self.gid = str(gid) if gid else None
+        localize_buttons(self, self.gid, {
+            "Insultes": "btn_insultes",
+            "Securite": "btn_security",
+            "Salons": "btn_channels",
+            "Ticket": "btn_ticket_interface",
+            "Stats & Bans": "btn_stats",
+            "Staff": "btn_staff",
+            "Personnalisation": "btn_personnalisation",
+            "Langue": "btn_language",
+            "Rating": "btn_rating",
+        })
 
     def _admin(self, i): return i.user.guild_permissions.administrator
 
@@ -1983,7 +2233,15 @@ class VuePanel(discord.ui.View):
             try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        await self._sub(i, build_salons_embed(i.guild, "Tickets"), VuePanelSalons())
+        await self._sub(i, build_salons_embed(i.guild, "Tickets"), VuePanelSalons(i.guild.id))
+
+    @discord.ui.button(label="Ticket", style=discord.ButtonStyle.success, row=1)
+    async def tickets(self, i: discord.Interaction, b):
+        if not self._admin(i):
+            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
+            except Exception: pass
+            return
+        await self._sub(i, build_ticket_config_embed(i.guild), VuePanelTickets(i.guild.id))
 
     @discord.ui.button(label="Stats & Bans", style=discord.ButtonStyle.secondary, row=0)
     async def stats(self, i: discord.Interaction, b):
@@ -2007,7 +2265,7 @@ class VuePanel(discord.ui.View):
             try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        await self._sub(i, build_personnalisation_embed(i.guild), VuePanelPersonnalisation())
+        await self._sub(i, build_personnalisation_embed(i.guild), VuePanelPersonnalisation(i.guild.id))
 
     @discord.ui.button(label="Langue", style=discord.ButtonStyle.secondary, row=1)
     async def langue(self, i: discord.Interaction, b):
@@ -2015,7 +2273,15 @@ class VuePanel(discord.ui.View):
             try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        await self._sub(i, build_language_embed(i.guild), VuePanelLangue())
+        await self._sub(i, build_language_embed(i.guild), VuePanelLangue(i.guild.id))
+
+    @discord.ui.button(label="Rating", style=discord.ButtonStyle.secondary, row=2)
+    async def rating(self, i: discord.Interaction, b):
+        if not self._admin(i):
+            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
+            except Exception: pass
+            return
+        await self._sub(i, build_rating_embed(i.guild), VuePanelRating())
 
 #  MODALS PRINCIPAUX
 # ════════════════════════════════════════════════
@@ -2126,13 +2392,12 @@ class ModalMotifTicket(discord.ui.Modal, title="🎫 Ouvrir un ticket"):
         gid = str(i.guild.id)
         tickets = load_tickets()
         label = self.categorie["label"]
-        priority = normalize_priority(self.categorie.get("priority", 1))
         cat_key = slugify_ticket_label(label)
         if gid not in tickets["compteur"]: tickets["compteur"][gid] = {}
         if cat_key not in tickets["compteur"][gid]: tickets["compteur"][gid][cat_key] = 0
         tickets["compteur"][gid][cat_key] += 1
         num = str(tickets["compteur"][gid][cat_key]).zfill(4)
-        nom = ticket_channel_name(label, num, priority)
+        nom = ticket_channel_name(label, num)
         ch_id = get_ch(gid, "salon_tickets", DEFAULT_TICKETS)
         ref = i.guild.get_channel(ch_id)
         cat_discord = ref.category if ref else None
@@ -2152,17 +2417,15 @@ class ModalMotifTicket(discord.ui.Modal, title="🎫 Ouvrir un ticket"):
         tickets["tickets"][str(channel.id)] = {
             "channel_id": channel.id, "user_id": str(i.user.id),
             "pseudo": str(i.user), "nom": nom, "categorie": label,
-            "priority": priority, "motif": self.motif.value, "date": now().strftime("%Y-%m-%d %H:%M:%S")
+            "priority": 0, "closed": False, "motif": self.motif.value, "date": now().strftime("%Y-%m-%d %H:%M:%S")
         }
         save_tickets(tickets)
-        e = EG(f"{priority_emoji(priority)} " + tr(gid, "ticket_welcome_title", category=label), gid=gid)
-        e.description = tr(gid, "ticket_welcome_desc", user=i.user.mention)
-        e.add_field(name=tr(gid, "category"), value=f"`{label}`", inline=True)
-        e.add_field(name=tr(gid, "priority"), value=priority_label(gid, priority), inline=True)
+        e = EG(tr(gid, "ticket_welcome_title", category=label), gid=gid)
+        e.description = f"**{tr(gid, 'reason')} :** {label}\n\n{tr(gid, 'ticket_welcome_desc', user=i.user.mention)}"
         e.add_field(name=tr(gid, "creator"), value=i.user.mention, inline=True)
         e.add_field(name=tr(gid, "opened_at"), value=fmt(), inline=True)
         e.add_field(name=tr(gid, "reason"), value=self.motif.value, inline=False)
-        await channel.send(embed=e, view=VueTicket(str(i.user.id)))
+        await channel.send(content=tr(gid, "ticket_open_content", user=i.user.mention), embed=e, view=VueTicket(str(i.user.id), gid))
         await i.followup.send(embed=EG(tr(gid, "ticket_created_title"), tr(gid, "ticket_created_desc", channel=channel.mention), 0x43B581, gid), ephemeral=True)
 
 class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
@@ -2345,6 +2608,24 @@ def build_language_embed(guild):
     e.add_field(name=tr(gid, "language_current"), value=format_lang(gid), inline=True)
     return e
 
+def build_rating_embed(guild):
+    gid = str(guild.id)
+    stats = get_rating_stats(gid)
+    e = E(tr(gid, "rating_panel_title"), tr(gid, "rating_panel_desc"), 0xFFD700)
+    if not stats["count"]:
+        e.description = tr(gid, "rating_empty")
+        return e
+    avg = stats["avg"]
+    stars = "★" * max(1, round(avg)) + "☆" * max(0, 5 - round(avg))
+    e.add_field(name=tr(gid, "rating_average"), value=f"**{avg:.2f}/5**\n{stars}", inline=True)
+    e.add_field(name=tr(gid, "rating_count"), value=f"`{stats['count']}`", inline=True)
+    last = []
+    for r in stats["last"][-5:]:
+        last.append(f"`{r.get('date','?')}` - **{r.get('note','?')}/5**")
+    if last:
+        e.add_field(name="Dernieres notes" if get_lang(gid) == "fr" else "Latest ratings", value="\n".join(last), inline=False)
+    return e
+
 async def sync_guild_command_language(guild):
     lang = get_lang(guild.id)
     for cmd in bot.tree.get_commands():
@@ -2372,6 +2653,11 @@ async def on_ready():
             print(f"add_view {type(v).__name__}: {err}")
     try:
         synced = await bot.tree.sync()
+        for guild in bot.guilds:
+            try:
+                await sync_guild_command_language(guild)
+            except Exception as err:
+                print(f"sync langue {guild.id}: {err}")
         print(f"ModBot connecte : {bot.user}")
         print(f"{len(synced)} commandes synchronisees")
     except Exception as e:
@@ -2577,12 +2863,40 @@ async def deleteroles(ctx):
     await ctx.send(embed=e)
     track_mod(str(ctx.author.id), str(ctx.guild.id), "roles")
 
+async def delete_messages_safely(channel, limit=None, reason=""):
+    deleted = 0
+    async for msg in channel.history(limit=limit):
+        try:
+            await msg.delete(reason=reason)
+            deleted += 1
+            await asyncio.sleep(0.15)
+        except discord.NotFound:
+            continue
+        except discord.Forbidden:
+            raise
+        except discord.HTTPException:
+            continue
+    return deleted
+
+def build_clear_embed(gid, count, all_messages=False):
+    key = "clear_all_done" if all_messages else "clear_done"
+    title = "Messages supprimés" if get_lang(gid) == "fr" else "Messages deleted"
+    return EG(title, tr(gid, key, count=count), 0x43B581, gid)
+
+def build_simple_embed(gid, title_fr, title_en, desc, color=0x5865F2):
+    title = title_fr if get_lang(gid) == "fr" else title_en
+    return EG(title, desc, color, gid)
+
 class VueClearAllConfirm(discord.ui.View):
     def __init__(self, owner_id, channel_id, gid):
         super().__init__(timeout=60)
         self.owner_id = owner_id
         self.channel_id = channel_id
         self.gid = str(gid)
+        localize_buttons(self, self.gid, {
+            "Confirmer": "btn_confirm",
+            "Annuler": "btn_cancel",
+        })
 
     @discord.ui.button(label="Confirmer", style=discord.ButtonStyle.danger)
     async def confirm(self, i: discord.Interaction, b):
@@ -2593,18 +2907,19 @@ class VueClearAllConfirm(discord.ui.View):
             return await i.response.send_message(tr(self.gid, "channel_not_supported"), ephemeral=True)
         await _safe_defer(i)
         try:
-            deleted = await channel.purge(limit=None, reason=f"Clear all by {i.user}")
+            count = await delete_messages_safely(channel, limit=None, reason=f"Clear all by {i.user}")
         except Exception as ex:
             return await i.followup.send(f"Erreur : {ex}", ephemeral=True)
         self.clear_items()
-        await i.followup.send(tr(self.gid, "clear_all_done", count=len(deleted)), ephemeral=True)
+        await i.followup.send(embed=build_clear_embed(self.gid, count, all_messages=True), ephemeral=True)
 
     @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
     async def cancel(self, i: discord.Interaction, b):
         if i.user.id != self.owner_id:
             return await i.response.send_message(tr(self.gid, "permission_denied"), ephemeral=True)
         self.clear_items()
-        await i.response.edit_message(content="Annule.", embed=None, view=None)
+        e = build_simple_embed(self.gid, "Annule", "Cancelled", "Operation annulee." if get_lang(self.gid) == "fr" else "Operation cancelled.", 0x5865F2)
+        await i.response.edit_message(content=None, embed=e, view=None)
 
 # ════════════════════════════════════════════════
 #  SLASH COMMANDS
@@ -2663,7 +2978,7 @@ async def cmd_ticket(i: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 async def cmd_panel(i: discord.Interaction):
     try:
-        await i.response.send_message(embed=build_main_panel_embed(i.guild), view=VuePanel(), ephemeral=True)
+        await i.response.send_message(embed=build_main_panel_embed(i.guild), view=VuePanel(i.guild.id), ephemeral=True)
     except Exception:
         pass
 
@@ -2673,24 +2988,24 @@ async def cmd_panel(i: discord.Interaction):
 async def cmd_clear_message(i: discord.Interaction, nombre: int):
     gid = str(i.guild.id)
     if nombre < 1 or nombre > 100:
-        return await i.response.send_message(tr(gid, "clear_invalid"), ephemeral=True)
+        return await i.response.send_message(embed=build_simple_embed(gid, "Nombre invalide", "Invalid amount", tr(gid, "clear_invalid"), 0xED4245), ephemeral=True)
     if not hasattr(i.channel, "purge"):
-        return await i.response.send_message(tr(gid, "channel_not_supported"), ephemeral=True)
+        return await i.response.send_message(embed=build_simple_embed(gid, "Action impossible", "Action unavailable", tr(gid, "channel_not_supported"), 0xED4245), ephemeral=True)
     await _safe_defer(i)
     try:
-        deleted = await i.channel.purge(limit=nombre, reason=f"Clear message by {i.user}")
+        count = await delete_messages_safely(i.channel, limit=nombre, reason=f"Clear message by {i.user}")
     except Exception as ex:
         return await i.followup.send(f"Erreur : {ex}", ephemeral=True)
-    await i.followup.send(tr(gid, "clear_done", count=len(deleted)), ephemeral=True)
+    await i.followup.send(embed=build_clear_embed(gid, count), ephemeral=True)
 
 @bot.tree.command(name="clear-all", description="Supprimer tous les messages du salon")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def cmd_clear_all(i: discord.Interaction):
     gid = str(i.guild.id)
     if not hasattr(i.channel, "purge"):
-        return await i.response.send_message(tr(gid, "channel_not_supported"), ephemeral=True)
+        return await i.response.send_message(embed=build_simple_embed(gid, "Action impossible", "Action unavailable", tr(gid, "channel_not_supported"), 0xED4245), ephemeral=True)
     await i.response.send_message(
-        tr(gid, "clear_all_confirm"),
+        embed=build_simple_embed(gid, "Confirmation", "Confirmation", tr(gid, "clear_all_confirm"), 0xFFA500),
         view=VueClearAllConfirm(i.user.id, i.channel.id, gid),
         ephemeral=True,
     )
