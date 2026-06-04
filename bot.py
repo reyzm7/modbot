@@ -29,7 +29,7 @@ INSULTES_BASE = [
     "ta gueule","putain","abruti","imbecile","imbécile","cretin","crétin",
     "gogol","attardé","attarde","bouffon","trou du cul","trouduc",
     "enfoiré","ordure","dechet","déchet","baise","va te faire",
-    "nique ta mere","nique ta mère","ta race",
+    "nique ta mere","nique ta mère","ta race", "tdc", "vtf"
 ]
 
 LANGUES_CHOICES = [
