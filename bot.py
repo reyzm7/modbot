@@ -138,6 +138,7 @@ TEXTS = {
     "btn_ticket_deploy_here": {"fr": "📌 Poster ici", "en": "📌 Post here"},
     "btn_ticket_banner": {"fr": "🌄 Banniere", "en": "🌄 Banner"},
     "btn_view_channels": {"fr": "👁️ Voir salons", "en": "👁️ View channels"},
+    "btn_set_channel_id": {"fr": "🆔 Definir ID", "en": "🆔 Set ID"},
     "btn_create_channel": {"fr": "➕ Creer le salon", "en": "➕ Create channel"},
     "btn_bot_name": {"fr": "🏷️ Nom du bot", "en": "🏷️ Bot name"},
     "btn_upload_logo": {"fr": "🖼️ Logo", "en": "🖼️ Logo"},
@@ -327,8 +328,10 @@ def status_badge(active, gid=None):
         return "🟢 Enabled" if active else "🔴 Disabled"
     return "🟢 Actif" if active else "🔴 Inactif"
 
-def channel_badge(channel, empty):
-    return f"🟢 {channel.mention}" if channel else f"⚪ {empty}"
+def channel_badge(channel, empty, gid=None):
+    if channel:
+        return f"{status_badge(True, gid)}\n{channel.mention}\n`{channel.id}`"
+    return f"{status_badge(False, gid)}\n{empty}"
 
 def _role_lines(guild, role_ids, empty):
     if not role_ids:
@@ -429,19 +432,22 @@ def build_salons_embed(guild, selected_label="Tickets"):
     lang = get_lang(gid)
     if lang == "fr":
         e = EG("📍 Configuration des salons", couleur=0x5865F2, gid=gid)
-        e.description = f"Systeme selectionne : **{selected_label}**\nChoisis un systeme puis le salon associe."
+        e.description = f"Systeme selectionne : **{selected_label}**\nChoisis un systeme puis clique sur **🆔 Definir ID**."
         empty = "Non defini"
     else:
         e = EG("📍 Channel configuration", couleur=0x5865F2, gid=gid)
-        e.description = f"Selected system: **{selected_label}**\nChoose a system, then its channel."
+        e.description = f"Selected system: **{selected_label}**\nChoose a system, then click **🆔 Set ID**."
         empty = "Not set"
     salons = [("salon_logs", "Logs"), ("salon_suggestions", "Suggestions"),
               ("salon_reports", "Reports"), ("salon_tickets", "Tickets"),
               ("salon_staff_alert", "Staff Alert")]
     for key, label in salons:
         val = cfg.get(key)
-        ch = guild.get_channel(val) if val else None
-        e.add_field(name=label, value=channel_badge(ch, empty), inline=True)
+        try:
+            ch = guild.get_channel(int(val)) if val else None
+        except Exception:
+            ch = None
+        e.add_field(name=label, value=channel_badge(ch, empty, gid), inline=True)
     hint = "Pour les tickets, ouvre `Ticket` puis clique sur `Poster ici`." if lang == "fr" else "For tickets, open `Ticket` then click `Post here`."
     e.add_field(name="🎫 Ticket", value=hint, inline=False)
     return e
@@ -586,11 +592,14 @@ def build_ticket_config_embed(guild):
     options_label = "Options"
     menu_label = "Options du menu" if lang == "fr" else "Menu options"
     ch_id = get_ch(gid, "salon_tickets", DEFAULT_TICKETS)
-    ch = guild.get_channel(ch_id)
+    try:
+        ch = guild.get_channel(int(ch_id))
+    except Exception:
+        ch = None
     support_role = get_ticket_support_role(guild)
     deploy_label = "Deploiement" if lang == "fr" else "Deployment"
-    deploy_value = f"🟢 {ch.mention}" if ch else ("⚪ Aucun salon ticket configure" if lang == "fr" else "⚪ No ticket channel configured")
-    banner_value = ("🟢 Configuree" if lang == "fr" else "🟢 Set") if cfg.get("ticket_banner") else ("⚪ Non definie" if lang == "fr" else "⚪ Not set")
+    deploy_value = channel_badge(ch, "Aucun salon ticket configure" if lang == "fr" else "No ticket channel configured", gid)
+    banner_value = status_badge(bool(cfg.get("ticket_banner")), gid)
     e.add_field(name="📝 Message public", value=(
         f"**{author_label} :** {(cfg.get('ticket_panel_author') or tr(gid, 'ticket_panel_author', guild_name=guild.name))[:80]}\n"
         f"**{title_label} :** {(cfg.get('ticket_panel_title') or tr(gid, 'ticket_panel_title'))[:80]}\n"
@@ -599,7 +608,7 @@ def build_ticket_config_embed(guild):
     ), inline=False)
     deploy_hint = "Clique sur **📌 Poster ici** pour publier le message dans ce salon. L'ancien panel ticket est nettoye avant le nouveau post." if lang == "fr" else "Click **📌 Post here** to publish the message in this channel. The old ticket panel is cleaned before the new post."
     e.add_field(name=f"📌 {deploy_label}", value=f"{deploy_value}\n{deploy_hint}", inline=False)
-    support_value = support_role.mention if support_role else ("⚪ Aucun role support ticket choisi" if lang == "fr" else "⚪ No support ticket role selected")
+    support_value = f"{status_badge(bool(support_role), gid)}\n{support_role.mention if support_role else ('Aucun role support ticket choisi' if lang == 'fr' else 'No support ticket role selected')}"
     e.add_field(name="👥 Role support ticket" if lang == "fr" else "👥 Support ticket role", value=support_value, inline=False)
     e.add_field(name=f"🧭 {menu_label}", value=ticket_option_summary(gid, questions), inline=False)
     priority_hint = "Dans un ticket, le staff choisit 🟢 1, 🟡 2 ou 🔴 3. Le rond est ajoute devant le nom du salon." if lang == "fr" else "Inside a ticket, staff chooses 🟢 1, 🟡 2 or 🔴 3. The colored dot is added before the channel name."
@@ -650,21 +659,18 @@ def build_personnalisation_embed(guild):
     if lang == "fr":
         e = EG("🎨 Personnalisation du bot", "Configure l'apparence utilisee par le bot sur ce serveur.", gid=gid)
         labels = ("Nom du bot", "Couleur", "Footer", "Logo du bot", "Banniere du bot", "Icone footer")
-        configured, unset = "🟢 Configure", "⚪ Non defini"
-        banner_configured, banner_unset = "🟢 Configuree", "⚪ Non definie"
     else:
         e = EG("🎨 Bot customization", "Configure the bot appearance used on this server.", gid=gid)
         labels = ("Bot name", "Color", "Footer", "Bot logo", "Bot banner", "Footer icon")
-        configured, unset = "🟢 Set", "⚪ Not set"
-        banner_configured, banner_unset = "🟢 Set", "⚪ Not set"
     if cfg.get("embed_logo"):
         e.set_thumbnail(url=cfg["embed_logo"])
-    e.add_field(name=f"🏷️ {labels[0]}", value=get_bot_display_name(gid, guild), inline=True)
-    e.add_field(name=labels[1], value=f"`#{cfg.get('embed_color', 0x5865F2):06X}`", inline=True)
-    e.add_field(name=f"🔖 {labels[2]}", value=cfg.get("embed_footer", f"{get_bot_display_name(gid, guild)} - Protection de votre communaute")[:100], inline=False)
-    e.add_field(name=f"🖼️ {labels[3]}", value=configured if cfg.get("embed_logo") else unset, inline=True)
-    e.add_field(name=f"🌄 {labels[4]}", value=banner_configured if cfg.get("embed_banner") else banner_unset, inline=True)
-    e.add_field(name=f"🔖 {labels[5]}", value=banner_configured if cfg.get("embed_footer_icon") else banner_unset, inline=True)
+    default_footer = f"{get_bot_display_name(gid, guild)} - Protection de votre communaute"
+    e.add_field(name=f"🏷️ {labels[0]}", value=f"{status_badge(bool(cfg.get('bot_name')), gid)}\n{get_bot_display_name(gid, guild)}", inline=True)
+    e.add_field(name=labels[1], value=f"{status_badge('embed_color' in cfg, gid)}\n`#{cfg.get('embed_color', 0x5865F2):06X}`", inline=True)
+    e.add_field(name=f"🔖 {labels[2]}", value=f"{status_badge(bool(cfg.get('embed_footer')), gid)}\n{cfg.get('embed_footer', default_footer)[:100]}", inline=False)
+    e.add_field(name=f"🖼️ {labels[3]}", value=status_badge(bool(cfg.get("embed_logo")), gid), inline=True)
+    e.add_field(name=f"🌄 {labels[4]}", value=status_badge(bool(cfg.get("embed_banner")), gid), inline=True)
+    e.add_field(name=f"🔖 {labels[5]}", value=status_badge(bool(cfg.get("embed_footer_icon")), gid), inline=True)
     e.add_field(name=f"🌐 {tr(gid, 'language')}", value=format_lang(gid), inline=True)
     return e
 
@@ -2017,19 +2023,29 @@ class ModalLockSalon(discord.ui.Modal, title="🔒 Lockdown salon"):
 class ModalDefinirSalon(discord.ui.Modal, title="Definir un salon"):
     salon_id = discord.ui.TextInput(label="ID du salon", placeholder="Ex : 123456789012345678", max_length=20)
 
-    def __init__(self, key, label):
+    def __init__(self, key, label, parent_view=None):
         super().__init__()
         self.key = key
         self.lbl = label
+        self.parent_view = parent_view
 
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
         try:
-            ch = i.guild.get_channel(int(self.salon_id.value))
+            ch_id = int(str(self.salon_id.value).strip())
+            ch = i.guild.get_channel(ch_id)
+            if not ch:
+                ch = await i.guild.fetch_channel(ch_id)
             if not ch:
                 return await i.followup.send("Salon introuvable.", ephemeral=True)
+            if not hasattr(ch, "send"):
+                return await i.followup.send("Ce salon ne peut pas recevoir les messages du bot.", ephemeral=True)
             update_cfg(i.guild.id, self.key, ch.id)
             msg = await setup_configured_channel(i.guild, ch, self.key, self.lbl)
+            if self.parent_view:
+                self.parent_view.selected_key = self.key
+                self.parent_view.selected_label = self.lbl
+                await refresh_interaction_message(i, build_salons_embed(i.guild, self.lbl), self.parent_view)
             await i.followup.send(embed=E("Salon defini", f"**{self.lbl}** -> {ch.mention}\n{msg}", 0x43B581), ephemeral=True)
         except Exception as ex:
             await i.followup.send(f"Erreur : {ex}", ephemeral=True)
@@ -2037,10 +2053,11 @@ class ModalDefinirSalon(discord.ui.Modal, title="Definir un salon"):
 class ModalCreerSalon(discord.ui.Modal, title="Creer un salon"):
     nom = discord.ui.TextInput(label="Nom du salon", placeholder="Ex : logs-modbot", max_length=50)
 
-    def __init__(self, key, label):
+    def __init__(self, key, label, parent_view=None):
         super().__init__()
         self.key = key
         self.lbl = label
+        self.parent_view = parent_view
 
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
@@ -2048,6 +2065,10 @@ class ModalCreerSalon(discord.ui.Modal, title="Creer un salon"):
             ch = await i.guild.create_text_channel(self.nom.value)
             update_cfg(i.guild.id, self.key, ch.id)
             msg = await setup_configured_channel(i.guild, ch, self.key, self.lbl)
+            if self.parent_view:
+                self.parent_view.selected_key = self.key
+                self.parent_view.selected_label = self.lbl
+                await refresh_interaction_message(i, build_salons_embed(i.guild, self.lbl), self.parent_view)
             await i.followup.send(embed=E("Salon cree", f"{ch.mention} -> **{self.lbl}**\n{msg}", 0x43B581), ephemeral=True)
         except Exception as ex:
             await i.followup.send(f"Erreur : {ex}", ephemeral=True)
@@ -2389,9 +2410,9 @@ class VuePanelSalons(discord.ui.View):
         self.selected_key = "salon_tickets"
         self.selected_label = "Tickets"
         self.add_item(SelectSystemeSalon(self))
-        self.add_item(SelectSalonConfig(self))
         localize_buttons(self, self.gid, {
             "Voir salons": "btn_view_channels",
+            "Definir par ID": "btn_set_channel_id",
             "Creer le salon": "btn_create_channel",
             "Reinitialiser": "btn_reset",
         })
@@ -2412,9 +2433,14 @@ class VuePanelSalons(discord.ui.View):
         except Exception:
             pass
 
+    @discord.ui.button(label="Definir par ID", style=discord.ButtonStyle.primary, row=1)
+    async def definir_id(self, i: discord.Interaction, b):
+        try: await i.response.send_modal(ModalDefinirSalon(self.selected_key, self.selected_label, self))
+        except Exception: pass
+
     @discord.ui.button(label="Creer le salon", style=discord.ButtonStyle.success, row=2)
     async def creer(self, i: discord.Interaction, b):
-        try: await i.response.send_modal(ModalCreerSalon(self.selected_key, self.selected_label))
+        try: await i.response.send_modal(ModalCreerSalon(self.selected_key, self.selected_label, self))
         except Exception: pass
 
     @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=3)
@@ -2738,13 +2764,25 @@ class VuePanelPersonnalisation(discord.ui.View):
     @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=2)
     async def reset(self, i: discord.Interaction, b):
         cfg = get_cfg(i.guild.id)
-        for k in ("embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon", "bot_name"):
+        for k in (
+            "embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon", "bot_name",
+            "bot_logo", "bot_banner", "avatar_url", "banner_url", "footer_icon", "custom_footer",
+        ):
             cfg.pop(k, None)
         set_cfg(i.guild.id, cfg)
         try:
             await i.guild.me.edit(nick=None, reason="Reinitialisation personnalisation du bot")
         except Exception:
             pass
+        if bot.user:
+            try:
+                await bot.user.edit(avatar=None)
+            except Exception:
+                pass
+            try:
+                await bot.user.edit(banner=None)
+            except Exception:
+                pass
         await refresh_interaction_message(i, build_personnalisation_embed(i.guild), self)
 
     @discord.ui.button(label="Apercu", style=discord.ButtonStyle.secondary, row=2)
@@ -3111,24 +3149,41 @@ class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
                 pass
 
 class ModalAnnonce(discord.ui.Modal, title="📢 Nouvelle annonce"):
+    salon_id   = discord.ui.TextInput(label="ID du salon", placeholder="Ex : 123456789012345678", max_length=20)
     titre      = discord.ui.TextInput(label="Titre", placeholder="Titre...", max_length=100)
     sous_titre = discord.ui.TextInput(label="Sous-titre (optionnel)", required=False, max_length=100)
     contenu    = discord.ui.TextInput(label="Contenu", style=discord.TextStyle.paragraph, max_length=2000)
     mention    = discord.ui.TextInput(label="Mention (optionnel)", required=False, placeholder="@everyone / @here", max_length=50)
 
-    def __init__(self, salon):
+    def __init__(self, salon=None):
         super().__init__()
         self.salon_cible = salon
+        if salon:
+            try:
+                self.salon_id.default = str(salon.id)
+            except Exception:
+                pass
 
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
         gid = str(i.guild.id)
+        salon = self.salon_cible
+        if not salon:
+            try:
+                sid = int(str(self.salon_id.value).strip())
+                salon = i.guild.get_channel(sid)
+                if not salon:
+                    salon = await i.guild.fetch_channel(sid)
+            except Exception:
+                return await i.followup.send(embed=E("❌ Salon introuvable", "Entre un ID de salon valide.", 0xED4245), ephemeral=True)
+        if not hasattr(salon, "send"):
+            return await i.followup.send(embed=E("❌ Salon invalide", "Ce salon ne peut pas recevoir l'annonce.", 0xED4245), ephemeral=True)
         desc = (f"*{self.sous_titre.value}*\n\n" if self.sous_titre.value else "") + self.contenu.value
         e = EG(f"📢 {self.titre.value}", desc, gid=gid)
         content = self.mention.value if self.mention.value else None
-        await self.salon_cible.send(content=content, embed=e)
+        await salon.send(content=content, embed=e)
         await i.followup.send(embed=E("✅ Annonce publiée !", couleur=0x43B581), ephemeral=True)
-        await alert_staff(i.guild, "ANNONCE", i.user, raison=f"Salon: #{self.salon_cible.name}")
+        await alert_staff(i.guild, "ANNONCE", i.user, raison=f"Salon: #{salon.name}")
 
 class SelectAnnonceSalon(discord.ui.ChannelSelect):
     def __init__(self):
@@ -3823,9 +3878,8 @@ async def cmd_deban(i: discord.Interaction, user_id: str, raison: str = "Aucune 
 @bot.tree.command(name="annonce", description="📢 Publier une annonce officielle")
 @app_commands.checks.has_permissions(administrator=True)
 async def cmd_annonce(i: discord.Interaction):
-    e = EG("📢 Nouvelle annonce", "Choisis d'abord le salon ou publier l'annonce.", gid=i.guild.id)
     try:
-        await i.response.send_message(embed=e, view=VueAnnonceSalon(), ephemeral=True)
+        await i.response.send_modal(ModalAnnonce())
     except Exception:
         pass
 
