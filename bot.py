@@ -22,7 +22,6 @@ BASE_DIR            = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOGO_FILE   = os.path.join(BASE_DIR, "assets", "default_logo.png")
 DEFAULT_BANNER_FILE = os.path.join(BASE_DIR, "assets", "default_banner.png")
 DEFAULT_PROFILE_BANNER_FILE = os.path.join(BASE_DIR, "assets", "default_bot_banner_680x240.png")
-ASSET_CHANNEL_NAME = "modbot-assets"
 
 INSULTES_BASE = [
     "tg","fdp","pd","ntm","ftg","connard","connasse","salope","pute",
@@ -327,118 +326,17 @@ async def get_installation_asset_defaults():
     banner_raw = await discord_asset_bytes(banner_asset)
     return logo, banner, logo_raw, banner_raw
 
-async def get_asset_storage_channel(guild, cfg, preferred_channel=None):
-    ch = None
-    ch_id = cfg.get("asset_channel_id")
-    if ch_id:
-        try:
-            ch = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
-        except Exception:
-            ch = None
-    if ch and hasattr(ch, "send"):
-        return ch
-
-    try:
-        for candidate in getattr(guild, "text_channels", []):
-            if candidate.name == ASSET_CHANNEL_NAME:
-                cfg["asset_channel_id"] = candidate.id
-                return candidate
-    except Exception:
-        pass
-
-    try:
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        }
-        if guild.me:
-            overwrites[guild.me] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                attach_files=True,
-                read_message_history=True,
-                manage_messages=True,
-            )
-        ch = await guild.create_text_channel(
-            ASSET_CHANNEL_NAME,
-            overwrites=overwrites,
-            reason="Stockage des visuels ModBot par serveur",
-        )
-        cfg["asset_channel_id"] = ch.id
-        return ch
-    except Exception:
-        pass
-
-    return preferred_channel if preferred_channel and hasattr(preferred_channel, "send") else None
-
-async def delete_stored_asset_message(guild, cfg, key):
-    msg_id = cfg.get(f"{key}_asset_message_id")
-    ch_id = cfg.get(f"{key}_asset_channel_id")
-    if not msg_id or not ch_id:
-        return
-    try:
-        ch = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
-        msg = await ch.fetch_message(int(msg_id))
-        await msg.delete()
-    except Exception:
-        pass
-    cfg.pop(f"{key}_asset_message_id", None)
-    cfg.pop(f"{key}_asset_channel_id", None)
-
-async def store_server_asset_bytes(guild, raw, filename, key, preferred_channel=None, cfg=None):
-    if not raw:
-        return None, cfg or get_cfg(guild.id)
-    cfg = cfg or get_cfg(guild.id)
-    await delete_stored_asset_message(guild, cfg, key)
-    ch = await get_asset_storage_channel(guild, cfg, preferred_channel)
-    if not ch:
-        return None, cfg
-    try:
-        file = discord.File(io.BytesIO(raw), filename=filename)
-        msg = await ch.send(
-            content=f"📦 Asset ModBot `{key}` - ne pas supprimer.",
-            file=file,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        if not msg.attachments:
-            return None, cfg
-        url = msg.attachments[0].url
-        cfg[key] = url
-        cfg[f"{key}_asset_message_id"] = msg.id
-        cfg[f"{key}_asset_channel_id"] = ch.id
-        if key == "embed_logo":
-            cfg["embed_footer_icon"] = url
-        set_cfg(guild.id, cfg)
-        return url, cfg
-    except Exception:
-        return None, cfg
-
-async def refresh_stored_asset_urls(guild):
-    cfg = get_cfg(guild.id)
-    changed = False
-    for key in ("embed_logo", "embed_banner", "embed_footer_icon", "ticket_banner"):
-        msg_id = cfg.get(f"{key}_asset_message_id")
-        ch_id = cfg.get(f"{key}_asset_channel_id")
-        if not msg_id or not ch_id:
-            continue
-        try:
-            ch = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
-            msg = await ch.fetch_message(int(msg_id))
-            if msg.attachments:
-                cfg[key] = msg.attachments[0].url
-                changed = True
-        except Exception:
-            pass
-    if changed:
-        set_cfg(guild.id, cfg)
-    return cfg
-
 async def restore_default_personnalisation(guild, cfg, preferred_channel=None):
     for k in (
         "embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon", "bot_name",
         "bot_logo", "bot_banner", "avatar_url", "banner_url", "footer_icon", "custom_footer",
     ):
         cfg.pop(k, None)
-    await delete_stored_asset_message(guild, cfg, "embed_footer_icon")
+    for key in ("asset_channel_id",):
+        cfg.pop(key, None)
+    for key in ("embed_logo", "embed_banner", "embed_footer_icon", "ticket_banner"):
+        cfg.pop(f"{key}_asset_message_id", None)
+        cfg.pop(f"{key}_asset_channel_id", None)
 
     cfg["bot_name"] = DEFAULT_BOT_NAME
     cfg["embed_color"] = DEFAULT_EMBED_COLOR
@@ -453,17 +351,11 @@ async def restore_default_personnalisation(guild, cfg, preferred_channel=None):
     except Exception:
         pass
 
-    logo_url, cfg = await store_server_asset_bytes(guild, logo_raw, "modbot-default-logo.png", "embed_logo", preferred_channel, cfg)
-    banner_url, cfg = await store_server_asset_bytes(guild, banner_raw, "modbot-default-banner.png", "embed_banner", preferred_channel, cfg)
-
     if installation_logo:
-        cfg["embed_logo"] = logo_url or installation_logo
+        cfg["embed_logo"] = installation_logo
         cfg["embed_footer_icon"] = cfg["embed_logo"]
-    elif logo_url:
-        cfg["embed_logo"] = logo_url
-        cfg["embed_footer_icon"] = logo_url
-    if banner_url or installation_banner:
-        cfg["embed_banner"] = banner_url or installation_banner
+    if installation_banner:
+        cfg["embed_banner"] = installation_banner
 
     return cfg
 
@@ -2947,31 +2839,16 @@ class VuePanelPersonnalisation(discord.ui.View):
         is_image = (att.content_type and att.content_type.startswith("image/")) or att.filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
         if not is_image:
             return await i.followup.send("Le fichier envoye n'est pas une image valide.", ephemeral=True)
-        try:
-            raw = await att.read(use_cached=True)
-        except TypeError:
-            raw = await att.read()
-        except Exception:
-            raw = None
-        ext = os.path.splitext(att.filename or "")[1].lower()
-        if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
-            ext = ".png"
-        filename = f"modbot-{key.replace('_', '-')}{ext}"
-        url, cfg = await store_server_asset_bytes(i.guild, raw, filename, key, i.channel)
-        if not url:
-            update_cfg(i.guild.id, key, att.url)
-            cfg = get_cfg(i.guild.id)
-        else:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-        await refresh_stored_asset_urls(i.guild)
+        cfg = get_cfg(i.guild.id)
+        cfg[key] = att.url
+        if key == "embed_logo":
+            cfg["embed_footer_icon"] = att.url
+        set_cfg(i.guild.id, cfg)
         try:
             await i.message.edit(embed=build_personnalisation_embed(i.guild), view=self)
         except Exception:
             pass
-        await i.followup.send(embed=EG("✅ Visuel enregistre", f"**{label}** a ete mis a jour pour ce serveur uniquement.", 0x43B581, i.guild.id), ephemeral=True)
+        await i.followup.send(embed=EG("✅ Visuel enregistre", f"**{label}** a ete mis a jour pour ce serveur uniquement.\n⚠️ Ne supprime pas le message contenant l'image, sinon Discord peut couper l'affichage.", 0x43B581, i.guild.id), ephemeral=True)
 
     @discord.ui.button(label="Nom du bot", style=discord.ButtonStyle.secondary, row=1)
     async def bot_name(self, i: discord.Interaction, b):
@@ -3143,7 +3020,6 @@ class VuePanel(discord.ui.View):
             try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
-        await refresh_stored_asset_urls(i.guild)
         await self._sub(i, build_personnalisation_embed(i.guild), VuePanelPersonnalisation(i.guild.id))
 
     @discord.ui.button(label="Langue", style=discord.ButtonStyle.secondary, row=1)
@@ -3562,18 +3438,6 @@ def build_rating_embed(guild):
         e.add_field(name="🕒 Dernieres notes" if lang == "fr" else "🕒 Latest ratings", value="\n".join(last), inline=False)
     return e
 
-_asset_refresh_task = None
-
-async def asset_refresh_loop():
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        for guild in bot.guilds:
-            try:
-                await refresh_stored_asset_urls(guild)
-            except Exception as err:
-                print(f"refresh assets {guild.id}: {err}")
-        await asyncio.sleep(21600)
-
 async def sync_guild_command_language(guild):
     lang = get_lang(guild.id)
     for cmd in bot.tree.get_commands():
@@ -3592,7 +3456,6 @@ async def sync_guild_command_language(guild):
 
 @bot.event
 async def on_ready():
-    global _asset_refresh_task
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher()]:
@@ -3603,10 +3466,6 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         for guild in bot.guilds:
-            try:
-                await refresh_stored_asset_urls(guild)
-            except Exception as err:
-                print(f"refresh assets {guild.id}: {err}")
             try:
                 await sync_guild_command_language(guild)
             except Exception as err:
@@ -3619,8 +3478,6 @@ async def on_ready():
         print(f"{len(synced)} commandes synchronisees")
     except Exception as e:
         print(f"Erreur sync : {e}")
-    if _asset_refresh_task is None or _asset_refresh_task.done():
-        _asset_refresh_task = asyncio.create_task(asset_refresh_loop())
     await bot.change_presence(
         activity=discord.Activity(type=discord.ActivityType.watching, name="votre serveur"))
 
@@ -4281,11 +4138,13 @@ async def cmd_reset(i: discord.Interaction, membre: discord.Member):
 @bot.tree.command(name="aide", description="📚 Aide et liste des commandes ModBot")
 async def cmd_aide(i: discord.Interaction):
     gid = str(i.guild.id)
-    e = EG("📚 Aide ModBot", "Voici les commandes principales du bot.", 0x5865F2, gid)
+    e = EG("📚 Aide ModBot", "Recapitulatif complet des commandes disponibles.", 0x5865F2, gid)
     e.add_field(name="🌐 Site", value="[Ouvrir le site ModBot](https://modbot-website.vercel.app/)", inline=False)
-    e.add_field(name="🛡️ Administration", value=(
+    e.add_field(name="🛠️ Administration", value=(
         "`/panel` - ouvrir le panneau d'administration\n"
+        "`/annonce` - publier une annonce dans un salon par ID\n"
         "`/patchnotes` - publier des patch notes dans le salon actuel\n"
+        "`/massdm` - envoyer un message prive en masse\n"
         "`/aide` - afficher cette aide\n"
         "`/info-bot` - informations techniques du bot"
     ), inline=False)
@@ -4293,18 +4152,24 @@ async def cmd_aide(i: discord.Interaction):
         "`/warn` - avertir un membre\n"
         "`/ban` - bannir un membre\n"
         "`/deban` - debannir par ID\n"
+        "`/avert-count` - voir les avertissements d'un membre\n"
         "`/reset-avert` - remettre les avertissements a zero\n"
-        "`/ban-list` - voir les bannissements"
+        "`/ban-list` - voir les bannissements\n"
+        "`/insultes` - voir les mots filtres"
     ), inline=False)
     e.add_field(name="🧹 Messages", value=(
         "`/clear-message` - supprimer 1 a 100 messages\n"
         "`/clear-all` - supprimer tous les messages du salon"
     ), inline=False)
-    e.add_field(name="🌍 Utilitaires", value=(
+    e.add_field(name="🌍 Communautaire & outils", value=(
         "`/translate` - traduire par langue avec ID/lien optionnel\n"
         "`/suggest` - envoyer une suggestion\n"
-        "`/report` - signaler un bug ou joueur\n"
-        "`/profilestats` `/serverstats` `/modstats` - statistiques"
+        "`/report` - signaler un bug ou joueur"
+    ), inline=False)
+    e.add_field(name="📊 Statistiques", value=(
+        "`/profilestats` - stats d'un membre\n"
+        "`/serverstats` - stats du serveur\n"
+        "`/modstats` - stats de moderation"
     ), inline=False)
     e.add_field(name="⌨️ Commandes texte", value=(
         "`!addroles @membre @role` - ajouter un role\n"
