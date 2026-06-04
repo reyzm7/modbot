@@ -97,7 +97,7 @@ TEXTS = {
     "clear_done": {"fr": "{count} message(s) supprime(s).", "en": "{count} message(s) deleted."},
     "clear_invalid": {"fr": "Choisis un nombre entre 1 et 100.", "en": "Choose a number between 1 and 100."},
     "clear_all_confirm": {"fr": "Confirmer la suppression de tous les messages de ce salon ?", "en": "Confirm deleting every message in this channel?"},
-    "clear_all_done": {"fr": "Nettoyage termine : {count} message(s) supprime(s).", "en": "Cleanup finished: {count} message(s) deleted."},
+    "clear_all_done": {"fr": "{count} message(s) supprime(s).", "en": "{count} message(s) deleted."},
     "channel_not_supported": {"fr": "Ce salon ne supporte pas cette action.", "en": "This channel does not support this action."},
     "ticket_closed_title": {"fr": "Ticket ferme", "en": "Ticket closed"},
     "ticket_closed_desc": {"fr": "{user} a close le ticket.", "en": "{user} closed the ticket."},
@@ -115,36 +115,36 @@ TEXTS = {
     "rating_average": {"fr": "Moyenne", "en": "Average"},
     "rating_count": {"fr": "Nombre d'avis", "en": "Ratings"},
     "rating_empty": {"fr": "Aucune evaluation pour le moment.", "en": "No ratings yet."},
-    "btn_insultes": {"fr": "Insultes", "en": "Bad words"},
-    "btn_security": {"fr": "Securite", "en": "Security"},
-    "btn_channels": {"fr": "Salons", "en": "Channels"},
-    "btn_ticket_interface": {"fr": "Ticket", "en": "Ticket"},
-    "btn_stats": {"fr": "Stats & Bans", "en": "Stats & Bans"},
-    "btn_staff": {"fr": "Staff", "en": "Staff"},
-    "btn_personnalisation": {"fr": "Personnalisation", "en": "Customization"},
-    "btn_language": {"fr": "Langue", "en": "Language"},
-    "btn_rating": {"fr": "Rating", "en": "Rating"},
+    "btn_insultes": {"fr": "🚫 Insultes", "en": "🚫 Bad words"},
+    "btn_security": {"fr": "🛡️ Securite", "en": "🛡️ Security"},
+    "btn_channels": {"fr": "📍 Salons", "en": "📍 Channels"},
+    "btn_ticket_interface": {"fr": "🎫 Ticket", "en": "🎫 Ticket"},
+    "btn_stats": {"fr": "📊 Stats & Bans", "en": "📊 Stats & Bans"},
+    "btn_staff": {"fr": "👮 Staff", "en": "👮 Staff"},
+    "btn_personnalisation": {"fr": "🎨 Personnalisation", "en": "🎨 Customization"},
+    "btn_language": {"fr": "🌐 Langue", "en": "🌐 Language"},
+    "btn_rating": {"fr": "⭐ Rating", "en": "⭐ Rating"},
     "btn_close_ticket": {"fr": "Fermer le ticket", "en": "Close ticket"},
     "btn_delete_ticket": {"fr": "Supprimer", "en": "Delete"},
     "btn_transcript": {"fr": "Transcript", "en": "Transcript"},
     "btn_confirm": {"fr": "Confirmer", "en": "Confirm"},
     "btn_cancel": {"fr": "Annuler", "en": "Cancel"},
-    "btn_ticket_message": {"fr": "Message ticket", "en": "Ticket message"},
-    "btn_add_option": {"fr": "Ajouter option", "en": "Add option"},
-    "btn_edit_option": {"fr": "Modifier option", "en": "Edit option"},
-    "btn_delete_option": {"fr": "Supprimer option", "en": "Delete option"},
-    "btn_ticket_preview": {"fr": "Apercu tickets", "en": "Ticket preview"},
-    "btn_ticket_refresh": {"fr": "Actualiser panel", "en": "Refresh panel"},
-    "btn_ticket_deploy_here": {"fr": "Poster ici", "en": "Post here"},
-    "btn_view_channels": {"fr": "Voir salons", "en": "View channels"},
-    "btn_create_channel": {"fr": "Creer le salon", "en": "Create channel"},
-    "btn_bot_name": {"fr": "Nom du bot", "en": "Bot name"},
-    "btn_upload_logo": {"fr": "Upload logo", "en": "Upload logo"},
-    "btn_upload_banner": {"fr": "Upload banniere", "en": "Upload banner"},
-    "btn_upload_footer": {"fr": "Upload icone footer", "en": "Upload footer icon"},
-    "btn_edit_footer": {"fr": "Modifier footer", "en": "Edit footer"},
-    "btn_reset": {"fr": "Reinitialiser", "en": "Reset"},
-    "btn_preview": {"fr": "Apercu", "en": "Preview"},
+    "btn_ticket_message": {"fr": "✏️ Message", "en": "✏️ Message"},
+    "btn_add_option": {"fr": "➕ Option", "en": "➕ Option"},
+    "btn_edit_option": {"fr": "🛠️ Modifier", "en": "🛠️ Edit"},
+    "btn_delete_option": {"fr": "🗑️ Supprimer", "en": "🗑️ Delete"},
+    "btn_ticket_preview": {"fr": "👁️ Apercu", "en": "👁️ Preview"},
+    "btn_ticket_refresh": {"fr": "🔄 Actualiser", "en": "🔄 Refresh"},
+    "btn_ticket_deploy_here": {"fr": "📌 Poster ici", "en": "📌 Post here"},
+    "btn_view_channels": {"fr": "👁️ Voir salons", "en": "👁️ View channels"},
+    "btn_create_channel": {"fr": "➕ Creer le salon", "en": "➕ Create channel"},
+    "btn_bot_name": {"fr": "🏷️ Nom du bot", "en": "🏷️ Bot name"},
+    "btn_upload_logo": {"fr": "🖼️ Logo", "en": "🖼️ Logo"},
+    "btn_upload_banner": {"fr": "🌄 Banniere", "en": "🌄 Banner"},
+    "btn_upload_footer": {"fr": "🔖 Icone footer", "en": "🔖 Footer icon"},
+    "btn_edit_footer": {"fr": "✏️ Footer", "en": "✏️ Footer"},
+    "btn_reset": {"fr": "♻️ Reinitialiser", "en": "♻️ Reset"},
+    "btn_preview": {"fr": "👁️ Apercu", "en": "👁️ Preview"},
 }
 
 SLASH_DESCRIPTIONS = {
@@ -152,7 +152,6 @@ SLASH_DESCRIPTIONS = {
     "suggest": {"fr": "Faire une suggestion", "en": "Submit a suggestion"},
     "report": {"fr": "Signaler un bug ou un joueur", "en": "Report a bug or a player"},
     "patchnotes": {"fr": "Publier des patch notes", "en": "Publish patch notes"},
-    "ticket": {"fr": "Deployer le systeme de ticket dans ce salon", "en": "Deploy the ticket system in this channel"},
     "panel": {"fr": "Panneau d'administration du bot", "en": "Bot administration panel"},
     "warn": {"fr": "Donner un avertissement a un membre", "en": "Warn a member"},
     "ban": {"fr": "Bannir manuellement un membre", "en": "Manually ban a member"},
@@ -319,6 +318,17 @@ def anti_link_enabled(cfg):
 def contains_forbidden_link(text):
     return bool(text and LINK_RE.search(text))
 
+def field_value(text):
+    return f"```{text}```"
+
+def status_badge(active, gid=None):
+    if get_lang(gid) == "en":
+        return "🟢 Enabled" if active else "🔴 Disabled"
+    return "🟢 Actif" if active else "🔴 Inactif"
+
+def channel_badge(channel, empty):
+    return f"🟢 {channel.mention}" if channel else f"⚪ {empty}"
+
 def _role_lines(guild, role_ids, empty):
     if not role_ids:
         return empty
@@ -336,7 +346,9 @@ def build_main_panel_embed(guild):
     custom = get_custom(gid)
     cfg = get_cfg(gid)
     bot_name = get_bot_display_name(gid, guild)
-    e = E(f"{tr(gid, 'main_panel_title')} - {bot_name}", couleur=0x5865F2)
+    lang = get_lang(gid)
+    title = f"⚙️ {tr(gid, 'main_panel_title')} - {bot_name}"
+    e = EG(title, couleur=cfg.get("embed_color", 0x5865F2), gid=gid)
     logo = cfg.get("embed_logo")
     try:
         if logo:
@@ -345,51 +357,82 @@ def build_main_panel_embed(guild):
             e.set_thumbnail(url=bot.user.display_avatar.url)
     except Exception:
         pass
-    e.description = tr(gid, "main_panel_desc", bot_name=bot_name, guild_name=guild.name)
-    e.add_field(name="Mots filtres", value=f"`{len(INSULTES_BASE)+len(custom)}`", inline=True)
-    e.add_field(name="Anti-Raid", value=status_txt(cfg.get("antiraid")), inline=True)
-    e.add_field(name="Anti-Lien", value=status_txt(anti_link_enabled(cfg)), inline=True)
-    e.add_field(name="Anti-Spam", value=status_txt(cfg.get("anti_spam")), inline=True)
-    e.add_field(name="Lockdown", value=status_txt(cfg.get("lockdown")), inline=True)
-    e.add_field(name="Staff Alert", value=status_txt(cfg.get("staff_alert_enabled")), inline=True)
-    e.add_field(name=tr(gid, "language"), value=format_lang(gid), inline=True)
+    e.description = (
+        f"**{guild.name}**\n"
+        f"{tr(gid, 'main_panel_desc', bot_name=bot_name, guild_name=guild.name)}\n\n"
+        "Utilise les boutons ci-dessous pour regler le bot. Le module **Ticket** gere le message public, les options et le deploiement."
+        if lang == "fr" else
+        f"**{guild.name}**\n"
+        f"{tr(gid, 'main_panel_desc', bot_name=bot_name, guild_name=guild.name)}\n\n"
+        "Use the buttons below to configure the bot. The **Ticket** module manages the public message, options and deployment."
+    )
+    e.add_field(name="🛡️ Protections", value=(
+        f"{status_badge(cfg.get('antiraid'), gid)} Anti-Raid\n"
+        f"{status_badge(anti_link_enabled(cfg), gid)} {'Anti-Lien' if lang == 'fr' else 'Anti-Link'}\n"
+        f"{status_badge(cfg.get('anti_spam'), gid)} Anti-Spam"
+    ), inline=True)
+    e.add_field(name="🔒 Moderation", value=(
+        f"{status_badge(cfg.get('lockdown'), gid)} Lockdown\n"
+        f"{status_badge(cfg.get('staff_alert_enabled'), gid)} Staff Alert\n"
+        f"🚫 `{len(INSULTES_BASE)+len(custom)}` {'mots filtres' if lang == 'fr' else 'filtered words'}"
+    ), inline=True)
+    e.add_field(name="🌐 Serveur" if lang == "fr" else "🌐 Server", value=(
+        f"{tr(gid, 'language')} : **{format_lang(gid)}**\n"
+        f"🎫 {'Options ticket' if lang == 'fr' else 'Ticket options'} : `{len(get_ticket_questions(gid))}`\n"
+        f"⭐ {'Notes' if lang == 'fr' else 'Ratings'} : `{get_rating_stats(gid)['count']}`"
+    ), inline=False)
     return e
 
 def build_security_embed(guild):
     cfg = get_cfg(guild.id)
-    e = E("Parametres de securite", couleur=0x5865F2)
-    e.description = "Active/desactive les protections. Le panel se met a jour instantanement."
-    e.add_field(name="Lockdown", value=status_txt(cfg.get("lockdown")), inline=True)
-    e.add_field(name="Anti-Raid", value=status_txt(cfg.get("antiraid")), inline=True)
-    e.add_field(name="Anti-Lien", value=status_txt(anti_link_enabled(cfg)), inline=True)
-    e.add_field(name="Anti-Spam", value=status_txt(cfg.get("anti_spam")), inline=True)
-    e.add_field(name="Staff Alert", value=status_txt(cfg.get("staff_alert_enabled")), inline=True)
+    gid = str(guild.id)
+    lang = get_lang(gid)
+    e = EG("🛡️ Parametres de securite" if lang == "fr" else "🛡️ Security settings", couleur=0x5865F2, gid=gid)
+    e.description = "Active ou desactive les protections du serveur." if lang == "fr" else "Enable or disable server protections."
+    e.add_field(name="Lockdown", value=status_badge(cfg.get("lockdown"), gid), inline=True)
+    e.add_field(name="Anti-Raid", value=status_badge(cfg.get("antiraid"), gid), inline=True)
+    e.add_field(name="Anti-Lien" if lang == "fr" else "Anti-Link", value=status_badge(anti_link_enabled(cfg), gid), inline=True)
+    e.add_field(name="Anti-Spam", value=status_badge(cfg.get("anti_spam"), gid), inline=True)
+    e.add_field(name="Staff Alert", value=status_badge(cfg.get("staff_alert_enabled"), gid), inline=True)
     return e
 
 def build_insultes_embed(guild):
-    e = E("Gestion des insultes", couleur=0xED4245)
-    e.description = "Mots filtres et roles immunises. Utilise les menus pour choisir directement un role."
-    e.add_field(name="Mots par defaut", value=f"`{len(INSULTES_BASE)}`", inline=True)
-    e.add_field(name="Mots personnalises", value=f"`{len(get_custom(guild.id))}`", inline=True)
-    e.add_field(name="Roles immunises", value=_role_lines(guild, get_roles_imm(guild.id), "Aucun role immunise."), inline=False)
+    gid = str(guild.id)
+    lang = get_lang(gid)
+    e = EG("🚫 Filtre des insultes" if lang == "fr" else "🚫 Bad word filter", couleur=0xED4245, gid=gid)
+    e.description = "Controle les mots filtres et les roles immunises." if lang == "fr" else "Control filtered words and immune roles."
+    e.add_field(name="Mots par defaut" if lang == "fr" else "Default words", value=f"`{len(INSULTES_BASE)}`", inline=True)
+    e.add_field(name="Mots personnalises" if lang == "fr" else "Custom words", value=f"`{len(get_custom(guild.id))}`", inline=True)
+    e.add_field(
+        name="Roles immunises" if lang == "fr" else "Immune roles",
+        value=_role_lines(guild, get_roles_imm(guild.id), "Aucun role immunise." if lang == "fr" else "No immune role."),
+        inline=False,
+    )
     return e
 
 def build_staff_embed(guild):
-    e = E("Gestion des roles Staff", couleur=0x5865F2)
-    e.description = "Choisis directement les roles staff avec les menus ci-dessous."
-    e.add_field(name="Roles staff", value=_role_lines(guild, get_staff_roles(guild.id), "Aucun role staff configure. Les administrateurs gardent l'acces."), inline=False)
+    gid = str(guild.id)
+    lang = get_lang(gid)
+    e = EG("👮 Roles staff" if lang == "fr" else "👮 Staff roles", couleur=0x5865F2, gid=gid)
+    e.description = "Choisis les roles qui peuvent gerer les tickets et la moderation." if lang == "fr" else "Choose roles allowed to manage tickets and moderation."
+    e.add_field(
+        name="Roles staff" if lang == "fr" else "Staff roles",
+        value=_role_lines(guild, get_staff_roles(guild.id), "Aucun role staff configure. Les administrateurs gardent l'acces." if lang == "fr" else "No staff role configured. Administrators keep access."),
+        inline=False,
+    )
     return e
 
 def build_salons_embed(guild, selected_label="Tickets"):
     cfg = get_cfg(guild.id)
     gid = str(guild.id)
-    if get_lang(gid) == "fr":
-        e = E("Configuration des salons", couleur=0x5865F2)
-        e.description = f"Systeme selectionne : **{selected_label}**. Choisis ensuite le salon dans le menu."
+    lang = get_lang(gid)
+    if lang == "fr":
+        e = EG("📍 Configuration des salons", couleur=0x5865F2, gid=gid)
+        e.description = f"Systeme selectionne : **{selected_label}**\nChoisis un systeme puis le salon associe."
         empty = "Non defini"
     else:
-        e = E("Channel configuration", couleur=0x5865F2)
-        e.description = f"Selected system: **{selected_label}**. Then choose the channel from the menu."
+        e = EG("📍 Channel configuration", couleur=0x5865F2, gid=gid)
+        e.description = f"Selected system: **{selected_label}**\nChoose a system, then its channel."
         empty = "Not set"
     salons = [("salon_logs", "Logs"), ("salon_suggestions", "Suggestions"),
               ("salon_reports", "Reports"), ("salon_patchnotes", "Patch Notes"),
@@ -397,7 +440,9 @@ def build_salons_embed(guild, selected_label="Tickets"):
     for key, label in salons:
         val = cfg.get(key)
         ch = guild.get_channel(val) if val else None
-        e.add_field(name=label, value=ch.mention if ch else empty, inline=True)
+        e.add_field(name=label, value=channel_badge(ch, empty), inline=True)
+    hint = "Pour les tickets, ouvre `Ticket` puis clique sur `Poster ici`." if lang == "fr" else "For tickets, open `Ticket` then click `Post here`."
+    e.add_field(name="🎫 Ticket", value=hint, inline=False)
     return e
 
 MAX_TICKET_OPTIONS = 25
@@ -455,10 +500,11 @@ def set_ticket_questions(gid, questions):
     set_cfg(gid, cfg)
 
 def ticket_option_summary(gid, questions):
+    lang = get_lang(gid)
     lines = []
     for idx, q in enumerate(questions, start=1):
-        lines.append(f"`{idx}` **{q['label']}** - {q['desc'][:80]}")
-    value = "\n".join(lines) if lines else "Aucune option configuree."
+        lines.append(f"`{idx:02d}` **{q['label']}**\n{q['desc'][:90]}")
+    value = "\n".join(lines) if lines else ("Aucune option configuree." if lang == "fr" else "No option configured.")
     return value[:1024]
 
 def slugify_ticket_label(label):
@@ -484,11 +530,12 @@ def ticket_name_with_priority(name, priority):
 def build_ticket_panel_embed(guild):
     gid = str(guild.id)
     cfg = get_cfg(gid)
+    lang = get_lang(gid)
     logo = cfg.get("embed_logo") or (guild.icon.url if guild.icon else None)
     author = cfg.get("ticket_panel_author") or tr(gid, "ticket_panel_author", guild_name=guild.name)
     title = cfg.get("ticket_panel_title") or tr(gid, "ticket_panel_title")
     desc = cfg.get("ticket_panel_desc") or tr(gid, "ticket_panel_desc")
-    e = EG(title, desc, gid=gid)
+    e = EG(f"🎫 {title}", desc, gid=gid)
     try:
         if logo:
             e.set_author(name=author[:256], icon_url=logo)
@@ -499,7 +546,15 @@ def build_ticket_panel_embed(guild):
     rules_title = cfg.get("ticket_rules_title") or tr(gid, "ticket_rules_title")
     rules_desc = cfg.get("ticket_rules_desc") or tr(gid, "ticket_rules_desc")
     if rules_desc:
-        e.add_field(name=rules_title[:256], value=rules_desc[:1024], inline=False)
+        e.add_field(name=f"📌 {rules_title[:240]}", value=rules_desc[:1024], inline=False)
+    options = get_ticket_questions(gid)
+    preview = "\n".join(f"• **{q['label']}** — {q['desc']}" for q in options[:6])
+    if preview:
+        label = "Raisons disponibles" if lang == "fr" else "Available reasons"
+        e.add_field(name=f"🧭 {label}", value=preview[:1024], inline=False)
+    if len(options) > 6:
+        more = f"+ {len(options) - 6} autre(s) raison(s)" if lang == "fr" else f"+ {len(options) - 6} more reason(s)"
+        e.add_field(name="➕", value=more, inline=False)
     footer = cfg.get("ticket_panel_footer") or tr(gid, "ticket_panel_footer", guild_name=guild.name)
     try:
         if logo:
@@ -513,40 +568,54 @@ def build_ticket_panel_embed(guild):
 def build_ticket_config_embed(guild):
     gid = str(guild.id)
     cfg = get_cfg(gid)
+    lang = get_lang(gid)
     questions = get_ticket_questions(gid)
-    e = E(tr(gid, "ticket_config_title"), tr(gid, "ticket_config_desc"), 0x5865F2)
-    author_label = "Auteur" if get_lang(gid) == "fr" else "Author"
-    title_label = "Titre" if get_lang(gid) == "fr" else "Title"
+    e = EG(f"🎫 {tr(gid, 'ticket_config_title')}", tr(gid, "ticket_config_desc"), 0x5865F2, gid)
+    if cfg.get("embed_logo"):
+        e.set_thumbnail(url=cfg["embed_logo"])
+    author_label = "Auteur" if lang == "fr" else "Author"
+    title_label = "Titre" if lang == "fr" else "Title"
     options_label = "Options"
-    menu_label = "Options du menu" if get_lang(gid) == "fr" else "Menu options"
-    e.add_field(name="Message", value=(
+    menu_label = "Options du menu" if lang == "fr" else "Menu options"
+    ch_id = get_ch(gid, "salon_tickets", DEFAULT_TICKETS)
+    ch = guild.get_channel(ch_id)
+    deploy_label = "Deploiement" if lang == "fr" else "Deployment"
+    deploy_value = f"🟢 {ch.mention}" if ch else ("⚪ Aucun salon ticket configure" if lang == "fr" else "⚪ No ticket channel configured")
+    e.add_field(name="📝 Message public", value=(
         f"**{author_label} :** {(cfg.get('ticket_panel_author') or tr(gid, 'ticket_panel_author', guild_name=guild.name))[:80]}\n"
         f"**{title_label} :** {(cfg.get('ticket_panel_title') or tr(gid, 'ticket_panel_title'))[:80]}\n"
         f"**{options_label} :** `{len(questions)}/{MAX_TICKET_OPTIONS}`"
     ), inline=False)
-    e.add_field(name=menu_label, value=ticket_option_summary(gid, questions), inline=False)
+    deploy_hint = "Clique sur **📌 Poster ici** pour publier le message dans ce salon. L'ancien panel ticket est nettoye avant le nouveau post." if lang == "fr" else "Click **📌 Post here** to publish the message in this channel. The old ticket panel is cleaned before the new post."
+    e.add_field(name=f"📌 {deploy_label}", value=f"{deploy_value}\n{deploy_hint}", inline=False)
+    e.add_field(name=f"🧭 {menu_label}", value=ticket_option_summary(gid, questions), inline=False)
+    priority_hint = "Dans un ticket, le staff choisit 🟢 1, 🟡 2 ou 🔴 3. Le rond est ajoute devant le nom du salon." if lang == "fr" else "Inside a ticket, staff chooses 🟢 1, 🟡 2 or 🔴 3. The colored dot is added before the channel name."
+    e.add_field(name="🎚️ Priorite" if lang == "fr" else "🎚️ Priority", value=priority_hint, inline=False)
     return e
 
 def build_personnalisation_embed(guild):
     cfg = get_cfg(guild.id)
     gid = str(guild.id)
-    if get_lang(gid) == "fr":
-        e = EG("Personnalisation du bot", "Configure l'apparence utilisee par le bot sur ce serveur.", gid=gid)
+    lang = get_lang(gid)
+    if lang == "fr":
+        e = EG("🎨 Personnalisation du bot", "Configure l'apparence utilisee par le bot sur ce serveur.", gid=gid)
         labels = ("Nom du bot", "Couleur", "Footer", "Logo du bot", "Banniere du bot", "Icone footer")
-        configured, unset = "Configure", "Non defini"
-        banner_configured, banner_unset = "Configuree", "Non definie"
+        configured, unset = "🟢 Configure", "⚪ Non defini"
+        banner_configured, banner_unset = "🟢 Configuree", "⚪ Non definie"
     else:
-        e = EG("Bot customization", "Configure the bot appearance used on this server.", gid=gid)
+        e = EG("🎨 Bot customization", "Configure the bot appearance used on this server.", gid=gid)
         labels = ("Bot name", "Color", "Footer", "Bot logo", "Bot banner", "Footer icon")
-        configured, unset = "Set", "Not set"
-        banner_configured, banner_unset = "Set", "Not set"
-    e.add_field(name=labels[0], value=get_bot_display_name(gid, guild), inline=True)
+        configured, unset = "🟢 Set", "⚪ Not set"
+        banner_configured, banner_unset = "🟢 Set", "⚪ Not set"
+    if cfg.get("embed_logo"):
+        e.set_thumbnail(url=cfg["embed_logo"])
+    e.add_field(name=f"🏷️ {labels[0]}", value=get_bot_display_name(gid, guild), inline=True)
     e.add_field(name=labels[1], value=f"`#{cfg.get('embed_color', 0x5865F2):06X}`", inline=True)
-    e.add_field(name=labels[2], value=cfg.get("embed_footer", f"{get_bot_display_name(gid, guild)} - Protection de votre communaute")[:100], inline=True)
-    e.add_field(name=labels[3], value=configured if cfg.get("embed_logo") else unset, inline=True)
-    e.add_field(name=labels[4], value=banner_configured if cfg.get("embed_banner") else banner_unset, inline=True)
-    e.add_field(name=labels[5], value=banner_configured if cfg.get("embed_footer_icon") else banner_unset, inline=True)
-    e.add_field(name=tr(gid, "language"), value=format_lang(gid), inline=True)
+    e.add_field(name=f"🔖 {labels[2]}", value=cfg.get("embed_footer", f"{get_bot_display_name(gid, guild)} - Protection de votre communaute")[:100], inline=False)
+    e.add_field(name=f"🖼️ {labels[3]}", value=configured if cfg.get("embed_logo") else unset, inline=True)
+    e.add_field(name=f"🌄 {labels[4]}", value=banner_configured if cfg.get("embed_banner") else banner_unset, inline=True)
+    e.add_field(name=f"🔖 {labels[5]}", value=banner_configured if cfg.get("embed_footer_icon") else banner_unset, inline=True)
+    e.add_field(name=f"🌐 {tr(gid, 'language')}", value=format_lang(gid), inline=True)
     return e
 
 async def refresh_interaction_message(interaction, embed, view):
@@ -1559,13 +1628,20 @@ def _is_system_message(message, key):
     blob = _message_search_blob(message)
     return any(marker in blob for marker in rules.get("markers", []))
 
-async def cleanup_system_messages(guild, channel, key, keep_id=None, limit=500):
+async def cleanup_system_messages(guild, channel, key, keep_id=None, limit=500, preserve_newest=True):
     deleted = 0
+    found = []
     try:
         async for message in channel.history(limit=limit):
             if keep_id and message.id == keep_id:
                 continue
             if not _is_system_message(message, key):
+                continue
+            found.append(message)
+        if not keep_id and preserve_newest and found:
+            keep_id = found[0].id
+        for message in found:
+            if keep_id and message.id == keep_id:
                 continue
             try:
                 await message.delete()
@@ -1594,13 +1670,29 @@ async def cleanup_configured_system_messages(guild):
             keep_id = get_cfg(guild.id).get(f"{key}_status_message_id")
         await cleanup_system_messages(guild, channel, key, keep_id=keep_id)
 
+async def deploy_fresh_ticket_panel(guild, channel):
+    gid = str(guild.id)
+    await delete_system_message(guild, "salon_tickets", "status")
+    cfg = get_cfg(gid)
+    old_msg_id = cfg.get("salon_tickets_panel_message_id")
+    old_ch_id = cfg.get("salon_tickets_panel_channel_id")
+    if old_msg_id and old_ch_id and int(old_ch_id) != int(channel.id):
+        try:
+            old_ch = guild.get_channel(int(old_ch_id)) or await bot.fetch_channel(int(old_ch_id))
+            old_msg = await old_ch.fetch_message(int(old_msg_id))
+            await old_msg.delete()
+        except Exception:
+            pass
+    await cleanup_system_messages(guild, channel, "salon_tickets", keep_id=None, preserve_newest=False)
+    msg = await channel.send(embed=build_ticket_panel_embed(guild), view=VueChoixCategorie(gid))
+    update_cfg(guild.id, "salon_tickets_panel_message_id", msg.id)
+    update_cfg(guild.id, "salon_tickets_panel_channel_id", channel.id)
+    return msg
+
 async def setup_configured_channel(guild, channel, key, label):
     gid = str(guild.id)
     if key == "salon_tickets":
-        await delete_system_message(guild, key, "status")
-        e = build_ticket_panel_embed(guild)
-        msg = await publish_or_update_system_message(guild, channel, key, "panel", e, VueChoixCategorie(gid))
-        await cleanup_system_messages(guild, channel, key, keep_id=msg.id)
+        await deploy_fresh_ticket_panel(guild, channel)
         return "Le systeme Tickets est actif et le panel est disponible."
     if key == "salon_suggestions":
         await delete_system_message(guild, key, "status")
@@ -1633,16 +1725,7 @@ async def refresh_ticket_panel_message(guild):
         channel = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
     except Exception:
         return None
-    await delete_system_message(guild, "salon_tickets", "status")
-    msg = await publish_or_update_system_message(
-        guild,
-        channel,
-        "salon_tickets",
-        "panel",
-        build_ticket_panel_embed(guild),
-        VueChoixCategorie(gid),
-    )
-    await cleanup_system_messages(guild, channel, "salon_tickets", keep_id=msg.id)
+    await deploy_fresh_ticket_panel(guild, channel)
     return channel
 
 #  PANEL MODALS
@@ -2130,7 +2213,10 @@ class VuePanelTickets(discord.ui.View):
         gid = str(i.guild.id)
         update_cfg(i.guild.id, "salon_tickets", i.channel.id)
         await setup_configured_channel(i.guild, i.channel, "salon_tickets", "Tickets")
-        await i.followup.send(embed=EG(tr(gid, "ticket_deployed_title"), tr(gid, "ticket_deployed_desc", channel=i.channel.mention), 0x43B581, gid), ephemeral=True)
+        await send_temporary_followup(
+            i,
+            embed=EG(tr(gid, "ticket_deployed_title"), tr(gid, "ticket_deployed_desc", channel=i.channel.mention), 0x43B581, gid),
+        )
 
 class SelectRoleStaff(discord.ui.RoleSelect):
     def __init__(self, action, row):
@@ -2199,18 +2285,17 @@ class VuePanelStats(discord.ui.View):
         await i.followup.send(embed=e, ephemeral=True)
 
 class SelectCouleurEmbed(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="Bleu Discord", value="5865F2"),
-            discord.SelectOption(label="Vert", value="43B581"),
-            discord.SelectOption(label="Rouge", value="ED4245"),
-            discord.SelectOption(label="Orange", value="FFA500"),
-            discord.SelectOption(label="Jaune", value="FFD700"),
-            discord.SelectOption(label="Violet", value="9B59B6"),
-            discord.SelectOption(label="Rose", value="E91E63"),
-            discord.SelectOption(label="Noir", value="2B2D31"),
-        ]
-        super().__init__(placeholder="Palette de couleurs", options=options, min_values=1, max_values=1, row=0)
+    def __init__(self, gid=None):
+        lang = get_lang(gid)
+        if lang == "fr":
+            labels = ["Bleu Discord", "Vert", "Rouge", "Orange", "Jaune", "Violet", "Rose", "Noir"]
+            placeholder = "Palette de couleurs"
+        else:
+            labels = ["Discord Blue", "Green", "Red", "Orange", "Yellow", "Purple", "Pink", "Black"]
+            placeholder = "Color palette"
+        values = ["5865F2", "43B581", "ED4245", "FFA500", "FFD700", "9B59B6", "E91E63", "2B2D31"]
+        options = [discord.SelectOption(label=label, value=value) for label, value in zip(labels, values)]
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1, row=0)
 
     async def callback(self, i: discord.Interaction):
         update_cfg(i.guild.id, "embed_color", int(self.values[0], 16))
@@ -2220,7 +2305,7 @@ class VuePanelPersonnalisation(discord.ui.View):
     def __init__(self, gid=None):
         super().__init__(timeout=180)
         self.gid = str(gid) if gid else None
-        self.add_item(SelectCouleurEmbed())
+        self.add_item(SelectCouleurEmbed(self.gid))
         localize_buttons(self, self.gid, {
             "Nom du bot": "btn_bot_name",
             "Upload logo": "btn_upload_logo",
@@ -2314,7 +2399,7 @@ class SelectLangueBot(discord.ui.Select):
             inline=False,
         )
         try:
-            await i.edit_original_response(embed=e, view=self.view)
+            await i.edit_original_response(embed=e, view=VuePanelLangue(i.guild.id))
         except Exception:
             await i.followup.send(embed=e, ephemeral=True)
 
@@ -2746,26 +2831,35 @@ async def on_voice_state_update(member, before, after):
 
 def build_language_embed(guild):
     gid = str(guild.id)
-    e = E(tr(gid, "language_panel_title"), tr(gid, "language_panel_desc"), 0x5865F2)
-    e.add_field(name=tr(gid, "language_current"), value=format_lang(gid), inline=True)
+    lang = get_lang(gid)
+    e = EG(f"🌐 {tr(gid, 'language_panel_title')}", tr(gid, "language_panel_desc"), 0x5865F2, gid)
+    e.add_field(name=f"🌐 {tr(gid, 'language_current')}", value=format_lang(gid), inline=True)
+    e.add_field(
+        name="⚙️ Slash commandes" if lang == "fr" else "⚙️ Slash commands",
+        value="Les noms et descriptions sont resynchronises apres changement." if lang == "fr" else "Names and descriptions are synced after a language change.",
+        inline=False,
+    )
     return e
 
 def build_rating_embed(guild):
     gid = str(guild.id)
+    lang = get_lang(gid)
     stats = get_rating_stats(gid)
-    e = E(tr(gid, "rating_panel_title"), tr(gid, "rating_panel_desc"), 0xFFD700)
+    e = EG(f"⭐ {tr(gid, 'rating_panel_title')}", tr(gid, "rating_panel_desc"), 0xFFD700, gid)
     if not stats["count"]:
         e.description = tr(gid, "rating_empty")
+        e.add_field(name=tr(gid, "rating_average"), value="`0.00/5`", inline=True)
+        e.add_field(name=tr(gid, "rating_count"), value="`0`", inline=True)
         return e
     avg = stats["avg"]
     stars = "★" * max(1, round(avg)) + "☆" * max(0, 5 - round(avg))
-    e.add_field(name=tr(gid, "rating_average"), value=f"**{avg:.2f}/5**\n{stars}", inline=True)
+    e.add_field(name=f"📊 {tr(gid, 'rating_average')}", value=f"**{avg:.2f}/5**\n{stars}", inline=True)
     e.add_field(name=tr(gid, "rating_count"), value=f"`{stats['count']}`", inline=True)
     last = []
     for r in stats["last"][-5:]:
         last.append(f"`{r.get('date','?')}` - **{r.get('note','?')}/5**")
     if last:
-        e.add_field(name="Dernieres notes" if get_lang(gid) == "fr" else "Latest ratings", value="\n".join(last), inline=False)
+        e.add_field(name="🕒 Dernieres notes" if lang == "fr" else "🕒 Latest ratings", value="\n".join(last), inline=False)
     return e
 
 async def sync_guild_command_language(guild):
@@ -3026,12 +3120,27 @@ async def delete_messages_safely(channel, limit=None, reason=""):
 
 def build_clear_embed(gid, count, all_messages=False):
     key = "clear_all_done" if all_messages else "clear_done"
-    title = "Messages supprimés" if get_lang(gid) == "fr" else "Messages deleted"
-    return EG(title, tr(gid, key, count=count), 0x43B581, gid)
+    lang = get_lang(gid)
+    title = "🧹 Messages supprimes" if lang == "fr" else "🧹 Messages deleted"
+    e = EG(title, tr(gid, key, count=count), 0x43B581, gid)
+    e.add_field(name="Resultat" if lang == "fr" else "Result", value=f"`{count}`", inline=True)
+    e.add_field(name="Mode", value="Tout le salon" if all_messages and lang == "fr" else ("Whole channel" if all_messages else ("Selection" if lang == "fr" else "Selection")), inline=True)
+    return e
 
 def build_simple_embed(gid, title_fr, title_en, desc, color=0x5865F2):
     title = title_fr if get_lang(gid) == "fr" else title_en
     return EG(title, desc, color, gid)
+
+async def send_temporary_followup(interaction, embed=None, content=None, seconds=4):
+    try:
+        msg = await interaction.followup.send(content=content, embed=embed, ephemeral=True, wait=True)
+        await asyncio.sleep(seconds)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 class VueClearAllConfirm(discord.ui.View):
     def __init__(self, owner_id, channel_id, gid):
@@ -3103,22 +3212,6 @@ async def cmd_report(i: discord.Interaction):
 async def cmd_patchnotes(i: discord.Interaction):
     try: await i.response.send_modal(ModalPatchnotes())
     except Exception: pass
-
-@bot.tree.command(name="ticket", description="🎫 Deployer le systeme de ticket dans ce salon")
-@app_commands.checks.has_permissions(administrator=True)
-async def cmd_ticket(i: discord.Interaction):
-    await _safe_defer(i)
-    gid = str(i.guild.id)
-    if not hasattr(i.channel, "send"):
-        return await i.followup.send(tr(gid, "channel_not_supported"), ephemeral=True)
-    update_cfg(i.guild.id, "salon_tickets", i.channel.id)
-    await setup_configured_channel(i.guild, i.channel, "salon_tickets", "Tickets")
-    await i.followup.send(
-        embed=EG(tr(gid, "ticket_deployed_title"),
-                 tr(gid, "ticket_deployed_desc", channel=i.channel.mention),
-                 0x43B581, gid),
-        ephemeral=True,
-    )
 
 @bot.tree.command(name="panel", description="Panneau d'administration ModBot")
 @app_commands.checks.has_permissions(administrator=True)
@@ -3403,7 +3496,7 @@ async def cmd_info(i: discord.Interaction):
     e.add_field(name="⏱️ Expiration", value="`5 mois`", inline=True)
     e.add_field(name="⚡ Sanctions", value="1→warn • 2→mute4h • 3→mute24h • 4→ban", inline=False)
     e.add_field(name="📋 Commandes", value=(
-        "`/insultes` `/suggest` `/report` `/ticket` `/warn` `/ban` `/deban`\n"
+        "`/insultes` `/suggest` `/report` `/warn` `/ban` `/deban`\n"
         "`/annonce` `/massdm` `/translate` `/panel` `/patchnotes`\n"
         "`/clear-message` `/clear-all`\n"
         "`/avert-count` `/ban-list` `/reset-avert` `/profilestats`\n"
