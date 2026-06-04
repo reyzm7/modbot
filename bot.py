@@ -148,8 +148,8 @@ TEXTS = {
     "btn_set_channel_id": {"fr": "🆔 Definir ID", "en": "🆔 Set ID"},
     "btn_create_channel": {"fr": "➕ Creer le salon", "en": "➕ Create channel"},
     "btn_bot_name": {"fr": "🏷️ Nom du bot", "en": "🏷️ Bot name"},
-    "btn_upload_logo": {"fr": "🖼️ Logo", "en": "🖼️ Logo"},
-    "btn_upload_banner": {"fr": "🌄 Banniere", "en": "🌄 Banner"},
+    "btn_upload_logo": {"fr": "🖼️ Logo embeds", "en": "🖼️ Embed logo"},
+    "btn_upload_banner": {"fr": "🌄 Banniere embeds", "en": "🌄 Embed banner"},
     "btn_upload_footer": {"fr": "🔖 Icone footer", "en": "🔖 Footer icon"},
     "btn_edit_footer": {"fr": "✏️ Footer", "en": "✏️ Footer"},
     "btn_reset": {"fr": "♻️ Reinitialiser", "en": "♻️ Reset"},
@@ -846,13 +846,18 @@ def build_personnalisation_embed(guild):
     gid = str(guild.id)
     lang = get_lang(gid)
     if lang == "fr":
-        e = EG("🎨 Personnalisation du bot", "Configure l'apparence utilisee par le bot sur ce serveur.", gid=gid)
-        labels = ("Nom du bot", "Couleur", "Footer", "Logo du bot", "Banniere du bot", "Icone footer")
+        e = EG("🎨 Personnalisation du bot", "Configure l'apparence des embeds sur ce serveur uniquement.", gid=gid)
+        labels = ("Nom serveur", "Couleur", "Footer", "Logo embeds", "Banniere embeds", "Icone footer")
     else:
-        e = EG("🎨 Bot customization", "Configure the bot appearance used on this server.", gid=gid)
-        labels = ("Bot name", "Color", "Footer", "Bot logo", "Bot banner", "Footer icon")
+        e = EG("🎨 Bot customization", "Configure embed appearance on this server only.", gid=gid)
+        labels = ("Server name", "Color", "Footer", "Embed logo", "Embed banner", "Footer icon")
     if cfg.get("embed_logo"):
         e.set_thumbnail(url=cfg["embed_logo"])
+    if cfg.get("embed_banner"):
+        try:
+            e.set_image(url=cfg["embed_banner"])
+        except Exception:
+            pass
     default_footer = f"{get_bot_display_name(gid, guild)} - Protection de votre communaute"
     e.add_field(name=f"🏷️ {labels[0]}", value=f"{status_badge(bool(cfg.get('bot_name')), gid)}\n{get_bot_display_name(gid, guild)}", inline=True)
     e.add_field(name=labels[1], value=f"{status_badge('embed_color' in cfg, gid)}\n`#{cfg.get('embed_color', 0x5865F2):06X}`", inline=True)
@@ -2919,8 +2924,8 @@ class VuePanelPersonnalisation(discord.ui.View):
         self.add_item(SelectCouleurEmbed(self.gid))
         localize_buttons(self, self.gid, {
             "Nom du bot": "btn_bot_name",
-            "Upload logo": "btn_upload_logo",
-            "Upload banniere": "btn_upload_banner",
+            "Logo embeds": "btn_upload_logo",
+            "Banniere embeds": "btn_upload_banner",
             "Upload icone footer": "btn_upload_footer",
             "Modifier footer": "btn_edit_footer",
             "Reinitialiser": "btn_reset",
@@ -2955,29 +2960,31 @@ class VuePanelPersonnalisation(discord.ui.View):
         url, cfg = await store_server_asset_bytes(i.guild, raw, filename, key, i.channel)
         if not url:
             update_cfg(i.guild.id, key, att.url)
+            cfg = get_cfg(i.guild.id)
         else:
             try:
                 await msg.delete()
             except Exception:
                 pass
+        await refresh_stored_asset_urls(i.guild)
         try:
             await i.message.edit(embed=build_personnalisation_embed(i.guild), view=self)
         except Exception:
             pass
-        await i.followup.send(embed=E("Visuel enregistre", f"**{label}** a ete mis a jour.", 0x43B581), ephemeral=True)
+        await i.followup.send(embed=EG("✅ Visuel enregistre", f"**{label}** a ete mis a jour pour ce serveur uniquement.", 0x43B581, i.guild.id), ephemeral=True)
 
     @discord.ui.button(label="Nom du bot", style=discord.ButtonStyle.secondary, row=1)
     async def bot_name(self, i: discord.Interaction, b):
         try: await i.response.send_modal(ModalBotIdentity())
         except Exception: pass
 
-    @discord.ui.button(label="Upload logo", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Logo embeds", style=discord.ButtonStyle.primary, row=1)
     async def upload_logo(self, i: discord.Interaction, b):
-        await self._upload_image(i, "embed_logo", "logo du bot")
+        await self._upload_image(i, "embed_logo", "logo des embeds")
 
-    @discord.ui.button(label="Upload banniere", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Banniere embeds", style=discord.ButtonStyle.primary, row=1)
     async def upload_banner(self, i: discord.Interaction, b):
-        await self._upload_image(i, "embed_banner", "banniere du bot")
+        await self._upload_image(i, "embed_banner", "banniere des embeds")
 
     @discord.ui.button(label="Upload icone footer", style=discord.ButtonStyle.primary, row=2)
     async def upload_footer_icon(self, i: discord.Interaction, b):
