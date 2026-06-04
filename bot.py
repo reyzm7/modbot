@@ -1133,23 +1133,23 @@ async def safe_ephemeral(interaction: discord.Interaction, content=None, embed=N
     except Exception:
         pass
 
-LOCKDOWN_PERMISSIONS = (
-    "send_messages",
-    "add_reactions",
-    "create_public_threads",
-    "create_private_threads",
-    "send_messages_in_threads",
-)
+def serialize_perm_value(value):
+    if value is True:
+        return True
+    if value is False:
+        return False
+    return None
 
-async def apply_lockdown_permissions(channel, role, locked):
+async def apply_lockdown_permissions(channel, role, locked, previous_view=None):
     overwrite = channel.overwrites_for(role)
-    value = False if locked else None
-    for perm in LOCKDOWN_PERMISSIONS:
-        try:
-            setattr(overwrite, perm, value)
-        except Exception:
-            pass
-    await channel.set_permissions(role, overwrite=overwrite)
+    overwrite.view_channel = False if locked else previous_view
+    if overwrite.is_empty():
+        await channel.set_permissions(role, overwrite=None)
+    else:
+        await channel.set_permissions(role, overwrite=overwrite)
+
+def channel_can_lockdown(channel):
+    return hasattr(channel, "set_permissions") and hasattr(channel, "overwrites_for")
 
 async def send_log(guild, embed):
     try:
@@ -1991,11 +1991,24 @@ class ModalLockSalon(discord.ui.Modal, title="🔒 Lockdown salon"):
             ch = i.guild.get_channel(int(self.salon_id.value))
             if not ch:
                 return await i.followup.send("❌ Salon introuvable.", ephemeral=True)
+            cfg = get_cfg(i.guild.id)
+            saved = cfg.get("single_lock_view_state") if isinstance(cfg.get("single_lock_view_state"), dict) else {}
+            cid = str(ch.id)
             if self.action == "lock":
+                if cid not in saved:
+                    saved[cid] = serialize_perm_value(ch.overwrites_for(i.guild.default_role).view_channel)
                 await apply_lockdown_permissions(ch, i.guild.default_role, True)
+                cfg["single_lock_view_state"] = saved
+                set_cfg(i.guild.id, cfg)
                 e = E("🔒 Salon verrouillé", f"{ch.mention} verrouillé.", 0xED4245)
             else:
-                await apply_lockdown_permissions(ch, i.guild.default_role, False)
+                previous = saved.pop(cid, None)
+                await apply_lockdown_permissions(ch, i.guild.default_role, False, previous)
+                if saved:
+                    cfg["single_lock_view_state"] = saved
+                else:
+                    cfg.pop("single_lock_view_state", None)
+                set_cfg(i.guild.id, cfg)
                 e = E("🔓 Salon déverrouillé", f"{ch.mention} accessible.", 0x43B581)
             await i.followup.send(embed=e, ephemeral=True)
         except Exception as ex:
@@ -2237,13 +2250,20 @@ class VuePanelSecurite(discord.ui.View):
         try: await i.response.defer(ephemeral=True)
         except Exception: pass
         count = 0
-        for ch in [c for c in i.guild.channels if isinstance(c, discord.abc.GuildChannel) and hasattr(c, "set_permissions")]:
+        cfg = get_cfg(i.guild.id)
+        saved = cfg.get("lockdown_view_state") if isinstance(cfg.get("lockdown_view_state"), dict) else {}
+        for ch in [c for c in i.guild.channels if channel_can_lockdown(c)]:
             try:
+                cid = str(ch.id)
+                if cid not in saved:
+                    saved[cid] = serialize_perm_value(ch.overwrites_for(i.guild.default_role).view_channel)
                 await apply_lockdown_permissions(ch, i.guild.default_role, True)
                 count += 1
             except Exception:
                 pass
-        update_cfg(i.guild.id, "lockdown", True)
+        cfg["lockdown"] = True
+        cfg["lockdown_view_state"] = saved
+        set_cfg(i.guild.id, cfg)
         await self._refresh(i)
         await i.followup.send(embed=EG("🔒 Serveur verrouille", f"✅ `{count}` salon(s) verrouille(s).", 0xED4245, i.guild.id), ephemeral=True)
 
@@ -2252,15 +2272,34 @@ class VuePanelSecurite(discord.ui.View):
         try: await i.response.defer(ephemeral=True)
         except Exception: pass
         count = 0
-        for ch in [c for c in i.guild.channels if isinstance(c, discord.abc.GuildChannel) and hasattr(c, "set_permissions")]:
-            try:
-                await apply_lockdown_permissions(ch, i.guild.default_role, False)
-                count += 1
-            except Exception:
-                pass
-        update_cfg(i.guild.id, "lockdown", False)
+        cfg = get_cfg(i.guild.id)
+        saved = cfg.get("lockdown_view_state") if isinstance(cfg.get("lockdown_view_state"), dict) else {}
+        if saved:
+            for cid, previous in list(saved.items()):
+                try:
+                    ch = i.guild.get_channel(int(cid))
+                    if not ch or not channel_can_lockdown(ch):
+                        continue
+                    await apply_lockdown_permissions(ch, i.guild.default_role, False, previous)
+                    count += 1
+                except Exception:
+                    pass
+        else:
+            # Rattrapage pour les anciens lockdowns sans sauvegarde: on retire uniquement le blocage de visibilite.
+            for ch in [c for c in i.guild.channels if channel_can_lockdown(c)]:
+                try:
+                    overwrite = ch.overwrites_for(i.guild.default_role)
+                    if overwrite.view_channel is False:
+                        await apply_lockdown_permissions(ch, i.guild.default_role, False, None)
+                        count += 1
+                except Exception:
+                    pass
+        cfg["lockdown"] = False
+        cfg.pop("lockdown_view_state", None)
+        set_cfg(i.guild.id, cfg)
         await self._refresh(i)
-        await i.followup.send(embed=EG("🔓 Serveur deverrouille", f"✅ `{count}` salon(s) remis en permissions normales.", 0x43B581, i.guild.id), ephemeral=True)
+        msg = f"✅ `{count}` salon(s) restaures avec leurs anciennes permissions." if saved else f"✅ `{count}` ancien(s) blocage(s) de visibilite retire(s)."
+        await i.followup.send(embed=EG("🔓 Serveur deverrouille", msg, 0x43B581, i.guild.id), ephemeral=True)
 
     @discord.ui.button(label="Lock un salon", style=discord.ButtonStyle.danger, row=0)
     async def lock_ch(self, i: discord.Interaction, b):
@@ -3091,6 +3130,31 @@ class ModalAnnonce(discord.ui.Modal, title="📢 Nouvelle annonce"):
         await i.followup.send(embed=E("✅ Annonce publiée !", couleur=0x43B581), ephemeral=True)
         await alert_staff(i.guild, "ANNONCE", i.user, raison=f"Salon: #{self.salon_cible.name}")
 
+class SelectAnnonceSalon(discord.ui.ChannelSelect):
+    def __init__(self):
+        channel_types = [discord.ChannelType.text]
+        try:
+            channel_types.append(discord.ChannelType.news)
+        except Exception:
+            pass
+        super().__init__(
+            placeholder="Choisir le salon de l'annonce",
+            channel_types=channel_types,
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, i: discord.Interaction):
+        try:
+            await i.response.send_modal(ModalAnnonce(self.values[0]))
+        except Exception:
+            pass
+
+class VueAnnonceSalon(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(SelectAnnonceSalon())
+
 class ModalMassDM(discord.ui.Modal, title="📨 Message en masse"):
     titre    = discord.ui.TextInput(label="Titre", max_length=100)
     contenu  = discord.ui.TextInput(label="Contenu", style=discord.TextStyle.paragraph, max_length=2000)
@@ -3268,11 +3332,9 @@ _en_cours: set = set()
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild:
-        await bot.process_commands(message)
         return
 
     if message.id in _en_cours:
-        await bot.process_commands(message)
         return
 
     # ✅ Ajout IMMÉDIAT avant toute logique
@@ -3427,6 +3489,8 @@ async def on_message(message):
 @bot.command(name="addroles")
 @commands.has_permissions(manage_roles=True)
 async def addroles(ctx):
+    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-addroles", ttl_seconds=120):
+        return
     membres = [m for m in ctx.message.mentions if isinstance(m, discord.Member)]
     roles   = ctx.message.role_mentions
     if not membres or not roles:
@@ -3446,6 +3510,8 @@ async def addroles(ctx):
 @bot.command(name="deleteroles")
 @commands.has_permissions(manage_roles=True)
 async def deleteroles(ctx):
+    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-deleteroles", ttl_seconds=120):
+        return
     membres = [m for m in ctx.message.mentions if isinstance(m, discord.Member)]
     roles   = ctx.message.role_mentions
     if not membres or not roles:
@@ -3464,6 +3530,8 @@ async def deleteroles(ctx):
 @bot.command(name="addchannel")
 @commands.has_permissions(manage_channels=True)
 async def addchannel(ctx):
+    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-addchannel", ttl_seconds=120):
+        return
     membre = ctx.message.mentions[0] if ctx.message.mentions else None
     salon = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else ctx.channel
     if not membre or not salon:
@@ -3487,6 +3555,8 @@ async def addchannel(ctx):
 @bot.command(name="deletechannel")
 @commands.has_permissions(manage_channels=True)
 async def deletechannel(ctx):
+    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-deletechannel", ttl_seconds=120):
+        return
     membre = ctx.message.mentions[0] if ctx.message.mentions else None
     salon = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else ctx.channel
     if not membre or not salon:
@@ -3751,11 +3821,13 @@ async def cmd_deban(i: discord.Interaction, user_id: str, raison: str = "Aucune 
         await i.followup.send(f"❌ Erreur : {ex}", ephemeral=True)
 
 @bot.tree.command(name="annonce", description="📢 Publier une annonce officielle")
-@app_commands.describe(salon="Salon où publier l'annonce")
 @app_commands.checks.has_permissions(administrator=True)
-async def cmd_annonce(i: discord.Interaction, salon: discord.TextChannel):
-    try: await i.response.send_modal(ModalAnnonce(salon))
-    except Exception: pass
+async def cmd_annonce(i: discord.Interaction):
+    e = EG("📢 Nouvelle annonce", "Choisis d'abord le salon ou publier l'annonce.", gid=i.guild.id)
+    try:
+        await i.response.send_message(embed=e, view=VueAnnonceSalon(), ephemeral=True)
+    except Exception:
+        pass
 
 @bot.tree.command(name="massdm", description="📨 Envoyer un DM en masse")
 @app_commands.describe(membre="Membre spécifique (vide = tous les membres)")
