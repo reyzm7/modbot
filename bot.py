@@ -292,6 +292,39 @@ def read_asset_bytes(path):
         pass
     return None
 
+def discord_asset_url(asset):
+    try:
+        return asset.url if asset else None
+    except Exception:
+        return None
+
+async def discord_asset_bytes(asset):
+    try:
+        return await asset.read() if asset else None
+    except Exception:
+        return None
+
+async def get_installation_asset_defaults():
+    try:
+        app = await bot.application_info()
+    except Exception:
+        app = None
+    if not app:
+        return None, None, None, None
+
+    icon_asset = getattr(app, "icon", None)
+    banner_asset = None
+    for attr in ("cover_image", "banner"):
+        banner_asset = getattr(app, attr, None)
+        if banner_asset:
+            break
+
+    logo = discord_asset_url(icon_asset)
+    banner = discord_asset_url(banner_asset)
+    logo_raw = await discord_asset_bytes(icon_asset)
+    banner_raw = await discord_asset_bytes(banner_asset)
+    return logo, banner, logo_raw, banner_raw
+
 async def restore_default_personnalisation(guild, cfg):
     for k in (
         "embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon", "bot_name",
@@ -303,8 +336,9 @@ async def restore_default_personnalisation(guild, cfg):
     cfg["embed_color"] = DEFAULT_EMBED_COLOR
     cfg["embed_footer"] = f"{DEFAULT_BOT_NAME} - Protection de votre communaute"
 
-    logo_raw = read_asset_bytes(DEFAULT_LOGO_FILE)
-    banner_raw = read_asset_bytes(DEFAULT_BANNER_FILE)
+    installation_logo, installation_banner, installation_logo_raw, installation_banner_raw = await get_installation_asset_defaults()
+    logo_raw = installation_logo_raw or read_asset_bytes(DEFAULT_LOGO_FILE)
+    banner_raw = installation_banner_raw or read_asset_bytes(DEFAULT_BANNER_FILE)
 
     try:
         await guild.me.edit(nick=DEFAULT_BOT_NAME, reason="Reset personnalisation ModBot")
@@ -312,6 +346,8 @@ async def restore_default_personnalisation(guild, cfg):
         pass
 
     if bot.user:
+        avatar_applied = False
+        banner_applied = False
         try:
             await bot.user.edit(username=DEFAULT_BOT_NAME)
         except Exception:
@@ -319,11 +355,13 @@ async def restore_default_personnalisation(guild, cfg):
         if logo_raw:
             try:
                 await bot.user.edit(avatar=logo_raw)
+                avatar_applied = True
             except Exception:
                 pass
         if banner_raw:
             try:
                 await bot.user.edit(banner=banner_raw)
+                banner_applied = True
             except Exception:
                 pass
 
@@ -332,17 +370,26 @@ async def restore_default_personnalisation(guild, cfg):
         except Exception:
             fresh_user = bot.user
 
+        profile_logo = None
+        profile_banner = None
         try:
-            cfg["embed_logo"] = fresh_user.display_avatar.url
-            cfg["embed_footer_icon"] = fresh_user.display_avatar.url
+            profile_logo = fresh_user.display_avatar.url
         except Exception:
             pass
         try:
             banner = getattr(fresh_user, "banner", None)
             if banner:
-                cfg["embed_banner"] = banner.url
+                profile_banner = banner.url
         except Exception:
             pass
+
+        logo_url = installation_logo or (profile_logo if avatar_applied else None)
+        banner_url = installation_banner or (profile_banner if banner_applied else None)
+        if logo_url:
+            cfg["embed_logo"] = logo_url
+            cfg["embed_footer_icon"] = logo_url
+        if banner_url:
+            cfg["embed_banner"] = banner_url
 
     return cfg
 
