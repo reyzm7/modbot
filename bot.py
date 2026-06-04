@@ -22,6 +22,7 @@ BASE_DIR            = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOGO_FILE   = os.path.join(BASE_DIR, "assets", "default_logo.png")
 DEFAULT_BANNER_FILE = os.path.join(BASE_DIR, "assets", "default_banner.png")
 DEFAULT_PROFILE_BANNER_FILE = os.path.join(BASE_DIR, "assets", "default_bot_banner_680x240.png")
+ASSET_CHANNEL_NAME = "modbot-assets"
 
 INSULTES_BASE = [
     "tg","fdp","pd","ntm","ftg","connard","connasse","salope","pute",
@@ -326,29 +327,143 @@ async def get_installation_asset_defaults():
     banner_raw = await discord_asset_bytes(banner_asset)
     return logo, banner, logo_raw, banner_raw
 
-async def restore_default_personnalisation(guild, cfg):
+async def get_asset_storage_channel(guild, cfg, preferred_channel=None):
+    ch = None
+    ch_id = cfg.get("asset_channel_id")
+    if ch_id:
+        try:
+            ch = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+        except Exception:
+            ch = None
+    if ch and hasattr(ch, "send"):
+        return ch
+
+    try:
+        for candidate in getattr(guild, "text_channels", []):
+            if candidate.name == ASSET_CHANNEL_NAME:
+                cfg["asset_channel_id"] = candidate.id
+                return candidate
+    except Exception:
+        pass
+
+    try:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        }
+        if guild.me:
+            overwrites[guild.me] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                attach_files=True,
+                read_message_history=True,
+                manage_messages=True,
+            )
+        ch = await guild.create_text_channel(
+            ASSET_CHANNEL_NAME,
+            overwrites=overwrites,
+            reason="Stockage des visuels ModBot par serveur",
+        )
+        cfg["asset_channel_id"] = ch.id
+        return ch
+    except Exception:
+        pass
+
+    return preferred_channel if preferred_channel and hasattr(preferred_channel, "send") else None
+
+async def delete_stored_asset_message(guild, cfg, key):
+    msg_id = cfg.get(f"{key}_asset_message_id")
+    ch_id = cfg.get(f"{key}_asset_channel_id")
+    if not msg_id or not ch_id:
+        return
+    try:
+        ch = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+        msg = await ch.fetch_message(int(msg_id))
+        await msg.delete()
+    except Exception:
+        pass
+    cfg.pop(f"{key}_asset_message_id", None)
+    cfg.pop(f"{key}_asset_channel_id", None)
+
+async def store_server_asset_bytes(guild, raw, filename, key, preferred_channel=None, cfg=None):
+    if not raw:
+        return None, cfg or get_cfg(guild.id)
+    cfg = cfg or get_cfg(guild.id)
+    await delete_stored_asset_message(guild, cfg, key)
+    ch = await get_asset_storage_channel(guild, cfg, preferred_channel)
+    if not ch:
+        return None, cfg
+    try:
+        file = discord.File(io.BytesIO(raw), filename=filename)
+        msg = await ch.send(
+            content=f"📦 Asset ModBot `{key}` - ne pas supprimer.",
+            file=file,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        if not msg.attachments:
+            return None, cfg
+        url = msg.attachments[0].url
+        cfg[key] = url
+        cfg[f"{key}_asset_message_id"] = msg.id
+        cfg[f"{key}_asset_channel_id"] = ch.id
+        if key == "embed_logo":
+            cfg["embed_footer_icon"] = url
+        set_cfg(guild.id, cfg)
+        return url, cfg
+    except Exception:
+        return None, cfg
+
+async def refresh_stored_asset_urls(guild):
+    cfg = get_cfg(guild.id)
+    changed = False
+    for key in ("embed_logo", "embed_banner", "embed_footer_icon", "ticket_banner"):
+        msg_id = cfg.get(f"{key}_asset_message_id")
+        ch_id = cfg.get(f"{key}_asset_channel_id")
+        if not msg_id or not ch_id:
+            continue
+        try:
+            ch = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+            msg = await ch.fetch_message(int(msg_id))
+            if msg.attachments:
+                cfg[key] = msg.attachments[0].url
+                changed = True
+        except Exception:
+            pass
+    if changed:
+        set_cfg(guild.id, cfg)
+    return cfg
+
+async def restore_default_personnalisation(guild, cfg, preferred_channel=None):
     for k in (
         "embed_color", "embed_footer", "embed_logo", "embed_banner", "embed_footer_icon", "bot_name",
         "bot_logo", "bot_banner", "avatar_url", "banner_url", "footer_icon", "custom_footer",
     ):
         cfg.pop(k, None)
+    await delete_stored_asset_message(guild, cfg, "embed_footer_icon")
 
     cfg["bot_name"] = DEFAULT_BOT_NAME
     cfg["embed_color"] = DEFAULT_EMBED_COLOR
     cfg["embed_footer"] = f"{DEFAULT_BOT_NAME} - Protection de votre communaute"
 
     installation_logo, installation_banner, installation_logo_raw, installation_banner_raw = await get_installation_asset_defaults()
+    logo_raw = read_asset_bytes(DEFAULT_LOGO_FILE) or installation_logo_raw
+    banner_raw = read_asset_bytes(DEFAULT_BANNER_FILE) or installation_banner_raw
 
     try:
         await guild.me.edit(nick=DEFAULT_BOT_NAME, reason="Reset personnalisation ModBot")
     except Exception:
         pass
 
+    logo_url, cfg = await store_server_asset_bytes(guild, logo_raw, "modbot-default-logo.png", "embed_logo", preferred_channel, cfg)
+    banner_url, cfg = await store_server_asset_bytes(guild, banner_raw, "modbot-default-banner.png", "embed_banner", preferred_channel, cfg)
+
     if installation_logo:
-        cfg["embed_logo"] = installation_logo
-        cfg["embed_footer_icon"] = installation_logo
-    if installation_banner:
-        cfg["embed_banner"] = installation_banner
+        cfg["embed_logo"] = logo_url or installation_logo
+        cfg["embed_footer_icon"] = cfg["embed_logo"]
+    elif logo_url:
+        cfg["embed_logo"] = logo_url
+        cfg["embed_footer_icon"] = logo_url
+    if banner_url or installation_banner:
+        cfg["embed_banner"] = banner_url or installation_banner
 
     return cfg
 
@@ -1409,6 +1524,22 @@ def take_ticket_action_lock(key, ttl_seconds=8):
         return False
     except Exception:
         return True
+
+async def claim_message_by_delete(message):
+    try:
+        await message.delete()
+        return True
+    except discord.NotFound:
+        return False
+    except discord.Forbidden:
+        return True
+    except Exception:
+        return True
+
+async def claim_prefix_command(ctx, action, ttl_seconds=120):
+    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-{action}", ttl_seconds=ttl_seconds):
+        return False
+    return await claim_message_by_delete(ctx.message)
 
 def ticket_action_key(interaction, action):
     gid = getattr(interaction.guild, "id", "dm")
@@ -2811,11 +2942,24 @@ class VuePanelPersonnalisation(discord.ui.View):
         is_image = (att.content_type and att.content_type.startswith("image/")) or att.filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
         if not is_image:
             return await i.followup.send("Le fichier envoye n'est pas une image valide.", ephemeral=True)
-        update_cfg(i.guild.id, key, att.url)
         try:
-            await msg.delete()
+            raw = await att.read(use_cached=True)
+        except TypeError:
+            raw = await att.read()
         except Exception:
-            pass
+            raw = None
+        ext = os.path.splitext(att.filename or "")[1].lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+            ext = ".png"
+        filename = f"modbot-{key.replace('_', '-')}{ext}"
+        url, cfg = await store_server_asset_bytes(i.guild, raw, filename, key, i.channel)
+        if not url:
+            update_cfg(i.guild.id, key, att.url)
+        else:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
         try:
             await i.message.edit(embed=build_personnalisation_embed(i.guild), view=self)
         except Exception:
@@ -2848,7 +2992,7 @@ class VuePanelPersonnalisation(discord.ui.View):
     async def reset(self, i: discord.Interaction, b):
         await _safe_defer(i)
         cfg = get_cfg(i.guild.id)
-        cfg = await restore_default_personnalisation(i.guild, cfg)
+        cfg = await restore_default_personnalisation(i.guild, cfg, i.channel)
         set_cfg(i.guild.id, cfg)
         await refresh_interaction_message(i, build_personnalisation_embed(i.guild), self)
         try:
@@ -2992,6 +3136,7 @@ class VuePanel(discord.ui.View):
             try: await i.response.send_message("Admin uniquement.", ephemeral=True)
             except Exception: pass
             return
+        await refresh_stored_asset_urls(i.guild)
         await self._sub(i, build_personnalisation_embed(i.guild), VuePanelPersonnalisation(i.guild.id))
 
     @discord.ui.button(label="Langue", style=discord.ButtonStyle.secondary, row=1)
@@ -3410,6 +3555,18 @@ def build_rating_embed(guild):
         e.add_field(name="🕒 Dernieres notes" if lang == "fr" else "🕒 Latest ratings", value="\n".join(last), inline=False)
     return e
 
+_asset_refresh_task = None
+
+async def asset_refresh_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        for guild in bot.guilds:
+            try:
+                await refresh_stored_asset_urls(guild)
+            except Exception as err:
+                print(f"refresh assets {guild.id}: {err}")
+        await asyncio.sleep(21600)
+
 async def sync_guild_command_language(guild):
     lang = get_lang(guild.id)
     for cmd in bot.tree.get_commands():
@@ -3428,6 +3585,7 @@ async def sync_guild_command_language(guild):
 
 @bot.event
 async def on_ready():
+    global _asset_refresh_task
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher()]:
@@ -3438,6 +3596,10 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         for guild in bot.guilds:
+            try:
+                await refresh_stored_asset_urls(guild)
+            except Exception as err:
+                print(f"refresh assets {guild.id}: {err}")
             try:
                 await sync_guild_command_language(guild)
             except Exception as err:
@@ -3450,6 +3612,8 @@ async def on_ready():
         print(f"{len(synced)} commandes synchronisees")
     except Exception as e:
         print(f"Erreur sync : {e}")
+    if _asset_refresh_task is None or _asset_refresh_task.done():
+        _asset_refresh_task = asyncio.create_task(asset_refresh_loop())
     await bot.change_presence(
         activity=discord.Activity(type=discord.ActivityType.watching, name="votre serveur"))
 
@@ -3479,6 +3643,8 @@ async def on_message(message):
             if pending:
                 role_id = verify_captcha(gid, uid, message.content)
                 if role_id:
+                    if not await claim_message_by_delete(message):
+                        return
                     role = message.guild.get_role(int(role_id))
                     if role:
                         try:
@@ -3486,7 +3652,6 @@ async def on_message(message):
                             dm = E("✅ Vérification réussie !", couleur=0x43B581)
                             dm.description = f"Tu as maintenant accès à **{message.guild.name}** !"
                             await message.author.send(embed=dm)
-                            await message.delete()
                         except Exception:
                             pass
                 return  # Ne pas traiter le reste pour les messages captcha
@@ -3494,10 +3659,8 @@ async def on_message(message):
         # Anti-lien
         if anti_link_enabled(cfg) and contains_forbidden_link(message.content):
             if not message.author.guild_permissions.manage_messages:
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
+                if not await claim_message_by_delete(message):
+                    return
                 e = EG("Lien supprime", f"{message.author.mention}, les liens ne sont pas autorises.", 0xED4245, gid)
                 try:
                     await message.channel.send(embed=e, delete_after=8, allowed_mentions=discord.AllowedMentions.none())
@@ -3512,10 +3675,8 @@ async def on_message(message):
 
         # Anti-spam
         if is_spamming(uid, gid) and not message.author.guild_permissions.manage_messages:
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            if not await claim_message_by_delete(message):
+                return
             nb = add_avert(uid, gid, "[Anti-Spam] Messages trop rapides")
             sanction = await appliquer_sanction(message.author, nb, "spam")
             e = EG("🔇 Anti-Spam", f"{message.author.mention}, tu envoies des messages trop rapidement.\n{sanction['label']}", 0xED4245, gid)
@@ -3530,10 +3691,8 @@ async def on_message(message):
         # Détection insultes
         insulte = detecter(message.content, gid)
         if insulte and not est_immunise(message.author, gid):
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            if not await claim_message_by_delete(message):
+                return
             nb = add_avert(uid, gid, insulte)
             sanction = await appliquer_sanction(message.author, nb, insulte)
 
@@ -3615,7 +3774,7 @@ async def on_message(message):
 @bot.command(name="addroles")
 @commands.has_permissions(manage_roles=True)
 async def addroles(ctx):
-    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-addroles", ttl_seconds=120):
+    if not await claim_prefix_command(ctx, "addroles", ttl_seconds=120):
         return
     membres = [m for m in ctx.message.mentions if isinstance(m, discord.Member)]
     roles   = ctx.message.role_mentions
@@ -3636,7 +3795,7 @@ async def addroles(ctx):
 @bot.command(name="deleteroles")
 @commands.has_permissions(manage_roles=True)
 async def deleteroles(ctx):
-    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-deleteroles", ttl_seconds=120):
+    if not await claim_prefix_command(ctx, "deleteroles", ttl_seconds=120):
         return
     membres = [m for m in ctx.message.mentions if isinstance(m, discord.Member)]
     roles   = ctx.message.role_mentions
@@ -3656,7 +3815,7 @@ async def deleteroles(ctx):
 @bot.command(name="addchannel")
 @commands.has_permissions(manage_channels=True)
 async def addchannel(ctx):
-    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-addchannel", ttl_seconds=120):
+    if not await claim_prefix_command(ctx, "addchannel", ttl_seconds=120):
         return
     membre = ctx.message.mentions[0] if ctx.message.mentions else None
     salon = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else ctx.channel
@@ -3681,7 +3840,7 @@ async def addchannel(ctx):
 @bot.command(name="deletechannel")
 @commands.has_permissions(manage_channels=True)
 async def deletechannel(ctx):
-    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-deletechannel", ttl_seconds=120):
+    if not await claim_prefix_command(ctx, "deletechannel", ttl_seconds=120):
         return
     membre = ctx.message.mentions[0] if ctx.message.mentions else None
     salon = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else ctx.channel
