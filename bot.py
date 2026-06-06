@@ -2453,14 +2453,14 @@ async def api_health(request):
 async def api_login(request):
     redirect = request.query.get("redirect") or DASHBOARD_SITE_URL
     if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URI):
-        raise web.HTTPFound(f"{redirect}#api_token_required=1")
+        raise web.HTTPFound(f"{redirect}#login_error=oauth_not_configured")
     state = secrets.token_urlsafe(24)
     _oauth_states[state] = redirect
     params = {
         "client_id": DISCORD_CLIENT_ID,
         "redirect_uri": DISCORD_REDIRECT_URI,
         "response_type": "code",
-        "scope": "identify guilds",
+        "scope": "identify email guilds",
         "state": state,
     }
     query = urllib.parse.urlencode(params)
