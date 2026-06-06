@@ -172,6 +172,7 @@ SLASH_DESCRIPTIONS = {
     "suggest": {"fr": "Faire une suggestion", "en": "Submit a suggestion"},
     "report": {"fr": "Signaler un bug ou un joueur", "en": "Report a bug or a player"},
     "patchnotes": {"fr": "Publier des patch notes", "en": "Publish patch notes"},
+    "panel": {"fr": "Ouvrir le panel d'outils Discord", "en": "Open the Discord tools panel"},
     "aide": {"fr": "Voir l'aide complete du bot", "en": "View the full bot help"},
     "warn": {"fr": "Donner un avertissement a un membre", "en": "Warn a member"},
     "ban": {"fr": "Bannir manuellement un membre", "en": "Manually ban a member"},
@@ -439,7 +440,21 @@ def _role_lines(guild, role_ids, empty):
         except Exception:
             role = None
         lignes.append(f"- {role.mention if role else rid}")
-    return "\n".join(lignes)
+    text = "\n".join(lignes)
+    return text if len(text) <= 1000 else text[:997] + "..."
+
+def _member_lines(guild, member_ids, empty):
+    if not member_ids:
+        return empty
+    lignes = []
+    for mid in member_ids:
+        try:
+            member = guild.get_member(int(mid))
+        except Exception:
+            member = None
+        lignes.append(f"- {member.mention if member else mid}")
+    text = "\n".join(lignes)
+    return text if len(text) <= 1000 else text[:997] + "..."
 
 def build_main_panel_embed(guild):
     gid = str(guild.id)
@@ -447,7 +462,7 @@ def build_main_panel_embed(guild):
     cfg = get_cfg(gid)
     bot_name = get_bot_display_name(gid, guild)
     lang = get_lang(gid)
-    title = f"⚙️ {tr(gid, 'main_panel_title')} - {bot_name}"
+    title = f"🧰 Panel Discord - {bot_name}" if lang == "fr" else f"🧰 Discord panel - {bot_name}"
     e = EG(title, couleur=cfg.get("embed_color", 0x5865F2), gid=gid)
     logo = cfg.get("embed_logo")
     try:
@@ -459,28 +474,29 @@ def build_main_panel_embed(guild):
         pass
     e.description = (
         f"**{guild.name}**\n"
-        f"{tr(gid, 'main_panel_desc', bot_name=bot_name, guild_name=guild.name)}\n\n"
-        "Utilise les boutons ci-dessous pour regler le bot. Le module **Ticket** gere le message public, les options et le deploiement."
+        "Ce panel garde uniquement les outils rapides utiles dans Discord.\n"
+        "Les reglages complets du serveur (tickets, salons, securite, personnalisation, messages recurrents, reseaux) se gerent depuis le dashboard."
         if lang == "fr" else
         f"**{guild.name}**\n"
-        f"{tr(gid, 'main_panel_desc', bot_name=bot_name, guild_name=guild.name)}\n\n"
-        "Use the buttons below to configure the bot. The **Ticket** module manages the public message, options and deployment."
+        "This panel only keeps quick tools useful inside Discord.\n"
+        "Full server settings (tickets, channels, security, personalization, recurring messages, socials) are managed from the dashboard."
     )
-    e.add_field(name="🛡️ Protections", value=(
-        f"{status_badge(cfg.get('antiraid'), gid)} Anti-Raid\n"
-        f"{status_badge(anti_link_enabled(cfg), gid)} {'Anti-Lien' if lang == 'fr' else 'Anti-Link'}\n"
-        f"{status_badge(cfg.get('anti_spam'), gid)} Anti-Spam"
+    e.add_field(name="🚫 Filtre insultes" if lang == "fr" else "🚫 Bad word filter", value=(
+        f"🧾 `{len(INSULTES_BASE)+len(custom)}` mots filtres\n"
+        f"👤 `{len(get_members_imm(gid))}` membres immunises\n"
+        f"🛡️ `{len(get_roles_imm(gid))}` roles immunises"
+        if lang == "fr" else
+        f"🧾 `{len(INSULTES_BASE)+len(custom)}` filtered words\n"
+        f"👤 `{len(get_members_imm(gid))}` immune members\n"
+        f"🛡️ `{len(get_roles_imm(gid))}` immune roles"
     ), inline=True)
-    e.add_field(name="🔒 Moderation", value=(
-        f"{status_badge(cfg.get('lockdown'), gid)} Lockdown\n"
-        f"{status_badge(cfg.get('staff_alert_enabled'), gid)} Staff Alert\n"
-        f"🚫 `{len(INSULTES_BASE)+len(custom)}` {'mots filtres' if lang == 'fr' else 'filtered words'}"
+    e.add_field(name="👮 Staff", value=(
+        f"`{len(get_staff_roles(gid))}` roles staff configures"
+        if lang == "fr" else
+        f"`{len(get_staff_roles(gid))}` configured staff roles"
     ), inline=True)
-    e.add_field(name="🌐 Serveur" if lang == "fr" else "🌐 Server", value=(
-        f"{tr(gid, 'language')} : **{format_lang(gid)}**\n"
-        f"🎫 {'Options ticket' if lang == 'fr' else 'Ticket options'} : `{len(get_ticket_questions(gid))}`\n"
-        f"⭐ {'Notes' if lang == 'fr' else 'Ratings'} : `{get_rating_stats(gid)['count']}`"
-    ), inline=False)
+    e.add_field(name="⭐ Ratings", value=f"`{get_rating_stats(gid)['count']}` evaluations", inline=True)
+    e.add_field(name="🌐 Dashboard", value=f"[Ouvrir le dashboard]({DASHBOARD_SITE_URL})", inline=False)
     return e
 
 def build_security_embed(guild):
@@ -500,9 +516,14 @@ def build_insultes_embed(guild):
     gid = str(guild.id)
     lang = get_lang(gid)
     e = EG("🚫 Filtre des insultes" if lang == "fr" else "🚫 Bad word filter", couleur=0xED4245, gid=gid)
-    e.description = "Controle les mots filtres et les roles immunises." if lang == "fr" else "Control filtered words and immune roles."
+    e.description = "Controle les mots filtres et les membres/roles immunises." if lang == "fr" else "Control filtered words and immune members/roles."
     e.add_field(name="Mots par defaut" if lang == "fr" else "Default words", value=f"`{len(INSULTES_BASE)}`", inline=True)
     e.add_field(name="Mots personnalises" if lang == "fr" else "Custom words", value=f"`{len(get_custom(guild.id))}`", inline=True)
+    e.add_field(
+        name="Membres immunises" if lang == "fr" else "Immune members",
+        value=_member_lines(guild, get_members_imm(guild.id), "Aucun membre immunise." if lang == "fr" else "No immune member."),
+        inline=False,
+    )
     e.add_field(
         name="Roles immunises" if lang == "fr" else "Immune roles",
         value=_role_lines(guild, get_roles_imm(guild.id), "Aucun role immunise." if lang == "fr" else "No immune role."),
@@ -863,6 +884,9 @@ def del_custom(gid, mot):
 def get_roles_imm(gid):
     return get_cfg(gid).get("roles_immunises", [])
 
+def get_members_imm(gid):
+    return get_cfg(gid).get("membres_immunises", [])
+
 def add_role_imm(gid, rid):
     cfg = get_cfg(gid)
     if "roles_immunises" not in cfg:
@@ -881,6 +905,24 @@ def del_role_imm(gid, rid):
         return True
     return False
 
+def add_member_imm(gid, uid):
+    cfg = get_cfg(gid)
+    if "membres_immunises" not in cfg:
+        cfg["membres_immunises"] = []
+    if str(uid) not in cfg["membres_immunises"]:
+        cfg["membres_immunises"].append(str(uid))
+    set_cfg(gid, cfg)
+
+def del_member_imm(gid, uid):
+    cfg = get_cfg(gid)
+    if "membres_immunises" not in cfg:
+        return False
+    if str(uid) in cfg["membres_immunises"]:
+        cfg["membres_immunises"].remove(str(uid))
+        set_cfg(gid, cfg)
+        return True
+    return False
+
 def detecter(texte, gid):
     msg = re.sub(r'[*_~`|\\]', ' ', texte.lower())
     msg = re.sub(r'\s+', ' ', msg).strip()
@@ -890,7 +932,10 @@ def detecter(texte, gid):
     return None
 
 def est_immunise(member, gid):
-    return any(str(r.id) in get_roles_imm(gid) for r in member.roles)
+    if str(member.id) in set(get_members_imm(gid)):
+        return True
+    immune_roles = set(get_roles_imm(gid))
+    return any(str(r.id) in immune_roles for r in getattr(member, "roles", []))
 
 # ════════════════════════════════════════════════
 #  AVERTISSEMENTS & SANCTIONS PROGRESSIVES
@@ -2659,6 +2704,15 @@ class ModalRetirerImmunite(discord.ui.Modal, title="❌ Retirer immunité"):
         except Exception:
             pass
 
+class ModalRetirerImmuniteMembre(discord.ui.Modal, title="❌ Retirer immunité membre"):
+    membre_id = discord.ui.TextInput(label="ID du membre", placeholder="Ex : 123456789012345678", max_length=20)
+    async def on_submit(self, i: discord.Interaction):
+        ok = del_member_imm(i.guild.id, self.membre_id.value)
+        try:
+            await i.response.send_message(embed=E("✅ Immunité membre retirée !" if ok else "❌ Membre introuvable dans les immunités", couleur=0x43B581 if ok else 0xED4245), ephemeral=True)
+        except Exception:
+            pass
+
 class ModalAjouterStaffRole(discord.ui.Modal, title="👮 Ajouter un rôle staff"):
     role_id = discord.ui.TextInput(label="ID du rôle staff", placeholder="Ex : 123456789012345678", max_length=20)
     async def on_submit(self, i: discord.Interaction):
@@ -2906,12 +2960,28 @@ class SelectRoleImmunite(discord.ui.RoleSelect):
             del_role_imm(i.guild.id, role.id)
         await refresh_interaction_message(i, build_insultes_embed(i.guild), self.view)
 
+class SelectMembreImmunite(discord.ui.UserSelect):
+    def __init__(self, action, row):
+        self.action = action
+        placeholder = "Choisir le membre a immuniser" if action == "add" else "Choisir le membre a retirer"
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, row=row)
+
+    async def callback(self, i: discord.Interaction):
+        user = self.values[0]
+        if self.action == "add":
+            add_member_imm(i.guild.id, user.id)
+        else:
+            del_member_imm(i.guild.id, user.id)
+        await refresh_interaction_message(i, build_insultes_embed(i.guild), self.view)
+
 class VuePanelInsultes(discord.ui.View):
     def __init__(self, gid=None):
         super().__init__(timeout=180)
         self.gid = str(gid) if gid else None
-        self.add_item(SelectRoleImmunite("add", row=1))
-        self.add_item(SelectRoleImmunite("remove", row=2))
+        self.add_item(SelectMembreImmunite("add", row=1))
+        self.add_item(SelectMembreImmunite("remove", row=2))
+        self.add_item(SelectRoleImmunite("add", row=3))
+        self.add_item(SelectRoleImmunite("remove", row=4))
         localize_buttons(self, self.gid, {"Reinitialiser": "btn_reset"})
 
     @discord.ui.button(label="Ajouter mot", style=discord.ButtonStyle.danger, row=0)
@@ -2939,11 +3009,12 @@ class VuePanelInsultes(discord.ui.View):
         e.add_field(name=f"Personnalises ({len(custom)})", value=cs, inline=False)
         await i.followup.send(embed=e, ephemeral=True)
 
-    @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=3)
+    @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=0)
     async def reset(self, i: discord.Interaction, b):
         cfg = get_cfg(i.guild.id)
         cfg["insultes_custom"] = []
         cfg["roles_immunises"] = []
+        cfg["membres_immunises"] = []
         set_cfg(i.guild.id, cfg)
         await refresh_interaction_message(i, build_insultes_embed(i.guild), self)
 
@@ -3539,15 +3610,11 @@ class VuePanel(discord.ui.View):
         self.gid = str(gid) if gid else None
         localize_buttons(self, self.gid, {
             "Insultes": "btn_insultes",
-            "Securite": "btn_security",
-            "Salons": "btn_channels",
-            "Ticket": "btn_ticket_interface",
             "Stats & Bans": "btn_stats",
             "Staff": "btn_staff",
-            "Personnalisation": "btn_personnalisation",
-            "Langue": "btn_language",
             "Rating": "btn_rating",
         })
+        self.add_item(discord.ui.Button(label="🌐 Dashboard", style=discord.ButtonStyle.link, url=DASHBOARD_SITE_URL, row=1))
 
     def _admin(self, i): return i.user.guild_permissions.administrator
 
@@ -3567,30 +3634,6 @@ class VuePanel(discord.ui.View):
             return
         await self._sub(i, build_insultes_embed(i.guild), VuePanelInsultes(i.guild.id))
 
-    @discord.ui.button(label="Securite", style=discord.ButtonStyle.primary, row=0)
-    async def securite(self, i: discord.Interaction, b):
-        if not self._admin(i):
-            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
-            except Exception: pass
-            return
-        await self._sub(i, build_security_embed(i.guild), VuePanelSecurite(i.guild.id))
-
-    @discord.ui.button(label="Salons", style=discord.ButtonStyle.success, row=0)
-    async def salons(self, i: discord.Interaction, b):
-        if not self._admin(i):
-            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
-            except Exception: pass
-            return
-        await self._sub(i, build_salons_embed(i.guild, "Tickets"), VuePanelSalons(i.guild.id))
-
-    @discord.ui.button(label="Ticket", style=discord.ButtonStyle.success, row=1)
-    async def tickets(self, i: discord.Interaction, b):
-        if not self._admin(i):
-            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
-            except Exception: pass
-            return
-        await self._sub(i, build_ticket_config_embed(i.guild), VuePanelTickets(i.guild.id))
-
     @discord.ui.button(label="Stats & Bans", style=discord.ButtonStyle.secondary, row=0)
     async def stats(self, i: discord.Interaction, b):
         if not self._admin(i):
@@ -3607,23 +3650,7 @@ class VuePanel(discord.ui.View):
             return
         await self._sub(i, build_staff_embed(i.guild), VuePanelStaff(i.guild.id))
 
-    @discord.ui.button(label="Personnalisation", style=discord.ButtonStyle.secondary, row=1)
-    async def perso(self, i: discord.Interaction, b):
-        if not self._admin(i):
-            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
-            except Exception: pass
-            return
-        await self._sub(i, build_personnalisation_embed(i.guild), VuePanelPersonnalisation(i.guild.id))
-
-    @discord.ui.button(label="Langue", style=discord.ButtonStyle.secondary, row=1)
-    async def langue(self, i: discord.Interaction, b):
-        if not self._admin(i):
-            try: await i.response.send_message("Admin uniquement.", ephemeral=True)
-            except Exception: pass
-            return
-        await self._sub(i, build_language_embed(i.guild), VuePanelLangue(i.guild.id))
-
-    @discord.ui.button(label="Rating", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Rating", style=discord.ButtonStyle.secondary, row=0)
     async def rating(self, i: discord.Interaction, b):
         if not self._admin(i):
             try: await i.response.send_message("Admin uniquement.", ephemeral=True)
@@ -4185,7 +4212,7 @@ async def on_message(message):
                 return
 
         # Anti-spam
-        if is_spamming(uid, gid) and not message.author.guild_permissions.manage_messages:
+        if is_spamming(uid, gid) and not message.author.guild_permissions.manage_messages and not est_immunise(message.author, gid):
             if not await claim_message_by_delete(message):
                 return
             nb = add_avert(uid, gid, "[Anti-Spam] Messages trop rapides")
@@ -4499,6 +4526,8 @@ async def cmd_patchnotes(i: discord.Interaction):
     try: await i.response.send_modal(ModalPatchnotes())
     except Exception: pass
 
+@bot.tree.command(name="panel", description="🧰 Ouvrir le panel d'outils Discord")
+@app_commands.checks.has_permissions(administrator=True)
 async def cmd_panel(i: discord.Interaction):
     try:
         await i.response.send_message(embed=build_main_panel_embed(i.guild), view=VuePanel(i.guild.id), ephemeral=True)
@@ -4787,6 +4816,7 @@ async def cmd_aide(i: discord.Interaction):
     e.add_field(name="🌐 Site", value="[Ouvrir le site ModBot](https://modbot-website.vercel.app/)", inline=False)
     e.add_field(name="🛠️ Administration", value=(
         "`Dashboard web` - configurer le bot, les tickets, les salons et les modules\n"
+        "`/panel` - ouvrir le panel Discord d'outils rapides\n"
         "`/annonce` - publier une annonce dans un salon par ID\n"
         "`/patchnotes` - publier des patch notes dans le salon actuel\n"
         "`/massdm` - envoyer un message prive en masse\n"
@@ -4838,7 +4868,7 @@ async def cmd_info(i: discord.Interaction):
     e.add_field(name="⏱️ Expiration", value="`5 mois`", inline=True)
     e.add_field(name="⚡ Sanctions", value="1→warn • 2→mute4h • 3→mute24h • 4→ban", inline=False)
     e.add_field(name="📋 Commandes", value=(
-        "`/insultes` `/suggest` `/report` `/warn` `/ban` `/deban`\n"
+        "`/panel` `/insultes` `/suggest` `/report` `/warn` `/ban` `/deban`\n"
         "`/annonce` `/massdm` `/translate` `/patchnotes`\n"
         "`/clear-message` `/clear-all`\n"
         "`/avert-count` `/ban-list` `/reset-avert` `/profilestats`\n"
