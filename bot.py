@@ -1,8 +1,11 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json, os, re, asyncio, io, aiohttp, random, string, html, unicodedata
+import json, os, re, asyncio, io, aiohttp, random, string, html, unicodedata, base64
+import secrets
+import urllib.parse
 from datetime import datetime, timezone, timedelta
+from aiohttp import web
 
 # ════════════════════════════════════════════════
 #  CONFIGURATION
@@ -22,6 +25,15 @@ BASE_DIR            = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOGO_FILE   = os.path.join(BASE_DIR, "assets", "default_logo.png")
 DEFAULT_BANNER_FILE = os.path.join(BASE_DIR, "assets", "default_banner.png")
 DEFAULT_PROFILE_BANNER_FILE = os.path.join(BASE_DIR, "assets", "default_bot_banner_680x240.png")
+DASHBOARD_API_TOKEN = os.environ.get("DASHBOARD_API_TOKEN", "").strip()
+DASHBOARD_ALLOWED_ORIGINS = os.environ.get("DASHBOARD_ALLOWED_ORIGINS", "*")
+DASHBOARD_SITE_URL = os.environ.get("DASHBOARD_SITE_URL", "https://modbot-website.vercel.app/dashboard.html")
+DASHBOARD_ADMIN_IDS = {x.strip() for x in os.environ.get("DASHBOARD_ADMIN_IDS", "1189681599965573131").split(",") if x.strip()}
+DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "").strip()
+DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
+DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "").strip()
+API_HOST = os.environ.get("API_HOST", "0.0.0.0")
+API_PORT = int(os.environ.get("PORT", os.environ.get("API_PORT", "8080")))
 
 INSULTES_BASE = [
     "tg","fdp","pd","ntm","ftg","connard","connasse","salope","pute",
@@ -29,7 +41,7 @@ INSULTES_BASE = [
     "ta gueule","putain","abruti","imbecile","imbécile","cretin","crétin",
     "gogol","attardé","attarde","bouffon","trou du cul","trouduc",
     "enfoiré","ordure","dechet","déchet","baise","va te faire",
-    "nique ta mere","nique ta mère","ta race", "tdc", "vtf"
+    "nique ta mere","nique ta mère","ta race",
 ]
 
 LANGUES_CHOICES = [
@@ -161,7 +173,6 @@ SLASH_DESCRIPTIONS = {
     "report": {"fr": "Signaler un bug ou un joueur", "en": "Report a bug or a player"},
     "patchnotes": {"fr": "Publier des patch notes", "en": "Publish patch notes"},
     "aide": {"fr": "Voir l'aide complete du bot", "en": "View the full bot help"},
-    "panel": {"fr": "Panneau d'administration du bot", "en": "Bot administration panel"},
     "warn": {"fr": "Donner un avertissement a un membre", "en": "Warn a member"},
     "ban": {"fr": "Bannir manuellement un membre", "en": "Manually ban a member"},
     "deban": {"fr": "Debannir un membre par son ID", "en": "Unban a member by ID"},
@@ -186,6 +197,10 @@ F_CONFIG  = "config.json"
 F_STATS   = "stats.json"
 F_MODS    = "mod_stats.json"
 F_RATINGS = "ratings.json"
+F_DASHBOARD_SESSIONS = "dashboard_sessions.json"
+F_PREMIUM = "premium.json"
+F_BLACKLIST = "blacklist.json"
+F_DASHBOARD_LOGS = "dashboard_logs.json"
 LINK_RE = re.compile(
     r'(?:https?://[^\s<>()]+|www\.[^\s<>()]+|(?:canary\.|ptb\.)?discord(?:app)?\.com/invite/[A-Za-z0-9-]+|discord\.gg/[A-Za-z0-9-]+|discord\.me/[A-Za-z0-9-]+|dsc\.gg/[A-Za-z0-9-]+|invite\.gg/[A-Za-z0-9-]+)',
     re.I
@@ -2024,6 +2039,584 @@ async def refresh_ticket_panel_message(guild):
     await deploy_fresh_ticket_panel(guild, channel)
     return channel
 
+# ════════════════════════════════════════════════
+#  API DASHBOARD SITE ↔ BOT
+# ════════════════════════════════════════════════
+
+_dashboard_api_runner = None
+_dashboard_recurring_task = None
+_oauth_states = {}
+
+def api_json(data, status=200):
+    response = web.json_response(data, status=status)
+    response.headers["Access-Control-Allow-Origin"] = DASHBOARD_ALLOWED_ORIGINS
+    response.headers["Access-Control-Allow-Headers"] = "Authorization, X-ModBot-Api-Token, Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    return response
+
+@web.middleware
+async def api_cors_middleware(request, handler):
+    if request.method == "OPTIONS":
+        return api_json({"ok": True})
+    try:
+        response = await handler(request)
+    except web.HTTPException as ex:
+        response = ex
+    if isinstance(response, web.StreamResponse):
+        response.headers["Access-Control-Allow-Origin"] = DASHBOARD_ALLOWED_ORIGINS
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, X-ModBot-Api-Token, Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    return response
+
+def read_dashboard_sessions():
+    data = jload(F_DASHBOARD_SESSIONS)
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("sessions", {})
+    return data
+
+def save_dashboard_sessions(data):
+    jsave(F_DASHBOARD_SESSIONS, data)
+
+def dashboard_log(action, guild=None, actor=None, detail=""):
+    data = jload(F_DASHBOARD_LOGS)
+    if not isinstance(data, list):
+        data = []
+    data.insert(0, {
+        "date": now().isoformat(),
+        "action": action,
+        "guild_id": str(getattr(guild, "id", "") or ""),
+        "guild_name": getattr(guild, "name", "") or "",
+        "actor": str(actor or ""),
+        "detail": str(detail or ""),
+    })
+    jsave(F_DASHBOARD_LOGS, data[:300])
+
+def parse_int(value):
+    try:
+        if value is None or value == "":
+            return None
+        digits = re.sub(r"\D", "", str(value))
+        return int(digits) if digits else None
+    except Exception:
+        return None
+
+def parse_color(value, fallback=DEFAULT_EMBED_COLOR):
+    if isinstance(value, int):
+        return value
+    if not value:
+        return fallback
+    text = str(value).strip().lstrip("#")
+    try:
+        return int(text, 16)
+    except Exception:
+        return fallback
+
+def guild_initials(guild):
+    parts = [p for p in re.split(r"\s+", guild.name or "MB") if p]
+    return "".join(p[0].upper() for p in parts[:2]) or "MB"
+
+def serialize_guild(guild):
+    return {
+        "id": str(guild.id),
+        "name": guild.name,
+        "icon": guild.icon.url if guild.icon else "assets/default_logo.png",
+        "banner": guild.banner.url if getattr(guild, "banner", None) else None,
+        "initials": guild_initials(guild),
+        "member_count": guild.member_count,
+        "owner_id": str(guild.owner_id) if guild.owner_id else None,
+    }
+
+def user_can_manage_guild(user_guild):
+    try:
+        perms = int(user_guild.get("permissions", 0))
+    except Exception:
+        perms = 0
+    return bool(user_guild.get("owner") or (perms & 0x8) or (perms & 0x20))
+
+def make_session(user, user_guilds):
+    allowed = []
+    bot_guild_ids = {str(g.id) for g in bot.guilds}
+    for item in user_guilds:
+        gid = str(item.get("id"))
+        if gid in bot_guild_ids and user_can_manage_guild(item):
+            allowed.append(gid)
+    token = secrets.token_urlsafe(32)
+    data = read_dashboard_sessions()
+    data["sessions"][token] = {
+        "user_id": str(user.get("id")),
+        "username": user.get("username") or user.get("global_name") or "Discord user",
+        "avatar": user.get("avatar"),
+        "guild_ids": allowed,
+        "admin": str(user.get("id")) in DASHBOARD_ADMIN_IDS,
+        "created_at": now().isoformat(),
+    }
+    save_dashboard_sessions(data)
+    return token
+
+async def api_identity(request, admin_required=False):
+    api_token = request.headers.get("X-ModBot-Api-Token", "").strip()
+    if DASHBOARD_API_TOKEN and api_token == DASHBOARD_API_TOKEN:
+        return {
+            "user_id": "api-token",
+            "username": "API Token",
+            "guild_ids": [str(g.id) for g in bot.guilds],
+            "admin": True,
+        }
+
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        token = request.query.get("session", "").strip()
+    sessions = read_dashboard_sessions().get("sessions", {})
+    identity = sessions.get(token)
+    if not identity:
+        raise web.HTTPUnauthorized(text="Session dashboard invalide.")
+    if admin_required and not identity.get("admin"):
+        raise web.HTTPForbidden(text="Acces administrateur refuse.")
+    return identity
+
+async def api_guild_from_request(request, identity=None):
+    identity = identity or await api_identity(request)
+    gid = str(request.match_info.get("guild_id"))
+    if gid not in {str(g.id) for g in bot.guilds}:
+        raise web.HTTPNotFound(text="Serveur introuvable pour ce bot.")
+    if not identity.get("admin") and gid not in set(identity.get("guild_ids", [])):
+        raise web.HTTPForbidden(text="Tu n'as pas acces a ce serveur.")
+    guild = bot.get_guild(int(gid))
+    if not guild:
+        raise web.HTTPNotFound(text="Serveur introuvable.")
+    return guild
+
+def dashboard_asset_channel(guild, cfg):
+    candidate_ids = [
+        cfg.get("salon_logs"),
+        cfg.get("salon_tickets"),
+        DEFAULT_LOGS,
+        DEFAULT_TICKETS,
+    ]
+    for channel_id in candidate_ids:
+        channel = guild.get_channel(int(channel_id)) if channel_id else None
+        if not channel:
+            continue
+        perms = channel.permissions_for(guild.me)
+        if perms.send_messages and perms.attach_files:
+            return channel
+    for channel in getattr(guild, "text_channels", []):
+        perms = channel.permissions_for(guild.me)
+        if perms.send_messages and perms.attach_files:
+            return channel
+    return None
+
+async def store_dashboard_asset(guild, cfg, value, key, filename_base):
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.startswith(("http://", "https://")):
+        return clean_short_text(text, "", 500)
+    match = re.match(r"^data:(image/(?:png|jpe?g|gif|webp));base64,(.+)$", text, re.I | re.S)
+    if not match:
+        return None
+    mime = match.group(1).lower()
+    encoded = re.sub(r"\s+", "", match.group(2))
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception:
+        return None
+    if not raw or len(raw) > 10 * 1024 * 1024:
+        return None
+    ext = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/gif": "gif",
+        "image/webp": "webp",
+    }.get(mime, "png")
+    channel = dashboard_asset_channel(guild, cfg)
+    if not channel:
+        return None
+    filename = f"modbot-{filename_base}-{guild.id}.{ext}"
+    try:
+        msg = await channel.send(
+            content="🖼️ Asset dashboard ModBot",
+            file=discord.File(io.BytesIO(raw), filename=filename),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except Exception:
+        return None
+    if not msg.attachments:
+        return None
+    cfg[f"{key}_asset_channel_id"] = channel.id
+    cfg[f"{key}_asset_message_id"] = msg.id
+    return msg.attachments[0].url
+
+def serialize_dashboard_config(guild):
+    gid = str(guild.id)
+    cfg = get_cfg(gid)
+    ratings = jload(F_RATINGS).get(gid, [])
+    avg = round(sum(ratings) / len(ratings), 2) if ratings else 0
+    return {
+        "guild": serialize_guild(guild),
+        "channels": {
+            "tickets": str(cfg.get("salon_tickets") or DEFAULT_TICKETS),
+            "logs": str(cfg.get("salon_logs") or DEFAULT_LOGS),
+            "suggestions": str(cfg.get("salon_suggestions") or DEFAULT_SUGGESTIONS),
+            "reports": str(cfg.get("salon_reports") or DEFAULT_REPORTS),
+            "patchnotes": str(cfg.get("salon_patchnotes") or DEFAULT_PATCHNOTES),
+        },
+        "tickets": {
+            "author": cfg.get("ticket_panel_author") or tr(gid, "ticket_panel_author", guild_name=guild.name),
+            "title": cfg.get("ticket_panel_title") or tr(gid, "ticket_panel_title"),
+            "description": cfg.get("ticket_panel_desc") or tr(gid, "ticket_panel_desc"),
+            "emoji": cfg.get("ticket_panel_emoji") or "📩",
+            "banner": cfg.get("ticket_banner") or cfg.get("embed_banner") or "",
+            "support_role": str(cfg.get("ticket_support_role") or ""),
+            "options": get_ticket_questions(gid),
+        },
+        "security": {
+            "antilink": anti_link_enabled(cfg),
+            "antispam": bool(cfg.get("anti_spam")),
+            "antiraid": bool(cfg.get("antiraid")),
+            "staff_alert": bool(cfg.get("staff_alert_enabled")),
+            "lockdown": bool(cfg.get("lockdown")),
+            "custom_words": get_custom(gid),
+        },
+        "personalization": {
+            "name": get_bot_display_name(gid, guild),
+            "footer": cfg.get("embed_footer") or f"{get_bot_display_name(gid, guild)} - Protection de votre communaute",
+            "logo": cfg.get("embed_logo") or (guild.icon.url if guild.icon else ""),
+            "banner": cfg.get("embed_banner") or "",
+            "color": f"#{int(cfg.get('embed_color', DEFAULT_EMBED_COLOR)):06X}",
+        },
+        "language": cfg.get("langue") or DEFAULT_LANG,
+        "welcome": cfg.get("welcome_system", {
+            "enabled": False,
+            "departure_enabled": False,
+            "channel_id": "",
+            "message": "Bienvenue nom du membre sur @serveur !",
+            "departure_message": "Au revoir nom du membre.",
+            "background": "",
+            "font": "Inter",
+            "color": "#FFFFFF",
+        }),
+        "reaction_roles": cfg.get("reaction_roles", []),
+        "recurring_messages": cfg.get("recurring_messages", []),
+        "social_relays": cfg.get("social_relays", []),
+        "premium_servers": cfg.get("premium_servers", []),
+        "ratings": {"average": avg, "count": len(ratings)},
+    }
+
+async def apply_dashboard_config(guild, payload):
+    gid = str(guild.id)
+    cfg = get_cfg(gid)
+
+    channels = payload.get("channels") or {}
+    channel_map = {
+        "tickets": "salon_tickets",
+        "logs": "salon_logs",
+        "suggestions": "salon_suggestions",
+        "reports": "salon_reports",
+        "patchnotes": "salon_patchnotes",
+    }
+    for public_key, cfg_key in channel_map.items():
+        parsed = parse_int(channels.get(public_key))
+        if parsed:
+            cfg[cfg_key] = parsed
+
+    tickets = payload.get("tickets") or {}
+    if tickets:
+        cfg["ticket_panel_author"] = clean_short_text(tickets.get("author"), tr(gid, "ticket_panel_author", guild_name=guild.name), 80)
+        cfg["ticket_panel_title"] = clean_short_text(tickets.get("title"), tr(gid, "ticket_panel_title"), 80)
+        cfg["ticket_panel_desc"] = clean_short_text(tickets.get("description"), tr(gid, "ticket_panel_desc"), 2000)
+        cfg["ticket_panel_emoji"] = clean_short_text(tickets.get("emoji"), "📩", 8)
+        if tickets.get("banner"):
+            ticket_banner_url = await store_dashboard_asset(guild, cfg, tickets.get("banner"), "ticket_banner", "ticket-banner")
+            if ticket_banner_url:
+                cfg["ticket_banner"] = ticket_banner_url
+        role_id = parse_int(tickets.get("support_role"))
+        if role_id:
+            cfg["ticket_support_role"] = role_id
+        options = tickets.get("options")
+        if isinstance(options, list) and options:
+            cfg["ticket_questions"] = [normalize_ticket_question(option) for option in options[:MAX_TICKET_OPTIONS]]
+
+    security = payload.get("security") or {}
+    if "antilink" in security:
+        cfg["anti_lien"] = bool(security.get("antilink"))
+        cfg["anti_invite"] = bool(security.get("antilink"))
+    if "antispam" in security:
+        cfg["anti_spam"] = bool(security.get("antispam"))
+    if "antiraid" in security:
+        cfg["antiraid"] = bool(security.get("antiraid"))
+    if "staff_alert" in security:
+        cfg["staff_alert_enabled"] = bool(security.get("staff_alert"))
+    if "lockdown" in security:
+        cfg["lockdown"] = bool(security.get("lockdown"))
+    if isinstance(security.get("custom_words"), list):
+        cfg["insultes_custom"] = [clean_short_text(word, "", 50).lower() for word in security["custom_words"] if str(word).strip()][:150]
+
+    personalization = payload.get("personalization") or {}
+    if personalization:
+        if personalization.get("name"):
+            cfg["bot_name"] = clean_short_text(personalization.get("name"), DEFAULT_BOT_NAME, 32)
+            try:
+                await guild.me.edit(nick=cfg["bot_name"], reason="Dashboard ModBot personnalisation")
+            except Exception:
+                pass
+        if personalization.get("footer"):
+            cfg["embed_footer"] = clean_short_text(personalization.get("footer"), "", 200)
+        if personalization.get("logo"):
+            logo_url = await store_dashboard_asset(guild, cfg, personalization.get("logo"), "embed_logo", "embed-logo")
+            if logo_url:
+                cfg["embed_logo"] = logo_url
+                cfg["embed_footer_icon"] = cfg["embed_logo"]
+        if personalization.get("banner"):
+            banner_url = await store_dashboard_asset(guild, cfg, personalization.get("banner"), "embed_banner", "embed-banner")
+            if banner_url:
+                cfg["embed_banner"] = banner_url
+        if personalization.get("color"):
+            cfg["embed_color"] = parse_color(personalization.get("color"))
+
+    if payload.get("language") in BOT_LANGUAGES:
+        cfg["langue"] = payload.get("language")
+
+    for key in ("welcome_system", "reaction_roles", "recurring_messages", "social_relays", "tournament"):
+        if key in payload:
+            cfg[key] = payload[key]
+
+    premium_servers = payload.get("premium_servers")
+    if isinstance(premium_servers, list):
+        cleaned_servers = []
+        for server in premium_servers[:2]:
+            if not isinstance(server, dict):
+                continue
+            cleaned_servers.append({
+                "id": clean_short_text(server.get("id"), "", 32),
+                "name": clean_short_text(server.get("name"), "Serveur ModBot", 80),
+                "logo": clean_short_text(server.get("logo"), "", 300),
+                "initials": clean_short_text(server.get("initials"), "MB", 8),
+            })
+        cfg["premium_servers"] = cleaned_servers
+
+    set_cfg(gid, cfg)
+    dashboard_log("config_update", guild, payload.get("actor", "dashboard"), "Configuration sauvegardee depuis le dashboard")
+    return cfg
+
+async def api_health(request):
+    return api_json({"ok": True, "bot": str(bot.user) if bot.user else None, "guilds": len(bot.guilds)})
+
+async def api_login(request):
+    redirect = request.query.get("redirect") or DASHBOARD_SITE_URL
+    if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URI):
+        raise web.HTTPFound(f"{redirect}#api_token_required=1")
+    state = secrets.token_urlsafe(24)
+    _oauth_states[state] = redirect
+    params = {
+        "client_id": DISCORD_CLIENT_ID,
+        "redirect_uri": DISCORD_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "identify guilds",
+        "state": state,
+    }
+    query = urllib.parse.urlencode(params)
+    raise web.HTTPFound(f"https://discord.com/api/oauth2/authorize?{query}")
+
+async def api_oauth_callback(request):
+    code = request.query.get("code")
+    state = request.query.get("state")
+    redirect = _oauth_states.pop(state, DASHBOARD_SITE_URL)
+    if not code:
+        raise web.HTTPFound(f"{redirect}#login_error=missing_code")
+    async with aiohttp.ClientSession() as session:
+        async with session.post("https://discord.com/api/oauth2/token", data={
+            "client_id": DISCORD_CLIENT_ID,
+            "client_secret": DISCORD_CLIENT_SECRET,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": DISCORD_REDIRECT_URI,
+        }, headers={"Content-Type": "application/x-www-form-urlencoded"}) as response:
+            if response.status >= 400:
+                raise web.HTTPFound(f"{redirect}#login_error=oauth_token")
+            token_data = await response.json()
+        bearer = token_data.get("access_token")
+        headers = {"Authorization": f"Bearer {bearer}"}
+        async with session.get("https://discord.com/api/users/@me", headers=headers) as response:
+            user = await response.json()
+        async with session.get("https://discord.com/api/users/@me/guilds", headers=headers) as response:
+            user_guilds = await response.json()
+    session_token = make_session(user, user_guilds if isinstance(user_guilds, list) else [])
+    raise web.HTTPFound(f"{redirect}#session={session_token}")
+
+async def api_me(request):
+    identity = await api_identity(request)
+    return api_json({"ok": True, "user": identity})
+
+async def api_guilds(request):
+    identity = await api_identity(request)
+    allowed = set(identity.get("guild_ids", []))
+    guilds = [serialize_guild(guild) for guild in bot.guilds if identity.get("admin") or str(guild.id) in allowed]
+    return api_json({"ok": True, "guilds": guilds, "user": identity})
+
+async def api_get_guild_config(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    return api_json({"ok": True, "config": serialize_dashboard_config(guild)})
+
+async def api_save_guild_config(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json()
+    payload["actor"] = identity.get("username") or identity.get("user_id")
+    await apply_dashboard_config(guild, payload)
+    return api_json({"ok": True, "config": serialize_dashboard_config(guild)})
+
+async def api_publish_ticket(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    channel_id = parse_int(payload.get("channel_id")) or get_ch(guild.id, "salon_tickets", DEFAULT_TICKETS)
+    channel = guild.get_channel(int(channel_id))
+    if not channel:
+        raise web.HTTPNotFound(text="Salon ticket introuvable.")
+    msg = await deploy_fresh_ticket_panel(guild, channel)
+    dashboard_log("ticket_publish", guild, identity.get("username"), f"Panel ticket publie dans #{channel.name}")
+    return api_json({"ok": True, "channel_id": str(channel.id), "message_id": str(msg.id)})
+
+async def api_admin_stats(request):
+    try:
+        await api_identity(request, admin_required=True)
+    except web.HTTPException:
+        if DASHBOARD_API_TOKEN:
+            raise
+    return api_json({
+        "ok": True,
+        "visits": 0,
+        "today": 0,
+        "dashboardOpens": 0,
+        "installs": len(bot.guilds),
+        "servers": len(bot.guilds),
+        "guilds": [serialize_guild(g) for g in bot.guilds],
+        "premium": jload(F_PREMIUM),
+        "blacklist": jload(F_BLACKLIST),
+        "logs": jload(F_DASHBOARD_LOGS)[:80],
+    })
+
+async def api_admin_premium(request):
+    identity = await api_identity(request, admin_required=True)
+    payload = await request.json()
+    data = jload(F_PREMIUM)
+    member = clean_short_text(payload.get("member"), "", 80)
+    duration = clean_short_text(payload.get("duration"), "2 mois", 40)
+    if not member:
+        raise web.HTTPBadRequest(text="Membre manquant.")
+    data[member] = {
+        "member": member,
+        "duration": duration,
+        "servers_limit": 2,
+        "created_at": now().isoformat(),
+        "created_by": identity.get("user_id"),
+        "payment": "ticket_required",
+    }
+    jsave(F_PREMIUM, data)
+    dashboard_log("premium_grant", None, identity.get("username"), f"{member} -> {duration}")
+    return api_json({"ok": True, "premium": data[member]})
+
+async def api_admin_blacklist(request):
+    identity = await api_identity(request, admin_required=True)
+    payload = await request.json()
+    data = jload(F_BLACKLIST)
+    member = clean_short_text(payload.get("member"), "", 80)
+    reason = clean_short_text(payload.get("reason"), "Aucune raison", 200)
+    if not member:
+        raise web.HTTPBadRequest(text="Membre manquant.")
+    data[member] = {"member": member, "reason": reason, "date": now().isoformat(), "by": identity.get("user_id")}
+    jsave(F_BLACKLIST, data)
+    dashboard_log("blacklist_add", None, identity.get("username"), f"{member}: {reason}")
+    return api_json({"ok": True, "blacklist": data[member]})
+
+async def start_dashboard_api():
+    global _dashboard_api_runner
+    if _dashboard_api_runner:
+        return
+    app = web.Application(middlewares=[api_cors_middleware])
+    app.router.add_route("*", "/api/health", api_health)
+    app.router.add_get("/api/auth/discord/login", api_login)
+    app.router.add_get("/api/auth/discord/callback", api_oauth_callback)
+    app.router.add_get("/api/me", api_me)
+    app.router.add_get("/api/guilds", api_guilds)
+    app.router.add_get("/api/guilds/{guild_id}/config", api_get_guild_config)
+    app.router.add_put("/api/guilds/{guild_id}/config", api_save_guild_config)
+    app.router.add_post("/api/guilds/{guild_id}/tickets/publish", api_publish_ticket)
+    app.router.add_get("/api/admin/stats", api_admin_stats)
+    app.router.add_post("/api/admin/premium", api_admin_premium)
+    app.router.add_post("/api/admin/blacklist", api_admin_blacklist)
+    _dashboard_api_runner = web.AppRunner(app)
+    await _dashboard_api_runner.setup()
+    site = web.TCPSite(_dashboard_api_runner, API_HOST, API_PORT)
+    await site.start()
+    print(f"API dashboard ModBot active sur {API_HOST}:{API_PORT}")
+
+def recurring_interval_seconds(message):
+    try:
+        value = max(1, int(message.get("interval") or 30))
+    except Exception:
+        value = 30
+    unit = str(message.get("unit") or "minutes").lower()
+    if unit.startswith(("heure", "hour")):
+        return value * 3600
+    if unit.startswith(("jour", "day")):
+        return value * 86400
+    return value * 60
+
+def recurring_last_sent_ts(value):
+    if not value:
+        return 0
+    try:
+        return float(value)
+    except Exception:
+        pass
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except Exception:
+        return 0
+
+async def dashboard_recurring_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        current_ts = now().timestamp()
+        for guild in list(bot.guilds):
+            cfg = get_cfg(guild.id)
+            messages = cfg.get("recurring_messages")
+            if not isinstance(messages, list) or not messages:
+                continue
+            changed = False
+            for message in messages:
+                if not isinstance(message, dict) or not message.get("enabled", True):
+                    continue
+                channel_id = parse_int(message.get("channel_id"))
+                channel = guild.get_channel(channel_id) if channel_id else None
+                if not channel:
+                    continue
+                perms = channel.permissions_for(guild.me)
+                if not perms.send_messages:
+                    continue
+                interval = recurring_interval_seconds(message)
+                if current_ts - recurring_last_sent_ts(message.get("last_sent")) < interval:
+                    continue
+                content = clean_short_text(message.get("content"), "", 1900)
+                if not content:
+                    continue
+                try:
+                    await channel.send(content, allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True))
+                except Exception:
+                    continue
+                message["last_sent"] = now().isoformat()
+                changed = True
+            if changed:
+                cfg["recurring_messages"] = messages
+                set_cfg(guild.id, cfg)
+        await asyncio.sleep(60)
+
 #  PANEL MODALS
 # ════════════════════════════════════════════════
 
@@ -3053,7 +3646,7 @@ class ModalSuggestion(discord.ui.Modal, title="💡 Nouvelle suggestion"):
         try:
             salon = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
         except Exception:
-            return await i.followup.send("❌ Salon Suggestions non trouvé. Configurez-le dans `/panel` → Salons.", ephemeral=True)
+            return await i.followup.send("❌ Salon Suggestions non trouvé. Configurez-le dans le dashboard → Salons.", ephemeral=True)
         e = EG(f"💡 {self.titre.value}", self.contenu.value, gid=gid)
         e.set_author(name=str(i.user), icon_url=i.user.display_avatar.url)
         e.set_thumbnail(url=i.user.display_avatar.url)
@@ -3089,7 +3682,7 @@ class ModalReport(discord.ui.Modal, title="📋 Nouveau report"):
         try:
             salon = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
         except Exception:
-            return await i.followup.send("❌ Salon Reports non trouvé. Configurez-le dans `/panel` → Salons.", ephemeral=True)
+            return await i.followup.send("❌ Salon Reports non trouvé. Configurez-le dans le dashboard → Salons.", ephemeral=True)
         est_bug = self.type_r == "bug"
         c = 0xFF4500 if est_bug else 0xED4245
         emoji, label = ("🐛","Bug") if est_bug else ("👤","Joueur")
@@ -3337,10 +3930,53 @@ class ModalMassDM(discord.ui.Modal, title="📨 Message en masse"):
 
 _joins: dict = {}
 
+def render_member_template(template, member):
+    text = str(template or "")
+    replacements = {
+        "@membre": member.mention,
+        "nom du membre": member.display_name,
+        "{member}": member.mention,
+        "{member_name}": member.display_name,
+        "@serveur": member.guild.name,
+        "{server}": member.guild.name,
+    }
+    for key, value in replacements.items():
+        text = text.replace(key, value)
+    return text
+
+async def send_dashboard_member_event(member, departure=False):
+    cfg = get_cfg(member.guild.id)
+    system = cfg.get("welcome_system") or {}
+    enabled_key = "departure_enabled" if departure else "enabled"
+    if not system.get(enabled_key):
+        return
+    channel_id = parse_int(system.get("departure_channel_id") or system.get("channel_id"))
+    if not channel_id:
+        return
+    channel = member.guild.get_channel(channel_id)
+    if not channel:
+        return
+    template = system.get("departure_message" if departure else "message")
+    default = "Au revoir nom du membre." if departure else "Bienvenue nom du membre sur @serveur !"
+    content = render_member_template(template or default, member)
+    title = "👋 Départ" if departure else "👋 Bienvenue"
+    embed = EG(title, content, 0xED4245 if departure else 0x5865F2, member.guild.id)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    background = system.get("background")
+    if background:
+        embed.set_image(url=background)
+    try:
+        await channel.send(content=content, embed=embed, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+        dashboard_log("member_departure" if departure else "member_welcome", member.guild, member, content)
+    except Exception:
+        pass
+
 @bot.event
 async def on_member_join(member):
     gid = str(member.guild.id)
     cfg = get_cfg(gid)
+
+    await send_dashboard_member_event(member, departure=False)
 
     # Captcha
     if cfg.get("captcha_enabled"):
@@ -3385,8 +4021,12 @@ async def on_member_join(member):
     if len(_joins[gid]) >= 5:
         le = E("🚨 RAID DÉTECTÉ !",
                f"**{len(_joins[gid])} membres** ont rejoint en moins de 10 secondes !\n"
-               f"⚠️ `/panel` → Sécurité → Lockdown.", 0xED4245)
+               f"⚠️ Dashboard → Sécurité → Lockdown.", 0xED4245)
         await send_log(member.guild, le)
+
+@bot.event
+async def on_member_remove(member):
+    await send_dashboard_member_event(member, departure=True)
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -3456,6 +4096,7 @@ async def sync_guild_command_language(guild):
 
 @bot.event
 async def on_ready():
+    global _dashboard_recurring_task
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher()]:
@@ -3463,6 +4104,12 @@ async def on_ready():
             bot.add_view(v)
         except Exception as err:
             print(f"add_view {type(v).__name__}: {err}")
+    try:
+        await start_dashboard_api()
+    except Exception as err:
+        print(f"Erreur API dashboard : {err}")
+    if not _dashboard_recurring_task or _dashboard_recurring_task.done():
+        _dashboard_recurring_task = asyncio.create_task(dashboard_recurring_loop())
     try:
         synced = await bot.tree.sync()
         for guild in bot.guilds:
@@ -3852,8 +4499,6 @@ async def cmd_patchnotes(i: discord.Interaction):
     try: await i.response.send_modal(ModalPatchnotes())
     except Exception: pass
 
-@bot.tree.command(name="panel", description="Panneau d'administration ModBot")
-@app_commands.checks.has_permissions(administrator=True)
 async def cmd_panel(i: discord.Interaction):
     try:
         await i.response.send_message(embed=build_main_panel_embed(i.guild), view=VuePanel(i.guild.id), ephemeral=True)
@@ -4141,7 +4786,7 @@ async def cmd_aide(i: discord.Interaction):
     e = EG("📚 Aide ModBot", "Recapitulatif complet des commandes disponibles.", 0x5865F2, gid)
     e.add_field(name="🌐 Site", value="[Ouvrir le site ModBot](https://modbot-website.vercel.app/)", inline=False)
     e.add_field(name="🛠️ Administration", value=(
-        "`/panel` - ouvrir le panneau d'administration\n"
+        "`Dashboard web` - configurer le bot, les tickets, les salons et les modules\n"
         "`/annonce` - publier une annonce dans un salon par ID\n"
         "`/patchnotes` - publier des patch notes dans le salon actuel\n"
         "`/massdm` - envoyer un message prive en masse\n"
@@ -4194,7 +4839,7 @@ async def cmd_info(i: discord.Interaction):
     e.add_field(name="⚡ Sanctions", value="1→warn • 2→mute4h • 3→mute24h • 4→ban", inline=False)
     e.add_field(name="📋 Commandes", value=(
         "`/insultes` `/suggest` `/report` `/warn` `/ban` `/deban`\n"
-        "`/annonce` `/massdm` `/translate` `/panel` `/patchnotes`\n"
+        "`/annonce` `/massdm` `/translate` `/patchnotes`\n"
         "`/clear-message` `/clear-all`\n"
         "`/avert-count` `/ban-list` `/reset-avert` `/profilestats`\n"
         "`/serverstats` `/modstats` `/aide` `/info-bot`\n"
