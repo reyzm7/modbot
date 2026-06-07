@@ -29,7 +29,7 @@ DASHBOARD_API_TOKEN = os.environ.get("DASHBOARD_API_TOKEN", "").strip()
 DASHBOARD_ALLOWED_ORIGINS = os.environ.get("DASHBOARD_ALLOWED_ORIGINS", "*")
 DASHBOARD_SITE_URL = os.environ.get("DASHBOARD_SITE_URL", "https://modbot-website.vercel.app/dashboard.html")
 DASHBOARD_ADMIN_IDS = {x.strip() for x in os.environ.get("DASHBOARD_ADMIN_IDS", "1189681599965573131").split(",") if x.strip()}
-DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "").strip()
+DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "1510405235544424620").strip()
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
 DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "").strip()
 API_HOST = os.environ.get("API_HOST", "0.0.0.0")
@@ -2165,12 +2165,99 @@ def serialize_guild(guild):
     return {
         "id": str(guild.id),
         "name": guild.name,
-        "icon": guild.icon.url if guild.icon else "assets/default_logo.png",
+        "icon": guild.icon.url if guild.icon else "logo.png",
         "banner": guild.banner.url if getattr(guild, "banner", None) else None,
         "initials": guild_initials(guild),
         "member_count": guild.member_count,
         "owner_id": str(guild.owner_id) if guild.owner_id else None,
     }
+
+def serialize_text_channel(channel):
+    return {
+        "id": str(channel.id),
+        "name": channel.name,
+        "mention": channel.mention,
+        "category": channel.category.name if channel.category else "",
+        "position": channel.position,
+    }
+
+def serialize_role(role):
+    return {
+        "id": str(role.id),
+        "name": role.name,
+        "mention": role.mention,
+        "color": f"#{int(role.color.value):06X}",
+        "position": role.position,
+    }
+
+def dashboard_guild_logs(guild_id, limit=40):
+    gid = str(guild_id)
+    logs = jload(F_DASHBOARD_LOGS)
+    if not isinstance(logs, list):
+        return []
+    return [entry for entry in logs if str(entry.get("guild_id") or "") == gid][:limit]
+
+def premium_limit_for_plan(plan):
+    return {
+        "free": 1,
+        "partner": 1,
+        "premium": 3,
+        "ultra": 5,
+    }.get(str(plan or "free"), 1)
+
+def normalize_premium_plan(value):
+    text = str(value or "free").strip().lower()
+    if text in {"partner", "partenaire"}:
+        return "partner"
+    if text in {"premium"}:
+        return "premium"
+    if text in {"ultra", "ultra_premium", "ultra premium", "complet"}:
+        return "ultra"
+    return "free"
+
+def parse_role_reference(guild, value):
+    rid = parse_int(value)
+    if rid and guild.get_role(rid):
+        return rid
+    text = str(value or "").strip().lstrip("@").lower()
+    if not text:
+        return None
+    for role in guild.roles:
+        if role.name.lower() == text:
+            return role.id
+    return None
+
+def normalize_reaction_role(guild, item):
+    if not isinstance(item, dict):
+        return None
+    role_id = parse_role_reference(guild, item.get("role_id") or item.get("role"))
+    if not role_id:
+        return None
+    role = guild.get_role(role_id)
+    return {
+        "emoji": clean_emoji(item.get("emoji"), "✨"),
+        "role_id": str(role_id),
+        "role": str(role_id),
+        "label": clean_short_text(item.get("label"), role.name if role else "Role", 80),
+    }
+
+def premium_for_identity(identity):
+    data = jload(F_PREMIUM)
+    if not isinstance(data, dict):
+        return {"plan": "free", "servers_limit": 1, "duration": "48 heures"}
+    candidates = {
+        str(identity.get("user_id") or "").lower(),
+        str(identity.get("username") or "").lower(),
+    }
+    for key, item in data.items():
+        if str(key).lower() in candidates or str(item.get("member") or "").lower() in candidates:
+            plan = normalize_premium_plan(item.get("plan") or item.get("premium_tier"))
+            return {
+                "plan": plan,
+                "servers_limit": int(item.get("servers_limit") or premium_limit_for_plan(plan)),
+                "duration": item.get("duration") or "",
+            }
+    return {"plan": "free", "servers_limit": 1, "duration": "48 heures"}
 
 def user_can_manage_guild(user_guild):
     try:
@@ -2298,16 +2385,18 @@ async def store_dashboard_asset(guild, cfg, value, key, filename_base):
 def serialize_dashboard_config(guild):
     gid = str(guild.id)
     cfg = get_cfg(gid)
-    ratings = jload(F_RATINGS).get(gid, [])
-    avg = round(sum(ratings) / len(ratings), 2) if ratings else 0
+    rating_stats = get_rating_stats(gid)
+    tickets_data = load_tickets().get("tickets", {})
+    guild_ticket_count = sum(1 for channel_id in tickets_data if guild.get_channel(parse_int(channel_id) or 0))
+    premium_plan = normalize_premium_plan(cfg.get("premium_tier") or cfg.get("premium_plan"))
     return {
         "guild": serialize_guild(guild),
         "channels": {
-            "tickets": str(cfg.get("salon_tickets") or DEFAULT_TICKETS),
-            "logs": str(cfg.get("salon_logs") or DEFAULT_LOGS),
-            "suggestions": str(cfg.get("salon_suggestions") or DEFAULT_SUGGESTIONS),
-            "reports": str(cfg.get("salon_reports") or DEFAULT_REPORTS),
-            "patchnotes": str(cfg.get("salon_patchnotes") or DEFAULT_PATCHNOTES),
+            "tickets": str(cfg.get("salon_tickets") or ""),
+            "logs": str(cfg.get("salon_logs") or ""),
+            "suggestions": str(cfg.get("salon_suggestions") or ""),
+            "reports": str(cfg.get("salon_reports") or ""),
+            "patchnotes": str(cfg.get("salon_patchnotes") or ""),
         },
         "tickets": {
             "author": cfg.get("ticket_panel_author") or tr(gid, "ticket_panel_author", guild_name=guild.name),
@@ -2336,19 +2425,33 @@ def serialize_dashboard_config(guild):
         "language": cfg.get("langue") or DEFAULT_LANG,
         "welcome": cfg.get("welcome_system", {
             "enabled": False,
+            "dm_enabled": False,
             "departure_enabled": False,
             "channel_id": "",
             "message": "Bienvenue nom du membre sur @serveur !",
+            "dm_message": "Bienvenue sur @serveur ! Pense a lire les regles et amuse-toi bien.",
             "departure_message": "Au revoir nom du membre.",
             "background": "",
             "font": "Inter",
             "color": "#FFFFFF",
         }),
         "reaction_roles": cfg.get("reaction_roles", []),
+        "reaction_title": cfg.get("reaction_title") or "Choisis tes roles",
+        "reaction_description": cfg.get("reaction_description") or "Clique sur une reaction pour recevoir ou retirer le role correspondant.",
+        "reaction_roles_channel_id": str(cfg.get("reaction_roles_channel_id") or ""),
+        "reaction_roles_mode": cfg.get("reaction_roles_mode") or "Plusieurs rôles possibles",
         "recurring_messages": cfg.get("recurring_messages", []),
         "social_relays": cfg.get("social_relays", []),
+        "premium_tier": premium_plan,
+        "premium_limit": premium_limit_for_plan(premium_plan),
         "premium_servers": cfg.get("premium_servers", []),
-        "ratings": {"average": avg, "count": len(ratings)},
+        "ratings": {
+            "average": round(float(rating_stats.get("avg", 0)), 2),
+            "count": int(rating_stats.get("count", 0)),
+            "last": rating_stats.get("last", []),
+        },
+        "ticket_stats": {"total": guild_ticket_count},
+        "logs": dashboard_guild_logs(gid),
     }
 
 async def apply_dashboard_config(guild, payload):
@@ -2367,6 +2470,8 @@ async def apply_dashboard_config(guild, payload):
         parsed = parse_int(channels.get(public_key))
         if parsed:
             cfg[cfg_key] = parsed
+        elif public_key in channels and payload.get("clear_empty_channels"):
+            cfg.pop(cfg_key, None)
 
     tickets = payload.get("tickets") or {}
     if tickets:
@@ -2378,9 +2483,11 @@ async def apply_dashboard_config(guild, payload):
             ticket_banner_url = await store_dashboard_asset(guild, cfg, tickets.get("banner"), "ticket_banner", "ticket-banner")
             if ticket_banner_url:
                 cfg["ticket_banner"] = ticket_banner_url
-        role_id = parse_int(tickets.get("support_role"))
+        role_id = parse_role_reference(guild, tickets.get("support_role"))
         if role_id:
             cfg["ticket_support_role"] = role_id
+        elif "support_role" in tickets and payload.get("clear_empty_ticket_role"):
+            cfg.pop("ticket_support_role", None)
         options = tickets.get("options")
         if isinstance(options, list) and options:
             cfg["ticket_questions"] = [normalize_ticket_question(option) for option in options[:MAX_TICKET_OPTIONS]]
@@ -2425,14 +2532,39 @@ async def apply_dashboard_config(guild, payload):
     if payload.get("language") in BOT_LANGUAGES:
         cfg["langue"] = payload.get("language")
 
-    for key in ("welcome_system", "reaction_roles", "recurring_messages", "social_relays", "tournament"):
+    if "reaction_roles" in payload and isinstance(payload.get("reaction_roles"), list):
+        cfg["reaction_roles"] = [
+            normalized for normalized in (
+                normalize_reaction_role(guild, item) for item in payload.get("reaction_roles", [])
+            )
+            if normalized
+        ]
+    if "reaction_roles_channel_id" in payload:
+        parsed_channel = parse_int(payload.get("reaction_roles_channel_id"))
+        if parsed_channel:
+            cfg["reaction_roles_channel_id"] = parsed_channel
+        else:
+            cfg.pop("reaction_roles_channel_id", None)
+    if "reaction_roles_mode" in payload:
+        cfg["reaction_roles_mode"] = clean_short_text(payload.get("reaction_roles_mode"), "Plusieurs rôles possibles", 80)
+    if "reaction_title" in payload:
+        cfg["reaction_title"] = clean_short_text(payload.get("reaction_title"), "Choisis tes roles", 120)
+    if "reaction_description" in payload:
+        cfg["reaction_description"] = clean_short_text(payload.get("reaction_description"), "Clique sur une reaction pour recevoir ou retirer le role correspondant.", 600)
+
+    for key in ("welcome_system", "recurring_messages", "social_relays", "tournament"):
         if key in payload:
             cfg[key] = payload[key]
 
+    if "premium_tier" in payload or "premium_plan" in payload:
+        cfg["premium_tier"] = normalize_premium_plan(payload.get("premium_tier") or payload.get("premium_plan"))
+        cfg["premium_limit"] = premium_limit_for_plan(cfg["premium_tier"])
+
     premium_servers = payload.get("premium_servers")
     if isinstance(premium_servers, list):
+        premium_limit = int(cfg.get("premium_limit") or premium_limit_for_plan(cfg.get("premium_tier")))
         cleaned_servers = []
-        for server in premium_servers[:2]:
+        for server in premium_servers[:premium_limit]:
             if not isinstance(server, dict):
                 continue
             cleaned_servers.append({
@@ -2500,7 +2632,23 @@ async def api_guilds(request):
     identity = await api_identity(request)
     allowed = set(identity.get("guild_ids", []))
     guilds = [serialize_guild(guild) for guild in bot.guilds if identity.get("admin") or str(guild.id) in allowed]
-    return api_json({"ok": True, "guilds": guilds, "user": identity})
+    return api_json({"ok": True, "guilds": guilds, "user": identity, "premium": premium_for_identity(identity)})
+
+async def api_guild_resources(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    me = guild.me
+    channels = []
+    for channel in sorted(getattr(guild, "text_channels", []), key=lambda ch: (ch.category.position if ch.category else -1, ch.position)):
+        perms = channel.permissions_for(me)
+        if perms.view_channel:
+            channels.append(serialize_text_channel(channel))
+    roles = []
+    for role in sorted(getattr(guild, "roles", []), key=lambda r: r.position, reverse=True):
+        if role.is_default() or role.managed:
+            continue
+        roles.append(serialize_role(role))
+    return api_json({"ok": True, "guild": serialize_guild(guild), "channels": channels, "roles": roles})
 
 async def api_get_guild_config(request):
     identity = await api_identity(request)
@@ -2527,6 +2675,59 @@ async def api_publish_ticket(request):
     dashboard_log("ticket_publish", guild, identity.get("username"), f"Panel ticket publie dans #{channel.name}")
     return api_json({"ok": True, "channel_id": str(channel.id), "message_id": str(msg.id)})
 
+async def api_publish_reaction_roles(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    if payload:
+        payload["actor"] = identity.get("username") or identity.get("user_id")
+        cfg = await apply_dashboard_config(guild, payload)
+    else:
+        cfg = get_cfg(guild.id)
+    channel_id = parse_int(cfg.get("reaction_roles_channel_id") or payload.get("reaction_roles_channel_id"))
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if not channel:
+        raise web.HTTPNotFound(text="Salon roles reactions introuvable.")
+    reaction_roles = cfg.get("reaction_roles") or []
+    if not reaction_roles:
+        raise web.HTTPBadRequest(text="Aucun role reaction configure.")
+    title = clean_short_text(payload.get("reaction_title") or cfg.get("reaction_title"), "🎭 Choisis tes roles", 120) if isinstance(payload, dict) else "🎭 Choisis tes roles"
+    desc = clean_short_text(payload.get("reaction_description") or cfg.get("reaction_description"), "Clique sur une reaction pour recevoir ou retirer le role correspondant.", 600) if isinstance(payload, dict) else "Clique sur une reaction pour recevoir ou retirer le role correspondant."
+    embed = EG(title, desc, 0x9B59B6, guild.id)
+    lines = []
+    for item in reaction_roles:
+        role = guild.get_role(parse_int(item.get("role_id")) or 0)
+        lines.append(f"{item.get('emoji', '✨')} {role.mention if role else item.get('label', 'Role')}")
+    embed.add_field(name="Roles disponibles", value="\n".join(lines)[:1000], inline=False)
+    message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(roles=False, users=False, everyone=False))
+    for item in reaction_roles:
+        try:
+            await message.add_reaction(str(item.get("emoji") or "✨"))
+        except Exception:
+            pass
+    cfg["reaction_roles_message_id"] = message.id
+    cfg["reaction_roles_channel_id"] = channel.id
+    set_cfg(guild.id, cfg)
+    dashboard_log("reaction_roles_publish", guild, identity.get("username"), f"Roles reactions publies dans #{channel.name}")
+    return api_json({"ok": True, "channel_id": str(channel.id), "message_id": str(message.id)})
+
+async def api_test_social(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    channel_id = parse_int(payload.get("channel_id"))
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if not channel:
+        raise web.HTTPNotFound(text="Salon reseau introuvable.")
+    platform = clean_short_text(payload.get("platform"), "Reseau", 40)
+    link = clean_short_text(payload.get("link"), "", 500)
+    embed = EG(f"📣 Test relais {platform}", "Le relais est bien connecte au salon choisi.", 0x5865F2, guild.id)
+    if link:
+        embed.add_field(name="Compte suivi", value=link, inline=False)
+    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    dashboard_log("social_test", guild, identity.get("username"), f"{platform} -> #{channel.name}")
+    return api_json({"ok": True, "channel_id": str(channel.id)})
+
 async def api_admin_stats(request):
     try:
         await api_identity(request, admin_required=True)
@@ -2552,12 +2753,15 @@ async def api_admin_premium(request):
     data = jload(F_PREMIUM)
     member = clean_short_text(payload.get("member"), "", 80)
     duration = clean_short_text(payload.get("duration"), "2 mois", 40)
+    plan = normalize_premium_plan(payload.get("plan") or payload.get("premium_tier"))
+    servers_limit = max(1, min(5, int(parse_int(payload.get("servers_limit")) or premium_limit_for_plan(plan))))
     if not member:
         raise web.HTTPBadRequest(text="Membre manquant.")
     data[member] = {
         "member": member,
         "duration": duration,
-        "servers_limit": 2,
+        "plan": plan,
+        "servers_limit": servers_limit,
         "created_at": now().isoformat(),
         "created_by": identity.get("user_id"),
         "payment": "ticket_required",
@@ -2589,9 +2793,12 @@ async def start_dashboard_api():
     app.router.add_get("/api/auth/discord/callback", api_oauth_callback)
     app.router.add_get("/api/me", api_me)
     app.router.add_get("/api/guilds", api_guilds)
+    app.router.add_get("/api/guilds/{guild_id}/resources", api_guild_resources)
     app.router.add_get("/api/guilds/{guild_id}/config", api_get_guild_config)
     app.router.add_put("/api/guilds/{guild_id}/config", api_save_guild_config)
     app.router.add_post("/api/guilds/{guild_id}/tickets/publish", api_publish_ticket)
+    app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
+    app.router.add_post("/api/guilds/{guild_id}/socials/test", api_test_social)
     app.router.add_get("/api/admin/stats", api_admin_stats)
     app.router.add_post("/api/admin/premium", api_admin_premium)
     app.router.add_post("/api/admin/blacklist", api_admin_blacklist)
@@ -3975,6 +4182,19 @@ async def send_dashboard_member_event(member, departure=False):
     cfg = get_cfg(member.guild.id)
     system = cfg.get("welcome_system") or {}
     enabled_key = "departure_enabled" if departure else "enabled"
+    dm_enabled = bool(system.get("dm_enabled")) and not departure
+    if not system.get(enabled_key) and not dm_enabled:
+        return
+    if dm_enabled:
+        dm_template = system.get("dm_message") or "Bienvenue sur @serveur ! Pense a lire les regles et amuse-toi bien."
+        dm_content = render_member_template(dm_template, member)
+        try:
+            dm = EG("👋 Bienvenue", dm_content, 0x5865F2, member.guild.id)
+            dm.set_thumbnail(url=member.display_avatar.url)
+            await member.send(embed=dm)
+            dashboard_log("member_welcome_dm", member.guild, member, "MP d'arrivee envoye")
+        except Exception:
+            pass
     if not system.get(enabled_key):
         return
     channel_id = parse_int(system.get("departure_channel_id") or system.get("channel_id"))
@@ -4054,6 +4274,51 @@ async def on_member_join(member):
 @bot.event
 async def on_member_remove(member):
     await send_dashboard_member_event(member, departure=True)
+
+async def handle_dashboard_reaction_role(payload, remove=False):
+    if not payload.guild_id or payload.user_id == getattr(bot.user, "id", None):
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    cfg = get_cfg(guild.id)
+    if str(cfg.get("reaction_roles_message_id") or "") != str(payload.message_id):
+        return
+    reaction_roles = cfg.get("reaction_roles") or []
+    emoji = str(payload.emoji)
+    matched = next((item for item in reaction_roles if str(item.get("emoji")) == emoji), None)
+    if not matched:
+        return
+    role = guild.get_role(parse_int(matched.get("role_id")) or 0)
+    if not role:
+        return
+    member = guild.get_member(payload.user_id)
+    if not member:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except Exception:
+            return
+    try:
+        if remove:
+            await member.remove_roles(role, reason="ModBot roles reactions")
+            return
+        mode = str(cfg.get("reaction_roles_mode") or "").lower()
+        if "un seul" in mode:
+            configured_role_ids = {parse_int(item.get("role_id")) for item in reaction_roles}
+            configured_roles = [r for r in (guild.get_role(rid or 0) for rid in configured_role_ids) if r and r in member.roles and r.id != role.id]
+            if configured_roles:
+                await member.remove_roles(*configured_roles, reason="ModBot roles reactions mode unique")
+        await member.add_roles(role, reason="ModBot roles reactions")
+    except Exception:
+        pass
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    await handle_dashboard_reaction_role(payload, remove=False)
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    await handle_dashboard_reaction_role(payload, remove=True)
 
 @bot.event
 async def on_voice_state_update(member, before, after):
