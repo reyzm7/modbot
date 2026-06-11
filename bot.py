@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json, os, re, asyncio, io, aiohttp, random, string, html, unicodedata, base64
+import json, os, re, asyncio, io, aiohttp, random, string, html, unicodedata, base64, hashlib
 import secrets
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -482,10 +482,12 @@ def build_main_panel_embed(guild):
         "Full server settings (tickets, channels, security, personalization, recurring messages, socials) are managed from the dashboard."
     )
     e.add_field(name="🚫 Filtre insultes" if lang == "fr" else "🚫 Bad word filter", value=(
+        f"{status_badge(cfg.get('insultes_enabled', True), gid)} Filtre actif\n"
         f"🧾 `{len(INSULTES_BASE)+len(custom)}` mots filtres\n"
         f"👤 `{len(get_members_imm(gid))}` membres immunises\n"
         f"🛡️ `{len(get_roles_imm(gid))}` roles immunises"
         if lang == "fr" else
+        f"{status_badge(cfg.get('insultes_enabled', True), gid)} Filter enabled\n"
         f"🧾 `{len(INSULTES_BASE)+len(custom)}` filtered words\n"
         f"👤 `{len(get_members_imm(gid))}` immune members\n"
         f"🛡️ `{len(get_roles_imm(gid))}` immune roles"
@@ -515,8 +517,10 @@ def build_security_embed(guild):
 def build_insultes_embed(guild):
     gid = str(guild.id)
     lang = get_lang(gid)
+    cfg = get_cfg(gid)
     e = EG("🚫 Filtre des insultes" if lang == "fr" else "🚫 Bad word filter", couleur=0xED4245, gid=gid)
     e.description = "Controle les mots filtres et les membres/roles immunises." if lang == "fr" else "Control filtered words and immune members/roles."
+    e.add_field(name="Etat" if lang == "fr" else "State", value=status_badge(cfg.get("insultes_enabled", True), gid), inline=True)
     e.add_field(name="Mots par defaut" if lang == "fr" else "Default words", value=f"`{len(INSULTES_BASE)}`", inline=True)
     e.add_field(name="Mots personnalises" if lang == "fr" else "Custom words", value=f"`{len(get_custom(guild.id))}`", inline=True)
     e.add_field(
@@ -760,6 +764,8 @@ def build_ticket_welcome_embed(guild, tdata, user_mention=None):
     support_role = get_ticket_support_role(guild)
     if support_role:
         e.add_field(name="👥 Support", value=support_role.mention, inline=True)
+    if tdata.get("claimed_by"):
+        e.add_field(name="🧑‍✈️ Pris en charge", value=str(tdata.get("claimed_by"))[:100], inline=True)
     e.add_field(name=f"📝 {tr(gid, 'reason')}", value=str(tdata.get("motif") or "?")[:1000], inline=False)
     banner = get_ticket_banner_url(gid)
     if banner:
@@ -932,9 +938,9 @@ def detecter(texte, gid):
     return None
 
 def est_immunise(member, gid):
-    if str(member.id) in set(get_members_imm(gid)):
+    if str(member.id) in {str(mid) for mid in get_members_imm(gid)}:
         return True
-    immune_roles = set(get_roles_imm(gid))
+    immune_roles = {str(rid) for rid in get_roles_imm(gid)}
     return any(str(r.id) in immune_roles for r in getattr(member, "roles", []))
 
 # ════════════════════════════════════════════════
@@ -1542,6 +1548,7 @@ class VueTicket(discord.ui.View):
         self.uid = str(uid) if uid else ""
         self.gid = str(gid) if gid else None
         labels = {
+            "tkt_claim": "S'approprier",
             "tkt_trs": tr(self.gid, "btn_transcript"),
             "tkt_close": tr(self.gid, "btn_close_ticket"),
             "tkt_delete": tr(self.gid, "btn_delete_ticket"),
@@ -1564,10 +1571,70 @@ class VueTicket(discord.ui.View):
     def _staff(self, i: discord.Interaction) -> bool:
         return bool(i.guild and (i.user.guild_permissions.manage_channels or is_staff(i.user, i.guild.id)))
 
+    def _owner(self, i: discord.Interaction) -> bool:
+        return bool(i.guild and i.guild.owner_id == i.user.id)
+
+    def _can_manage_claimed(self, i: discord.Interaction, tdata=None) -> bool:
+        tdata = tdata or self._ticket_data(i)[1]
+        claimed_by_id = str(tdata.get("claimed_by_id") or "")
+        if self._owner(i) or i.user.guild_permissions.administrator:
+            return True
+        if claimed_by_id:
+            return str(i.user.id) == claimed_by_id
+        return self._staff(i)
+
     def _peut(self, i: discord.Interaction, tdata=None) -> bool:
         tdata = tdata or self._ticket_data(i)[1]
         uid = self._owner_id(tdata)
-        return self._staff(i) or (uid and str(i.user.id) == uid)
+        if uid and str(i.user.id) == uid:
+            return True
+        return self._can_manage_claimed(i, tdata)
+
+    async def _claim_ticket(self, interaction, tdata):
+        gid = self._gid(interaction)
+        if not self._staff(interaction):
+            return await interaction.response.send_message(tr(gid, "permission_denied"), ephemeral=True)
+        claimed_by_id = str(tdata.get("claimed_by_id") or "")
+        if claimed_by_id and claimed_by_id != str(interaction.user.id) and not (self._owner(interaction) or interaction.user.guild_permissions.administrator):
+            return await interaction.response.send_message("Ce ticket est deja pris en charge.", ephemeral=True)
+        await _safe_defer(interaction)
+        guild = interaction.guild
+        channel = interaction.channel
+        owner = guild.get_member(guild.owner_id) if guild.owner_id else None
+        creator = None
+        try:
+            creator_id = int(self._owner_id(tdata))
+            creator = guild.get_member(creator_id) or await guild.fetch_member(creator_id)
+        except Exception:
+            creator = None
+        support_role = get_ticket_support_role(guild)
+        deny_roles = set(get_staff_roles(gid))
+        if support_role:
+            deny_roles.add(str(support_role.id))
+        for role in list(guild.roles):
+            try:
+                if str(role.id) in deny_roles or (role.permissions.manage_channels and not role.permissions.administrator):
+                    await channel.set_permissions(role, read_messages=False, send_messages=False, attach_files=False)
+            except Exception:
+                pass
+        allow_targets = [guild.me, interaction.user, owner, creator]
+        for target in [t for t in allow_targets if t]:
+            try:
+                await channel.set_permissions(target, read_messages=True, send_messages=True, attach_files=True)
+            except Exception:
+                pass
+        tickets_data, fresh = self._ticket_data(interaction)
+        fresh.update(tdata)
+        fresh["claimed_by_id"] = str(interaction.user.id)
+        fresh["claimed_by"] = interaction.user.mention
+        fresh["claimed_at"] = now().strftime("%Y-%m-%d %H:%M:%S")
+        tickets_data.setdefault("tickets", {})[str(channel.id)] = fresh
+        save_tickets(tickets_data)
+        try:
+            await interaction.message.edit(embed=build_ticket_welcome_embed(guild, fresh), view=self)
+        except Exception:
+            pass
+        await interaction.followup.send(embed=EG("🧑‍✈️ Ticket pris en charge", f"{interaction.user.mention} s'occupe maintenant de ce ticket.", 0x5865F2, gid))
 
     async def _send_transcript_dm(self, interaction, tdata):
         gid = self._gid(interaction)
@@ -1627,6 +1694,13 @@ class VueTicket(discord.ui.View):
     async def prio3(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._set_priority(interaction, 3)
 
+    @discord.ui.button(label="S'approprier", style=discord.ButtonStyle.primary, custom_id="tkt_claim", row=1)
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tickets_data, tdata = self._ticket_data(interaction)
+        if not tdata:
+            return await interaction.response.send_message("Ticket introuvable.", ephemeral=True)
+        await self._claim_ticket(interaction, tdata)
+
     @discord.ui.button(label="Transcript", style=discord.ButtonStyle.secondary, custom_id="tkt_trs", row=1)
     async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
         tickets_data, tdata = self._ticket_data(interaction)
@@ -1641,8 +1715,7 @@ class VueTicket(discord.ui.View):
             e = EG(tr(gid, "transcript_dm_error"), couleur=0xED4245, gid=gid)
         await interaction.followup.send(embed=e, ephemeral=True)
 
-    @discord.ui.button(label="Fermer le ticket", style=discord.ButtonStyle.danger, custom_id="tkt_close", row=1)
-    async def fermer(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _close_confirmed(self, interaction: discord.Interaction):
         tickets_data, tdata = self._ticket_data(interaction)
         gid = self._gid(interaction)
         if not self._peut(interaction, tdata):
@@ -1683,9 +1756,36 @@ class VueTicket(discord.ui.View):
         finally:
             _tickets_closing.discard(cid)
 
+    @discord.ui.button(label="Fermer le ticket", style=discord.ButtonStyle.danger, custom_id="tkt_close", row=1)
+    async def fermer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tickets_data, tdata = self._ticket_data(interaction)
+        gid = self._gid(interaction)
+        if not self._peut(interaction, tdata):
+            return await interaction.response.send_message(tr(gid, "permission_denied"), ephemeral=True)
+        if tdata.get("closed"):
+            return await safe_ephemeral(interaction, "Ticket deja ferme.")
+        await interaction.response.send_message(
+            embed=EG("⚠️ Confirmation", "Confirmer la fermeture de ce ticket ?", 0xFEE75C, gid),
+            view=VueTicketConfirmation(self, "close"),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Supprimer", style=discord.ButtonStyle.danger, custom_id="tkt_delete", row=1)
     async def supprimer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._staff(interaction):
+        gid = self._gid(interaction)
+        tickets_data, tdata = self._ticket_data(interaction)
+        if not self._can_manage_claimed(interaction, tdata):
+            return await interaction.response.send_message(tr(self._gid(interaction), "permission_denied"), ephemeral=True)
+        if not tdata or tdata.get("deleting"):
+            return await interaction.response.send_message("Ticket deja supprime ou suppression deja en cours.", ephemeral=True)
+        await interaction.response.send_message(
+            embed=EG("⚠️ Confirmation", "Confirmer la suppression complete de ce ticket ?", 0xED4245, gid),
+            view=VueTicketConfirmation(self, "delete"),
+            ephemeral=True,
+        )
+
+    async def _delete_confirmed(self, interaction: discord.Interaction):
+        if not self._can_manage_claimed(interaction):
             return await interaction.response.send_message(tr(self._gid(interaction), "permission_denied"), ephemeral=True)
         if not take_ticket_action_lock(ticket_action_key(interaction, "delete"), ttl_seconds=600):
             return await safe_ephemeral(interaction, "Suppression deja en cours.")
@@ -1722,6 +1822,33 @@ class VueTicket(discord.ui.View):
             await interaction.channel.delete(reason=f"Ticket deleted by {interaction.user}")
         except Exception:
             pass
+
+class VueTicketConfirmation(discord.ui.View):
+    def __init__(self, ticket_view, action):
+        super().__init__(timeout=45)
+        self.ticket_view = ticket_view
+        self.action = action
+
+    @discord.ui.button(label="Confirmer", style=discord.ButtonStyle.danger, row=0)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+        if self.action == "close":
+            await self.ticket_view._close_confirmed(interaction)
+        else:
+            await self.ticket_view._delete_confirmed(interaction)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, row=0)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.edit_message(content="Action annulee.", embed=None, view=None)
+        except Exception:
+            try:
+                await interaction.response.send_message("Action annulee.", ephemeral=True)
+            except Exception:
+                pass
 
 class TicketCategorySelect(discord.ui.Select):
     def __init__(self, gid=None):
@@ -2090,6 +2217,7 @@ async def refresh_ticket_panel_message(guild):
 
 _dashboard_api_runner = None
 _dashboard_recurring_task = None
+_dashboard_social_task = None
 _oauth_states = {}
 
 def api_json(data, status=200):
@@ -2166,10 +2294,13 @@ def serialize_guild(guild):
         "id": str(guild.id),
         "name": guild.name,
         "icon": guild.icon.url if guild.icon else "logo.png",
+        "logo": guild.icon.url if guild.icon else "logo.png",
         "banner": guild.banner.url if getattr(guild, "banner", None) else None,
         "initials": guild_initials(guild),
         "member_count": guild.member_count,
         "owner_id": str(guild.owner_id) if guild.owner_id else None,
+        "installed": True,
+        "can_manage": True,
     }
 
 def serialize_text_channel(channel):
@@ -2207,7 +2338,7 @@ def premium_limit_for_plan(plan):
 
 def normalize_premium_plan(value):
     text = str(value or "free").strip().lower()
-    if text in {"partner", "partenaire"}:
+    if text in {"partner", "partenaire", "collaborateur", "collaborator"}:
         return "partner"
     if text in {"premium"}:
         return "premium"
@@ -2266,12 +2397,43 @@ def user_can_manage_guild(user_guild):
         perms = 0
     return bool(user_guild.get("owner") or (perms & 0x8) or (perms & 0x20))
 
+def oauth_guild_icon_url(gid, icon_hash):
+    if not gid or not icon_hash:
+        return "logo.png"
+    ext = "gif" if str(icon_hash).startswith("a_") else "png"
+    return f"https://cdn.discordapp.com/icons/{gid}/{icon_hash}.{ext}?size=128"
+
+def serialize_oauth_guild(item, installed=False):
+    gid = str(item.get("id") or "")
+    name = item.get("name") or "Serveur Discord"
+    initials = "".join(part[0].upper() for part in re.split(r"\s+", name) if part)[:3] or "MB"
+    icon_url = oauth_guild_icon_url(gid, item.get("icon"))
+    return {
+        "id": gid,
+        "name": name,
+        "icon": icon_url,
+        "logo": icon_url,
+        "banner": None,
+        "initials": initials,
+        "member_count": None,
+        "owner_id": None,
+        "installed": bool(installed),
+        "can_manage": user_can_manage_guild(item),
+        "owner": bool(item.get("owner")),
+        "permissions": str(item.get("permissions") or "0"),
+    }
+
 def make_session(user, user_guilds):
     allowed = []
+    manageable_guilds = []
     bot_guild_ids = {str(g.id) for g in bot.guilds}
     for item in user_guilds:
         gid = str(item.get("id"))
-        if gid in bot_guild_ids and user_can_manage_guild(item):
+        if not user_can_manage_guild(item):
+            continue
+        installed = gid in bot_guild_ids
+        manageable_guilds.append(serialize_oauth_guild(item, installed=installed))
+        if installed:
             allowed.append(gid)
     token = secrets.token_urlsafe(32)
     data = read_dashboard_sessions()
@@ -2280,6 +2442,7 @@ def make_session(user, user_guilds):
         "username": user.get("username") or user.get("global_name") or "Discord user",
         "avatar": user.get("avatar"),
         "guild_ids": allowed,
+        "manageable_guilds": manageable_guilds,
         "admin": str(user.get("id")) in DASHBOARD_ADMIN_IDS,
         "created_at": now().isoformat(),
     }
@@ -2293,6 +2456,7 @@ async def api_identity(request, admin_required=False):
             "user_id": "api-token",
             "username": "API Token",
             "guild_ids": [str(g.id) for g in bot.guilds],
+            "manageable_guilds": [serialize_guild(g) for g in bot.guilds],
             "admin": True,
         }
 
@@ -2409,6 +2573,7 @@ def serialize_dashboard_config(guild):
         },
         "security": {
             "antilink": anti_link_enabled(cfg),
+            "insultes_enabled": cfg.get("insultes_enabled", True),
             "antispam": bool(cfg.get("anti_spam")),
             "antiraid": bool(cfg.get("antiraid")),
             "staff_alert": bool(cfg.get("staff_alert_enabled")),
@@ -2416,10 +2581,7 @@ def serialize_dashboard_config(guild):
             "custom_words": get_custom(gid),
         },
         "personalization": {
-            "name": get_bot_display_name(gid, guild),
             "footer": cfg.get("embed_footer") or f"{get_bot_display_name(gid, guild)} - Protection de votre communaute",
-            "logo": cfg.get("embed_logo") or (guild.icon.url if guild.icon else ""),
-            "banner": cfg.get("embed_banner") or "",
             "color": f"#{int(cfg.get('embed_color', DEFAULT_EMBED_COLOR)):06X}",
         },
         "language": cfg.get("langue") or DEFAULT_LANG,
@@ -2496,6 +2658,8 @@ async def apply_dashboard_config(guild, payload):
     if "antilink" in security:
         cfg["anti_lien"] = bool(security.get("antilink"))
         cfg["anti_invite"] = bool(security.get("antilink"))
+    if "insultes_enabled" in security:
+        cfg["insultes_enabled"] = bool(security.get("insultes_enabled"))
     if "antispam" in security:
         cfg["anti_spam"] = bool(security.get("antispam"))
     if "antiraid" in security:
@@ -2509,23 +2673,8 @@ async def apply_dashboard_config(guild, payload):
 
     personalization = payload.get("personalization") or {}
     if personalization:
-        if personalization.get("name"):
-            cfg["bot_name"] = clean_short_text(personalization.get("name"), DEFAULT_BOT_NAME, 32)
-            try:
-                await guild.me.edit(nick=cfg["bot_name"], reason="Dashboard ModBot personnalisation")
-            except Exception:
-                pass
         if personalization.get("footer"):
             cfg["embed_footer"] = clean_short_text(personalization.get("footer"), "", 200)
-        if personalization.get("logo"):
-            logo_url = await store_dashboard_asset(guild, cfg, personalization.get("logo"), "embed_logo", "embed-logo")
-            if logo_url:
-                cfg["embed_logo"] = logo_url
-                cfg["embed_footer_icon"] = cfg["embed_logo"]
-        if personalization.get("banner"):
-            banner_url = await store_dashboard_asset(guild, cfg, personalization.get("banner"), "embed_banner", "embed-banner")
-            if banner_url:
-                cfg["embed_banner"] = banner_url
         if personalization.get("color"):
             cfg["embed_color"] = parse_color(personalization.get("color"))
 
@@ -2631,7 +2780,29 @@ async def api_me(request):
 async def api_guilds(request):
     identity = await api_identity(request)
     allowed = set(identity.get("guild_ids", []))
-    guilds = [serialize_guild(guild) for guild in bot.guilds if identity.get("admin") or str(guild.id) in allowed]
+    live_guilds = {str(guild.id): serialize_guild(guild) for guild in bot.guilds}
+    if identity.get("admin"):
+        guilds = list(live_guilds.values())
+    else:
+        seen = set()
+        guilds = []
+        stored = identity.get("manageable_guilds") or []
+        if isinstance(stored, list):
+            for item in stored:
+                if not isinstance(item, dict):
+                    continue
+                gid = str(item.get("id") or "")
+                if not gid or gid in seen:
+                    continue
+                seen.add(gid)
+                if gid in live_guilds and gid in allowed:
+                    merged = {**item, **live_guilds[gid], "installed": True, "can_manage": True}
+                else:
+                    merged = {**item, "installed": False, "can_manage": True}
+                guilds.append(merged)
+        for gid in allowed:
+            if gid in live_guilds and gid not in seen:
+                guilds.append(live_guilds[gid])
     return api_json({"ok": True, "guilds": guilds, "user": identity, "premium": premium_for_identity(identity)})
 
 async def api_guild_resources(request):
@@ -2721,10 +2892,24 @@ async def api_test_social(request):
         raise web.HTTPNotFound(text="Salon reseau introuvable.")
     platform = clean_short_text(payload.get("platform"), "Reseau", 40)
     link = clean_short_text(payload.get("link"), "", 500)
-    embed = EG(f"📣 Test relais {platform}", "Le relais est bien connecte au salon choisi.", 0x5865F2, guild.id)
+    emoji, color, headline = _social_platform_palette(platform)
+    embed = EG(f"{emoji} Test relais {platform}", f"{headline} detectee : le relais est bien connecte au salon choisi.", color, guild.id)
     if link:
         embed.add_field(name="Compte suivi", value=link, inline=False)
-    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
+                snapshot = await fetch_social_snapshot(session, link)
+            if snapshot and snapshot.get("title"):
+                embed.add_field(name="Apercu", value=snapshot["title"][:1024], inline=False)
+            if snapshot and snapshot.get("image"):
+                embed.set_image(url=snapshot["image"])
+        except Exception:
+            pass
+    view = None
+    if link:
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Ouvrir le compte", url=link))
+    await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
     dashboard_log("social_test", guild, identity.get("username"), f"{platform} -> #{channel.name}")
     return api_json({"ok": True, "channel_id": str(channel.id)})
 
@@ -2832,6 +3017,46 @@ def recurring_last_sent_ts(value):
     except Exception:
         return 0
 
+def _social_platform_palette(platform):
+    p = str(platform or "").lower()
+    if "twitch" in p:
+        return "🟣", 0x9146FF, "Annonce live"
+    if "tiktok" in p:
+        return "🎵", 0x111111, "Nouvelle vidéo"
+    if "instagram" in p:
+        return "📸", 0xE1306C, "Nouvelle publication"
+    if "twitter" in p or "x" == p.strip():
+        return "𝕏", 0x1DA1F2, "Nouvelle publication"
+    return "📣", 0x5865F2, "Nouvelle publication"
+
+async def fetch_social_snapshot(session, url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    }
+    async with session.get(url, headers=headers, allow_redirects=True) as response:
+        if response.status >= 400:
+            return None
+        text = await response.text(errors="ignore")
+        final_url = str(response.url)
+    def extract(pattern):
+        match = re.search(pattern, text, re.I | re.S)
+        return clean_short_text(match.group(1), "", 600) if match else ""
+    title = extract(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']')
+    desc = extract(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']')
+    image = extract(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']')
+    canonical = extract(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']')
+    seed = "|".join([final_url, title, desc, image, canonical, text[:5000]])
+    fingerprint = hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()
+    return {
+        "url": final_url,
+        "title": title,
+        "description": desc,
+        "image": image,
+        "canonical": canonical,
+        "fingerprint": fingerprint,
+    }
+
 async def dashboard_recurring_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
@@ -2868,6 +3093,71 @@ async def dashboard_recurring_loop():
                 cfg["recurring_messages"] = messages
                 set_cfg(guild.id, cfg)
         await asyncio.sleep(60)
+
+async def dashboard_social_loop():
+    await bot.wait_until_ready()
+    timeout = aiohttp.ClientTimeout(total=18)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        while not bot.is_closed():
+            for guild in list(bot.guilds):
+                cfg = get_cfg(guild.id)
+                relays = cfg.get("social_relays")
+                if not isinstance(relays, list) or not relays:
+                    continue
+                states = cfg.get("social_relays_state")
+                if not isinstance(states, dict):
+                    states = {}
+                changed = False
+                for relay in relays:
+                    if not isinstance(relay, dict) or not relay.get("enabled"):
+                        continue
+                    link = clean_short_text(relay.get("link"), "", 500)
+                    channel_id = parse_int(relay.get("channel_id"))
+                    if not link or not channel_id:
+                        continue
+                    channel = guild.get_channel(channel_id)
+                    if not channel:
+                        continue
+                    perms = channel.permissions_for(guild.me)
+                    if not perms.send_messages:
+                        continue
+                    platform = clean_short_text(relay.get("platform"), "Réseau", 40)
+                    key = platform.lower().replace("/", "_").replace(" ", "_")
+                    try:
+                        snapshot = await fetch_social_snapshot(session, link)
+                    except Exception:
+                        continue
+                    if not snapshot:
+                        continue
+                    previous = states.get(key)
+                    if previous and previous.get("fingerprint") == snapshot["fingerprint"]:
+                        continue
+                    if not previous:
+                        states[key] = snapshot
+                        changed = True
+                        continue
+                    emoji, color, headline = _social_platform_palette(platform)
+                    embed = EG(f"{emoji} {headline} - {platform}", f"Une nouvelle activité a été détectée sur **{platform}**.", color, guild.id)
+                    embed.add_field(name="Compte suivi", value=link, inline=False)
+                    if snapshot.get("title"):
+                        embed.add_field(name="Titre", value=snapshot["title"][:1024], inline=False)
+                    if snapshot.get("description"):
+                        embed.add_field(name="Description", value=snapshot["description"][:1024], inline=False)
+                    if snapshot.get("image"):
+                        try:
+                            embed.set_image(url=snapshot["image"])
+                        except Exception:
+                            pass
+                    try:
+                        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                    except Exception:
+                        continue
+                    states[key] = snapshot
+                    changed = True
+                if changed:
+                    cfg["social_relays_state"] = states
+                    set_cfg(guild.id, cfg)
+            await asyncio.sleep(600)
 
 #  PANEL MODALS
 # ════════════════════════════════════════════════
@@ -3216,12 +3506,20 @@ class VuePanelInsultes(discord.ui.View):
         e.add_field(name=f"Personnalises ({len(custom)})", value=cs, inline=False)
         await i.followup.send(embed=e, ephemeral=True)
 
+    @discord.ui.button(label="Activer/Desactiver", style=discord.ButtonStyle.success, row=0)
+    async def toggle(self, i: discord.Interaction, b):
+        cfg = get_cfg(i.guild.id)
+        cfg["insultes_enabled"] = not cfg.get("insultes_enabled", True)
+        set_cfg(i.guild.id, cfg)
+        await refresh_interaction_message(i, build_insultes_embed(i.guild), self)
+
     @discord.ui.button(label="Reinitialiser", style=discord.ButtonStyle.danger, row=0)
     async def reset(self, i: discord.Interaction, b):
         cfg = get_cfg(i.guild.id)
         cfg["insultes_custom"] = []
         cfg["roles_immunises"] = []
         cfg["membres_immunises"] = []
+        cfg["insultes_enabled"] = True
         set_cfg(i.guild.id, cfg)
         await refresh_interaction_message(i, build_insultes_embed(i.guild), self)
 
@@ -4388,7 +4686,7 @@ async def sync_guild_command_language(guild):
 
 @bot.event
 async def on_ready():
-    global _dashboard_recurring_task
+    global _dashboard_recurring_task, _dashboard_social_task
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher()]:
@@ -4402,6 +4700,8 @@ async def on_ready():
         print(f"Erreur API dashboard : {err}")
     if not _dashboard_recurring_task or _dashboard_recurring_task.done():
         _dashboard_recurring_task = asyncio.create_task(dashboard_recurring_loop())
+    if not _dashboard_social_task or _dashboard_social_task.done():
+        _dashboard_social_task = asyncio.create_task(dashboard_social_loop())
     try:
         synced = await bot.tree.sync()
         for guild in bot.guilds:
@@ -4493,7 +4793,7 @@ async def on_message(message):
 
         # Détection insultes
         insulte = detecter(message.content, gid)
-        if insulte and not est_immunise(message.author, gid):
+        if cfg.get("insultes_enabled", True) and insulte and not est_immunise(message.author, gid):
             if not await claim_message_by_delete(message):
                 return
             nb = add_avert(uid, gid, insulte)
@@ -4799,6 +5099,38 @@ async def cmd_panel(i: discord.Interaction):
     except Exception:
         pass
 
+@bot.tree.command(name="addticket", description="🎫 Ajouter un membre au ticket actuel")
+@app_commands.describe(membre="Le membre à ajouter au ticket")
+async def cmd_addticket(i: discord.Interaction, membre: discord.Member):
+    gid = str(i.guild.id)
+    if not isinstance(i.channel, discord.TextChannel):
+        return await i.response.send_message("Commande utilisable uniquement dans un ticket.", ephemeral=True)
+    all_data = load_tickets()
+    tickets = all_data.get("tickets", {})
+    tdata = tickets.get(str(i.channel.id))
+    if not tdata:
+        return await i.response.send_message("Ce salon n'est pas un ticket.", ephemeral=True)
+    claimed_by_id = str(tdata.get("claimed_by_id") or "")
+    allowed = i.user.guild_permissions.administrator or i.guild.owner_id == i.user.id or is_staff(i.user, i.guild.id)
+    if claimed_by_id:
+        allowed = allowed or claimed_by_id == str(i.user.id)
+    if not allowed and str(i.user.id) != str(tdata.get("user_id") or ""):
+        return await i.response.send_message("Tu n'as pas la permission d'ajouter un membre à ce ticket.", ephemeral=True)
+    try:
+        await i.channel.set_permissions(membre, read_messages=True, send_messages=True, attach_files=True, reason=f"addticket by {i.user}")
+    except Exception as ex:
+        return await i.response.send_message(f"❌ Impossible d'ajouter ce membre : {ex}", ephemeral=True)
+    added = tdata.get("added_users")
+    if not isinstance(added, list):
+        added = []
+    if str(membre.id) not in added:
+        added.append(str(membre.id))
+    tdata["added_users"] = added
+    tickets[str(i.channel.id)] = tdata
+    all_data["tickets"] = tickets
+    save_tickets(all_data)
+    await i.response.send_message(embed=EG("✅ Membre ajouté au ticket", f"{membre.mention} peut maintenant voir et écrire dans {i.channel.mention}.", 0x43B581, gid), ephemeral=True)
+
 @bot.tree.command(name="clear-message", description="Supprimer 1 a 100 messages du salon")
 @app_commands.describe(nombre="Nombre de messages a supprimer entre 1 et 100")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -5101,6 +5433,9 @@ async def cmd_aide(i: discord.Interaction):
         "`/clear-message` - supprimer 1 a 100 messages\n"
         "`/clear-all` - supprimer tous les messages du salon"
     ), inline=False)
+    e.add_field(name="🎫 Tickets", value=(
+        "`/addticket` - ajouter un membre au ticket actuel"
+    ), inline=False)
     e.add_field(name="🌍 Communautaire & outils", value=(
         "`/translate` - traduire par langue avec ID/lien optionnel\n"
         "`/suggest` - envoyer une suggestion\n"
@@ -5135,7 +5470,7 @@ async def cmd_info(i: discord.Interaction):
     e.add_field(name="📋 Commandes", value=(
         "`/panel` `/insultes` `/suggest` `/report` `/warn` `/ban` `/deban`\n"
         "`/annonce` `/massdm` `/translate` `/patchnotes`\n"
-        "`/clear-message` `/clear-all`\n"
+        "`/clear-message` `/clear-all` `/addticket`\n"
         "`/avert-count` `/ban-list` `/reset-avert` `/profilestats`\n"
         "`/serverstats` `/modstats` `/aide` `/info-bot`\n"
         "`!addroles` `!deleteroles` `!addchannel` `!deletechannel`"
