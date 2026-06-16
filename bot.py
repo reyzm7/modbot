@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json, os, re, asyncio, io, aiohttp, random, string, html, unicodedata, base64, hashlib
+import json, os, re, asyncio, io, aiohttp, random, string, html, unicodedata, base64, hashlib, sqlite3
 import secrets
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -208,6 +208,7 @@ F_DASHBOARD_SESSIONS = "dashboard_sessions.json"
 F_PREMIUM = "premium.json"
 F_BLACKLIST = "blacklist.json"
 F_DASHBOARD_LOGS = "dashboard_logs.json"
+F_DATABASE = os.environ.get("MODBOT_DATABASE", os.path.join(BASE_DIR, "modbot_dashboard.db"))
 LINK_RE = re.compile(
     r'(?:https?://[^\s<>()]+|www\.[^\s<>()]+|(?:canary\.|ptb\.)?discord(?:app)?\.com/invite/[A-Za-z0-9-]+|discord\.gg/[A-Za-z0-9-]+|discord\.me/[A-Za-z0-9-]+|dsc\.gg/[A-Za-z0-9-]+|invite\.gg/[A-Za-z0-9-]+)',
     re.I
@@ -241,6 +242,242 @@ def jload(f):
             return json.load(fp)
         except json.JSONDecodeError:
             return {}
+
+# ════════════════════════════════════════════════
+#  BASE DE DONNEES DASHBOARD / PREMIUM
+# ════════════════════════════════════════════════
+
+def db_connect():
+    conn = sqlite3.connect(F_DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def db_json(data):
+    try:
+        return json.dumps(data, ensure_ascii=False, default=str)
+    except Exception:
+        return "{}"
+
+def init_database():
+    try:
+        with db_connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS premium_subscriptions (
+                    member TEXT PRIMARY KEY,
+                    discord_id TEXT,
+                    username TEXT,
+                    plan TEXT NOT NULL DEFAULT 'free',
+                    duration TEXT,
+                    servers_limit INTEGER NOT NULL DEFAULT 1,
+                    payment TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_by TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    raw_json TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS premium_server_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_key TEXT,
+                    guild_id TEXT,
+                    guild_name TEXT,
+                    logo TEXT,
+                    plan TEXT,
+                    created_at TEXT NOT NULL,
+                    raw_json TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dashboard_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    guild_id TEXT,
+                    guild_name TEXT,
+                    actor TEXT,
+                    detail TEXT,
+                    payload_json TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS moderation_sanctions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    guild_id TEXT,
+                    guild_name TEXT,
+                    user_id TEXT,
+                    pseudo TEXT,
+                    reason TEXT,
+                    duration TEXT,
+                    sanction_type TEXT,
+                    source TEXT,
+                    moderator TEXT,
+                    raw_json TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_guild_date ON dashboard_events(guild_id, date)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sanctions_guild_date ON moderation_sanctions(guild_id, date)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_plan ON premium_subscriptions(plan, status)")
+    except Exception as ex:
+        print(f"Erreur init database ModBot: {ex}")
+
+def db_log_event(action, guild=None, actor=None, detail="", payload=None):
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO dashboard_events(date, action, guild_id, guild_name, actor, detail, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now().isoformat(),
+                    str(action or ""),
+                    str(getattr(guild, "id", "") or ""),
+                    getattr(guild, "name", "") or "",
+                    str(actor or ""),
+                    str(detail or ""),
+                    db_json(payload or {}),
+                ),
+            )
+    except Exception as ex:
+        print(f"Erreur log database ModBot: {ex}")
+
+def db_upsert_premium(member, item):
+    if not member:
+        return
+    data = item if isinstance(item, dict) else {}
+    timestamp = now().isoformat()
+    plan = normalize_premium_plan(data.get("plan") or data.get("premium_tier"))
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO premium_subscriptions(
+                    member, discord_id, username, plan, duration, servers_limit, payment, status,
+                    created_by, created_at, updated_at, raw_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(member) DO UPDATE SET
+                    discord_id=excluded.discord_id,
+                    username=excluded.username,
+                    plan=excluded.plan,
+                    duration=excluded.duration,
+                    servers_limit=excluded.servers_limit,
+                    payment=excluded.payment,
+                    status=excluded.status,
+                    created_by=excluded.created_by,
+                    updated_at=excluded.updated_at,
+                    raw_json=excluded.raw_json
+                """,
+                (
+                    str(member),
+                    str(data.get("discord_id") or data.get("user_id") or ""),
+                    str(data.get("username") or data.get("member") or member),
+                    plan,
+                    str(data.get("duration") or ""),
+                    int(data.get("servers_limit") or premium_limit_for_plan(plan)),
+                    str(data.get("payment") or ""),
+                    str(data.get("status") or "active"),
+                    str(data.get("created_by") or ""),
+                    str(data.get("created_at") or timestamp),
+                    timestamp,
+                    db_json(data),
+                ),
+            )
+    except Exception as ex:
+        print(f"Erreur premium database ModBot: {ex}")
+
+def db_insert_sanction(entry, guild=None):
+    if not isinstance(entry, dict):
+        return
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO moderation_sanctions(
+                    date, guild_id, guild_name, user_id, pseudo, reason, duration,
+                    sanction_type, source, moderator, raw_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(entry.get("date") or now().strftime("%Y-%m-%d %H:%M:%S")),
+                    str(entry.get("guild_id") or getattr(guild, "id", "") or ""),
+                    str(entry.get("guild_name") or getattr(guild, "name", "") or ""),
+                    str(entry.get("id") or entry.get("user_id") or ""),
+                    str(entry.get("pseudo") or entry.get("username") or ""),
+                    str(entry.get("raison") or entry.get("reason") or ""),
+                    str(entry.get("duration") or entry.get("duree") or ""),
+                    str(entry.get("type") or "ban"),
+                    str(entry.get("source") or "ModBot"),
+                    str(entry.get("moderator") or "ModBot"),
+                    db_json(entry),
+                ),
+            )
+    except Exception as ex:
+        print(f"Erreur sanction database ModBot: {ex}")
+
+def db_replace_premium_server_links(owner_key, servers, plan="free"):
+    if not owner_key or not isinstance(servers, list):
+        return
+    try:
+        with db_connect() as conn:
+            conn.execute("DELETE FROM premium_server_links WHERE owner_key = ?", (str(owner_key),))
+            for server in servers:
+                if not isinstance(server, dict):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO premium_server_links(owner_key, guild_id, guild_name, logo, plan, created_at, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(owner_key),
+                        str(server.get("id") or ""),
+                        str(server.get("name") or ""),
+                        str(server.get("logo") or ""),
+                        str(plan or "free"),
+                        now().isoformat(),
+                        db_json(server),
+                    ),
+                )
+    except Exception as ex:
+        print(f"Erreur premium server database ModBot: {ex}")
+
+def db_recent_events(limit=80):
+    try:
+        with db_connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM dashboard_events ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+    except Exception:
+        return []
+
+def db_all_premium():
+    try:
+        with db_connect() as conn:
+            rows = conn.execute("SELECT * FROM premium_subscriptions ORDER BY updated_at DESC").fetchall()
+        return {row["member"]: dict(row) for row in rows}
+    except Exception:
+        return {}
+
+def db_recent_sanctions(limit=80):
+    try:
+        with db_connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM moderation_sanctions ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+    except Exception:
+        return []
+
+init_database()
 
 # ════════════════════════════════════════════════
 #  CONFIG & EMBEDS PAR SERVEUR
@@ -1038,6 +1275,9 @@ def add_ban(gid, uid, pseudo, raison="Insultes répétées", duration="Permanent
     jsave(F_BANS, d)
     try:
         guild = bot.get_guild(int(g))
+        if guild:
+            entry["guild_name"] = guild.name
+        db_insert_sanction(entry, guild)
         dashboard_log("ban_recorded", guild, entry["moderator"], f"{entry['pseudo']} ({entry['id']}) - {entry['raison']}")
     except Exception:
         pass
@@ -2348,6 +2588,7 @@ def save_dashboard_sessions(data):
     jsave(F_DASHBOARD_SESSIONS, data)
 
 def dashboard_log(action, guild=None, actor=None, detail=""):
+    db_log_event(action, guild, actor, detail)
     data = jload(F_DASHBOARD_LOGS)
     if not isinstance(data, list):
         data = []
@@ -2473,13 +2714,37 @@ def normalize_reaction_role(guild, item):
     }
 
 def premium_for_identity(identity):
+    candidates = [
+        str(identity.get("user_id") or "").lower(),
+        str(identity.get("username") or "").lower(),
+    ]
+    try:
+        with db_connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM premium_subscriptions
+                WHERE lower(member) IN (?, ?) OR lower(discord_id) IN (?, ?) OR lower(username) IN (?, ?)
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                tuple(candidates + candidates + candidates),
+            ).fetchall()
+        if rows:
+            item = dict(rows[0])
+            plan = normalize_premium_plan(item.get("plan"))
+            return {
+                "plan": plan,
+                "servers_limit": int(item.get("servers_limit") or premium_limit_for_plan(plan)),
+                "duration": item.get("duration") or "",
+                "status": item.get("status") or "active",
+                "source": "database",
+            }
+    except Exception:
+        pass
+
     data = jload(F_PREMIUM)
     if not isinstance(data, dict):
         return {"plan": "free", "servers_limit": 1, "duration": "48 heures"}
-    candidates = {
-        str(identity.get("user_id") or "").lower(),
-        str(identity.get("username") or "").lower(),
-    }
     for key, item in data.items():
         if str(key).lower() in candidates or str(item.get("member") or "").lower() in candidates:
             plan = normalize_premium_plan(item.get("plan") or item.get("premium_tier"))
@@ -2487,8 +2752,17 @@ def premium_for_identity(identity):
                 "plan": plan,
                 "servers_limit": int(item.get("servers_limit") or premium_limit_for_plan(plan)),
                 "duration": item.get("duration") or "",
+                "source": "json",
             }
     return {"plan": "free", "servers_limit": 1, "duration": "48 heures"}
+
+def sync_premium_json_to_database():
+    data = jload(F_PREMIUM)
+    if not isinstance(data, dict):
+        return
+    for member, item in data.items():
+        if isinstance(item, dict):
+            db_upsert_premium(member, item)
 
 def user_can_manage_guild(user_guild):
     try:
@@ -2853,6 +3127,7 @@ async def apply_dashboard_config(guild, payload):
                 "initials": clean_short_text(server.get("initials"), "MB", 8),
             })
         cfg["premium_servers"] = cleaned_servers
+        db_replace_premium_server_links(payload.get("actor") or gid, cleaned_servers, cfg.get("premium_tier") or "free")
 
     set_cfg(gid, cfg)
     dashboard_log("config_update", guild, payload.get("actor", "dashboard"), "Configuration sauvegardee depuis le dashboard")
@@ -3087,9 +3362,22 @@ async def api_admin_stats(request):
         "installs": len(bot.guilds),
         "servers": len(bot.guilds),
         "guilds": [serialize_guild(g) for g in bot.guilds],
-        "premium": jload(F_PREMIUM),
+        "premium": db_all_premium() or jload(F_PREMIUM),
+        "premium_database": db_all_premium(),
         "blacklist": jload(F_BLACKLIST),
-        "logs": jload(F_DASHBOARD_LOGS)[:80],
+        "logs": db_recent_events(80) or jload(F_DASHBOARD_LOGS)[:80],
+        "events_database": db_recent_events(80),
+    })
+
+async def api_admin_database(request):
+    identity = await api_identity(request, admin_required=True)
+    db_log_event("database_view", None, identity.get("username"), "Consultation base dashboard")
+    return api_json({
+        "ok": True,
+        "database": F_DATABASE,
+        "premium": db_all_premium(),
+        "events": db_recent_events(120),
+        "sanctions": db_recent_sanctions(120),
     })
 
 async def api_admin_premium(request):
@@ -3112,6 +3400,7 @@ async def api_admin_premium(request):
         "payment": "ticket_required",
     }
     jsave(F_PREMIUM, data)
+    db_upsert_premium(member, data[member])
     dashboard_log("premium_grant", None, identity.get("username"), f"{member} -> {duration}")
     return api_json({"ok": True, "premium": data[member]})
 
@@ -3132,6 +3421,7 @@ async def start_dashboard_api():
     global _dashboard_api_runner
     if _dashboard_api_runner:
         return
+    sync_premium_json_to_database()
     app = web.Application(middlewares=[api_cors_middleware])
     app.router.add_route("*", "/api/health", api_health)
     app.router.add_get("/api/auth/discord/login", api_login)
@@ -3146,6 +3436,7 @@ async def start_dashboard_api():
     app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
     app.router.add_post("/api/guilds/{guild_id}/socials/test", api_test_social)
     app.router.add_get("/api/admin/stats", api_admin_stats)
+    app.router.add_get("/api/admin/database", api_admin_database)
     app.router.add_post("/api/admin/premium", api_admin_premium)
     app.router.add_post("/api/admin/blacklist", api_admin_blacklist)
     _dashboard_api_runner = web.AppRunner(app)
