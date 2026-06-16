@@ -873,7 +873,10 @@ def is_staff(member, gid):
 # ════════════════════════════════════════════════
 
 def get_custom(gid):
-    return get_cfg(gid).get("insultes_custom", [])
+    words = get_cfg(gid).get("insultes_custom", [])
+    if not isinstance(words, list):
+        return []
+    return [str(word).strip().lower() for word in words if str(word).strip()]
 
 def add_custom(gid, mot):
     cfg = get_cfg(gid)
@@ -987,19 +990,19 @@ def reset_avert(uid, gid):
 
 async def appliquer_sanction(member, nb, raison):
     """Sanction progressive : warn→mute4h→mute24h→ban"""
-    result = {"type": "warn", "success": True, "label": "⚠️ Avertissement"}
+    result = {"type": "warn", "success": True, "label": "⚠️ Avertissement", "duration": "Aucune"}
     try:
         if nb == 2:
             until = discord.utils.utcnow() + timedelta(hours=4)
             await member.timeout(until, reason=f"[ModBot] 2e avertissement — {raison}")
-            result.update({"type": "mute_4h", "label": "🔇 Mute 4 heures"})
+            result.update({"type": "mute_4h", "label": "🔇 Mute 4 heures", "duration": "4 heures"})
         elif nb == 3:
             until = discord.utils.utcnow() + timedelta(hours=24)
             await member.timeout(until, reason=f"[ModBot] 3e avertissement — {raison}")
-            result.update({"type": "mute_24h", "label": "🔇 Mute 24 heures"})
+            result.update({"type": "mute_24h", "label": "🔇 Mute 24 heures", "duration": "24 heures"})
         elif nb >= MAX_AVERT:
             await member.guild.ban(member, reason=f"[ModBot] {nb} avertissements", delete_message_days=0)
-            result.update({"type": "ban", "label": "🔨 Bannissement définitif"})
+            result.update({"type": "ban", "label": "🔨 Bannissement définitif", "duration": "Permanent"})
     except discord.Forbidden:
         result["success"] = False
     except Exception:
@@ -1010,14 +1013,90 @@ async def appliquer_sanction(member, nb, raison):
 #  BANS
 # ════════════════════════════════════════════════
 
-def add_ban(gid, uid, pseudo, raison="Insultes répétées"):
+def add_ban(gid, uid, pseudo, raison="Insultes répétées", duration="Permanent", source="ModBot", moderator=None):
     d = jload(F_BANS)
     g = str(gid)
     if g not in d:
         d[g] = []
-    d[g].append({"id": str(uid), "pseudo": pseudo, "raison": raison,
-                  "date": now().strftime("%Y-%m-%d %H:%M:%S")})
+    entry = {
+        "type": "ban",
+        "id": str(uid),
+        "user_id": str(uid),
+        "pseudo": str(pseudo or uid),
+        "username": str(pseudo or uid),
+        "raison": str(raison or "Aucune raison fournie"),
+        "reason": str(raison or "Aucune raison fournie"),
+        "duration": str(duration or "Permanent"),
+        "duree": str(duration or "Permanent"),
+        "date": now().strftime("%Y-%m-%d %H:%M:%S"),
+        "guild_id": g,
+        "server_id": g,
+        "source": str(source or "ModBot"),
+        "moderator": str(moderator or "ModBot"),
+    }
+    d[g].append(entry)
     jsave(F_BANS, d)
+    try:
+        guild = bot.get_guild(int(g))
+        dashboard_log("ban_recorded", guild, entry["moderator"], f"{entry['pseudo']} ({entry['id']}) - {entry['raison']}")
+    except Exception:
+        pass
+
+def normalize_filtered_word(word):
+    return unicodedata.normalize("NFKC", str(word or "").strip().lower())
+
+def dashboard_filtered_words(gid):
+    seen = set()
+    words = []
+    for word in INSULTES_BASE:
+        key = normalize_filtered_word(word)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        words.append({"word": word, "source": "default", "label": "par défaut"})
+    for word in get_custom(gid):
+        key = normalize_filtered_word(word)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        words.append({"word": word, "source": "custom", "label": "personnalisé"})
+    return words
+
+def dashboard_sanctions(guild, limit=100):
+    gid = str(getattr(guild, "id", guild))
+    data = jload(F_BANS)
+    items = data.get(gid, []) if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        return []
+    sanctions = []
+    guild_name = getattr(guild, "name", "") or ""
+    for item in reversed(items[-limit:]):
+        if not isinstance(item, dict):
+            continue
+        uid = str(item.get("id") or item.get("user_id") or "")
+        pseudo = str(item.get("pseudo") or item.get("username") or uid or "Utilisateur inconnu")
+        reason = str(item.get("raison") or item.get("reason") or "Aucune raison fournie")
+        duration = str(item.get("duration") or item.get("duree") or "Permanent")
+        date = str(item.get("date") or item.get("created_at") or "")
+        sanctions.append({
+            "type": str(item.get("type") or "ban"),
+            "pseudo": pseudo,
+            "username": pseudo,
+            "id": uid,
+            "user_id": uid,
+            "reason": reason,
+            "raison": reason,
+            "duration": duration,
+            "duree": duration,
+            "date": date,
+            "guild_id": gid,
+            "server_id": gid,
+            "guild_name": str(item.get("guild_name") or guild_name),
+            "server_name": str(item.get("server_name") or guild_name),
+            "source": str(item.get("source") or "ModBot"),
+            "moderator": str(item.get("moderator") or "ModBot"),
+        })
+    return sanctions
 
 # ════════════════════════════════════════════════
 #  TICKETS
@@ -2307,11 +2386,15 @@ def guild_initials(guild):
     return "".join(p[0].upper() for p in parts[:2]) or "MB"
 
 def serialize_guild(guild):
+    icon_asset = getattr(guild, "icon", None)
+    icon_hash = getattr(icon_asset, "key", None) if icon_asset else None
+    icon_url = oauth_guild_icon_url(guild.id, icon_hash)
     return {
         "id": str(guild.id),
         "name": guild.name,
-        "icon": guild.icon.url if guild.icon else "logo.png",
-        "logo": guild.icon.url if guild.icon else "logo.png",
+        "icon": icon_url,
+        "icon_hash": icon_hash or "",
+        "logo": icon_url,
         "banner": guild.banner.url if getattr(guild, "banner", None) else None,
         "initials": guild_initials(guild),
         "member_count": guild.member_count,
@@ -2414,9 +2497,23 @@ def user_can_manage_guild(user_guild):
         perms = 0
     return bool(user_guild.get("owner") or (perms & 0x8) or (perms & 0x20))
 
+def identity_can_manage_guild(identity, gid):
+    gid = str(gid)
+    if identity.get("admin"):
+        return True
+    if gid in {str(item) for item in identity.get("guild_ids", [])}:
+        return True
+    manageable = identity.get("manageable_guilds") or []
+    if not isinstance(manageable, list):
+        return False
+    for item in manageable:
+        if isinstance(item, dict) and str(item.get("id") or "") == gid and item.get("can_manage"):
+            return True
+    return False
+
 def oauth_guild_icon_url(gid, icon_hash):
     if not gid or not icon_hash:
-        return "logo.png"
+        return "assets/default_logo.png"
     ext = "gif" if str(icon_hash).startswith("a_") else "png"
     return f"https://cdn.discordapp.com/icons/{gid}/{icon_hash}.{ext}?size=128"
 
@@ -2429,6 +2526,7 @@ def serialize_oauth_guild(item, installed=False):
         "id": gid,
         "name": name,
         "icon": icon_url,
+        "icon_hash": str(item.get("icon") or ""),
         "logo": icon_url,
         "banner": None,
         "initials": initials,
@@ -2493,8 +2591,10 @@ async def api_guild_from_request(request, identity=None):
     identity = identity or await api_identity(request)
     gid = str(request.match_info.get("guild_id"))
     if gid not in {str(g.id) for g in bot.guilds}:
+        print(f"Dashboard API guild introuvable: guild_id={gid}")
         raise web.HTTPNotFound(text="Serveur introuvable pour ce bot.")
-    if not identity.get("admin") and gid not in set(identity.get("guild_ids", [])):
+    if not identity_can_manage_guild(identity, gid):
+        print(f"Dashboard API acces refuse: user={identity.get('user_id')} guild_id={gid}")
         raise web.HTTPForbidden(text="Tu n'as pas acces a ce serveur.")
     guild = bot.get_guild(int(gid))
     if not guild:
@@ -2570,6 +2670,9 @@ def serialize_dashboard_config(guild):
     tickets_data = load_tickets().get("tickets", {})
     guild_ticket_count = sum(1 for channel_id in tickets_data if guild.get_channel(parse_int(channel_id) or 0))
     premium_plan = normalize_premium_plan(cfg.get("premium_tier") or cfg.get("premium_plan"))
+    custom_words = get_custom(gid)
+    filtered_words = dashboard_filtered_words(gid)
+    sanctions = dashboard_sanctions(guild)
     return {
         "guild": serialize_guild(guild),
         "channels": {
@@ -2595,7 +2698,17 @@ def serialize_dashboard_config(guild):
             "antiraid": bool(cfg.get("antiraid")),
             "staff_alert": bool(cfg.get("staff_alert_enabled")),
             "lockdown": bool(cfg.get("lockdown")),
-            "custom_words": get_custom(gid),
+            "default_words": INSULTES_BASE,
+            "custom_words": custom_words,
+            "filtered_words": filtered_words,
+        },
+        "moderation": {
+            "default_words": INSULTES_BASE,
+            "custom_words": custom_words,
+            "filtered_words": filtered_words,
+            "sanctions": sanctions,
+            "bans": sanctions,
+            "max_warnings": MAX_AVERT,
         },
         "personalization": {
             "footer": cfg.get("embed_footer") or f"{get_bot_display_name(gid, guild)} - Protection de votre communaute",
@@ -2751,6 +2864,7 @@ async def api_health(request):
 async def api_login(request):
     redirect = request.query.get("redirect") or DASHBOARD_SITE_URL
     if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URI):
+        print("OAuth Discord non configure: CLIENT_ID/SECRET/REDIRECT_URI incomplet")
         raise web.HTTPFound(f"{redirect}#login_error=oauth_not_configured")
     state = secrets.token_urlsafe(24)
     _oauth_states[state] = redirect
@@ -2762,6 +2876,7 @@ async def api_login(request):
         "state": state,
     }
     query = urllib.parse.urlencode(params)
+    print(f"OAuth Discord login demarre: redirect={redirect}")
     raise web.HTTPFound(f"https://discord.com/api/oauth2/authorize?{query}")
 
 async def api_oauth_callback(request):
@@ -2779,6 +2894,8 @@ async def api_oauth_callback(request):
             "redirect_uri": DISCORD_REDIRECT_URI,
         }, headers={"Content-Type": "application/x-www-form-urlencoded"}) as response:
             if response.status >= 400:
+                body = await response.text()
+                print(f"OAuth Discord token refuse: status={response.status} body={body[:250]}")
                 raise web.HTTPFound(f"{redirect}#login_error=oauth_token")
             token_data = await response.json()
         bearer = token_data.get("access_token")
@@ -2788,6 +2905,8 @@ async def api_oauth_callback(request):
         async with session.get("https://discord.com/api/users/@me/guilds", headers=headers) as response:
             user_guilds = await response.json()
     session_token = make_session(user, user_guilds if isinstance(user_guilds, list) else [])
+    guild_count = len(user_guilds) if isinstance(user_guilds, list) else 0
+    print(f"OAuth Discord session creee: user={user.get('id')} guilds={guild_count}")
     raise web.HTTPFound(f"{redirect}#session={session_token}")
 
 async def api_me(request):
@@ -2812,7 +2931,7 @@ async def api_guilds(request):
                 if not gid or gid in seen:
                     continue
                 seen.add(gid)
-                if gid in live_guilds and gid in allowed:
+                if gid in live_guilds and identity_can_manage_guild(identity, gid):
                     merged = {**item, **live_guilds[gid], "installed": True, "can_manage": True}
                 else:
                     merged = {**item, "installed": False, "can_manage": True}
@@ -2820,6 +2939,7 @@ async def api_guilds(request):
         for gid in allowed:
             if gid in live_guilds and gid not in seen:
                 guilds.append(live_guilds[gid])
+    print(f"Dashboard guilds: user={identity.get('user_id')} returned={len(guilds)} installed={len(bot.guilds)}")
     return api_json({"ok": True, "guilds": guilds, "user": identity, "premium": premium_for_identity(identity)})
 
 async def api_guild_resources(request):
@@ -2842,6 +2962,11 @@ async def api_get_guild_config(request):
     identity = await api_identity(request)
     guild = await api_guild_from_request(request, identity)
     return api_json({"ok": True, "config": serialize_dashboard_config(guild)})
+
+async def api_get_guild_sanctions(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    return api_json({"ok": True, "guild": serialize_guild(guild), "sanctions": dashboard_sanctions(guild)})
 
 async def api_save_guild_config(request):
     identity = await api_identity(request)
@@ -3015,6 +3140,7 @@ async def start_dashboard_api():
     app.router.add_get("/api/guilds", api_guilds)
     app.router.add_get("/api/guilds/{guild_id}/resources", api_guild_resources)
     app.router.add_get("/api/guilds/{guild_id}/config", api_get_guild_config)
+    app.router.add_get("/api/guilds/{guild_id}/sanctions", api_get_guild_sanctions)
     app.router.add_put("/api/guilds/{guild_id}/config", api_save_guild_config)
     app.router.add_post("/api/guilds/{guild_id}/tickets/publish", api_publish_ticket)
     app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
@@ -4400,7 +4526,15 @@ class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
         track_mod(str(i.user.id), gid, "warns")
 
         if nb >= MAX_AVERT:
-            add_ban(gid, str(self.membre.id), str(self.membre))
+            add_ban(
+                gid,
+                str(self.membre.id),
+                str(self.membre),
+                f"{MAX_AVERT} avertissements - {self.raison.value}",
+                sanction.get("duration", "Permanent"),
+                "manual_warn_threshold",
+                i.user,
+            )
             try:
                 dm_ban = EG("🔨 Tu as été banni", couleur=0xED4245, gid=gid)
                 dm_ban.description = (f"Tu as atteint **{MAX_AVERT} avertissements** sur **{i.guild.name}**.\n\n"
@@ -5001,7 +5135,15 @@ async def on_message(message):
                 try:
                     if sanction.get("type") != "ban" or not sanction.get("success"):
                         await message.guild.ban(message.author, reason="[ModBot] 4 avertissements", delete_message_days=0)
-                    add_ban(gid, uid, str(message.author))
+                    add_ban(
+                        gid,
+                        uid,
+                        str(message.author),
+                        f"Insultes répétées - dernier mot: {insulte}",
+                        sanction.get("duration", "Permanent"),
+                        "auto_filter",
+                        "ModBot",
+                    )
                     reset_avert(uid, gid)
                 except Exception:
                     pass
@@ -5363,7 +5505,7 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member, raison: str = 
     except Exception:
         pass
     await i.guild.ban(membre, reason=f"[Manuel] {raison}", delete_message_days=0)
-    add_ban(gid, str(membre.id), str(membre), raison)
+    add_ban(gid, str(membre.id), str(membre), raison, "Permanent", "manual_ban", i.user)
     e = E("🔨 Membre banni", couleur=0xED4245)
     e.set_thumbnail(url=membre.display_avatar.url)
     e.add_field(name="👤 Membre", value=str(membre), inline=True)
