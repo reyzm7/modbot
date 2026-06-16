@@ -6,6 +6,12 @@ import secrets
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 from aiohttp import web
+try:
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+    PIL_AVAILABLE = True
+except Exception:
+    Image = ImageDraw = ImageFont = ImageOps = None
+    PIL_AVAILABLE = False
 
 # ════════════════════════════════════════════════
 #  CONFIGURATION
@@ -1611,6 +1617,10 @@ class VueTicket(discord.ui.View):
         deny_roles = set(get_staff_roles(gid))
         if support_role:
             deny_roles.add(str(support_role.id))
+        try:
+            await channel.set_permissions(guild.default_role, read_messages=False, send_messages=False, attach_files=False)
+        except Exception:
+            pass
         for role in list(guild.roles):
             try:
                 if str(role.id) in deny_roles or (role.permissions.manage_channels and not role.permissions.administrator):
@@ -2234,7 +2244,14 @@ async def api_cors_middleware(request, handler):
     try:
         response = await handler(request)
     except web.HTTPException as ex:
-        response = ex
+        if 300 <= ex.status < 400:
+            response = ex
+        else:
+            message = (ex.text or ex.reason or "Erreur API ModBot").strip()
+            response = api_json({"ok": False, "error": message, "status": ex.status}, status=ex.status)
+    except Exception as ex:
+        print(f"Erreur API dashboard: {ex}")
+        response = api_json({"ok": False, "error": "Erreur interne API ModBot", "status": 500}, status=500)
     if isinstance(response, web.StreamResponse):
         response.headers["Access-Control-Allow-Origin"] = DASHBOARD_ALLOWED_ORIGINS
         response.headers["Access-Control-Allow-Headers"] = "Authorization, X-ModBot-Api-Token, Content-Type"
@@ -2890,17 +2907,35 @@ async def api_test_social(request):
     channel = guild.get_channel(channel_id) if channel_id else None
     if not channel:
         raise web.HTTPNotFound(text="Salon reseau introuvable.")
+    perms = channel.permissions_for(guild.me)
+    if not perms.view_channel or not perms.send_messages:
+        raise web.HTTPForbidden(text="ModBot ne peut pas ecrire dans ce salon.")
     platform = clean_short_text(payload.get("platform"), "Reseau", 40)
     link = clean_short_text(payload.get("link"), "", 500)
     emoji, color, headline = _social_platform_palette(platform)
-    embed = EG(f"{emoji} Test relais {platform}", f"{headline} detectee : le relais est bien connecte au salon choisi.", color, guild.id)
+    account = link.rstrip("/").split("/")[-1].replace("@", "") if link else "Compte suivi"
+    if "twitch" in platform.lower():
+        title = f"{account} est en stream"
+        description = f"**{account}** est maintenant en live."
+        button_label = "Watch Stream"
+    elif "tiktok" in platform.lower():
+        title = f"Nouvelle vidéo TikTok détectée"
+        description = f"Une activité TikTok vient d'être détectée pour **{account}**."
+        button_label = "Voir TikTok"
+    else:
+        title = f"{headline} détectée"
+        description = f"Une nouvelle activité vient d'être détectée pour **{account}**."
+        button_label = "Ouvrir"
+    embed = EG(f"{emoji} {title}", description, color, guild.id)
     if link:
         embed.add_field(name="Compte suivi", value=link, inline=False)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
                 snapshot = await fetch_social_snapshot(session, link)
             if snapshot and snapshot.get("title"):
-                embed.add_field(name="Apercu", value=snapshot["title"][:1024], inline=False)
+                embed.add_field(name="Aperçu", value=snapshot["title"][:1024], inline=False)
+            if snapshot and snapshot.get("description"):
+                embed.add_field(name="Description", value=snapshot["description"][:1024], inline=False)
             if snapshot and snapshot.get("image"):
                 embed.set_image(url=snapshot["image"])
         except Exception:
@@ -2908,7 +2943,7 @@ async def api_test_social(request):
     view = None
     if link:
         view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Ouvrir le compte", url=link))
+        view.add_item(discord.ui.Button(label=button_label, url=link))
     await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
     dashboard_log("social_test", guild, identity.get("username"), f"{platform} -> #{channel.name}")
     return api_json({"ok": True, "channel_id": str(channel.id)})
@@ -3148,8 +3183,10 @@ async def dashboard_social_loop():
                             embed.set_image(url=snapshot["image"])
                         except Exception:
                             pass
+                    view = discord.ui.View()
+                    view.add_item(discord.ui.Button(label="Ouvrir" if "twitch" not in platform.lower() else "Watch Stream", url=snapshot.get("url") or link))
                     try:
-                        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                        await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
                     except Exception:
                         continue
                     states[key] = snapshot
@@ -4476,6 +4513,134 @@ def render_member_template(template, member):
         text = text.replace(key, value)
     return text
 
+def _welcome_rgb(value, fallback=0xFFFFFF):
+    color = parse_color(value, fallback)
+    return ((color >> 16) & 255, (color >> 8) & 255, color & 255)
+
+def _welcome_font(name, size, bold=False):
+    if not PIL_AVAILABLE:
+        return None
+    name = str(name or "Inter").lower()
+    candidates = []
+    if os.name == "nt":
+        win = os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts")
+        if "impact" in name:
+            candidates.append(os.path.join(win, "impact.ttf"))
+        if "courier" in name:
+            candidates.append(os.path.join(win, "courbd.ttf" if bold else "cour.ttf"))
+        if "georgia" in name:
+            candidates.append(os.path.join(win, "georgiab.ttf" if bold else "georgia.ttf"))
+        if "verdana" in name:
+            candidates.append(os.path.join(win, "verdanab.ttf" if bold else "verdana.ttf"))
+        candidates.append(os.path.join(win, "arialbd.ttf" if bold else "arial.ttf"))
+    candidates.extend([
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ])
+    for path in candidates:
+        try:
+            if path and os.path.exists(path):
+                return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+async def _load_image_bytes(value):
+    value = str(value or "").strip()
+    if not value:
+        return None
+    if value.startswith(("http://", "https://")):
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(value, headers={"User-Agent": "ModBot/1.0"}) as response:
+                    if response.status >= 400:
+                        return None
+                    return await response.read()
+        except Exception:
+            return None
+    path = value.replace("\\", "/").lstrip("/")
+    local_path = os.path.join(BASE_DIR, path)
+    if os.path.exists(local_path):
+        try:
+            with open(local_path, "rb") as handle:
+                return handle.read()
+        except Exception:
+            return None
+    return None
+
+def _center_text(draw, box, text, font, fill, stroke_width=0, stroke_fill=(0, 0, 0)):
+    if not font:
+        return
+    x1, y1, x2, y2 = box
+    text = str(text or "")
+    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    x = x1 + max(0, (x2 - x1 - width) // 2)
+    y = y1 + max(0, (y2 - y1 - height) // 2)
+    draw.text((x, y), text, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=stroke_fill)
+
+async def build_member_event_card(member, system, departure=False):
+    if not PIL_AVAILABLE:
+        return None
+    width, height = 1000, 360
+    background_bytes = await _load_image_bytes(system.get("background") or "assets/default_banner.png")
+    try:
+        if background_bytes:
+            base = Image.open(io.BytesIO(background_bytes)).convert("RGB")
+            base = ImageOps.fit(base, (width, height), method=Image.Resampling.LANCZOS)
+        else:
+            base = Image.new("RGB", (width, height), (30, 44, 138))
+    except Exception:
+        base = Image.new("RGB", (width, height), (30, 44, 138))
+
+    overlay = Image.new("RGBA", (width, height), (14, 18, 56, 95 if not departure else 120))
+    base = Image.alpha_composite(base.convert("RGBA"), overlay)
+    draw = ImageDraw.Draw(base)
+
+    avatar_size = 132
+    avatar_x = (width - avatar_size) // 2
+    avatar_y = 38
+    avatar_bytes = None
+    try:
+        avatar_bytes = await _load_image_bytes(str(member.display_avatar.with_size(256).url))
+    except Exception:
+        avatar_bytes = None
+    if avatar_bytes:
+        try:
+            avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+            avatar = ImageOps.fit(avatar, (avatar_size, avatar_size), method=Image.Resampling.LANCZOS)
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
+            ring = Image.new("RGBA", (avatar_size + 12, avatar_size + 12), (0, 0, 0, 0))
+            ring_draw = ImageDraw.Draw(ring)
+            ring_draw.ellipse((0, 0, avatar_size + 11, avatar_size + 11), fill=(255, 255, 255, 240))
+            base.alpha_composite(ring, (avatar_x - 6, avatar_y - 6))
+            base.paste(avatar, (avatar_x, avatar_y), mask)
+        except Exception:
+            draw.ellipse((avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size), fill=(125, 154, 255), outline=(255, 255, 255), width=5)
+    else:
+        draw.ellipse((avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size), fill=(125, 154, 255), outline=(255, 255, 255), width=5)
+
+    font_name = system.get("font") or "Inter"
+    title_font = _welcome_font(font_name, 64, bold=True)
+    name_font = _welcome_font(font_name, 32, bold=True)
+    title_color = _welcome_rgb(system.get("color"), 0xFFFFFF)
+    title = "AU REVOIR" if departure else "BIENVENUE"
+    name = member.display_name.upper()[:32]
+    _center_text(draw, (80, 188, width - 80, 268), title, title_font, title_color, stroke_width=3, stroke_fill=(0, 0, 0))
+    _center_text(draw, (80, 258, width - 80, 315), name, name_font, (255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0))
+
+    output = io.BytesIO()
+    base.convert("RGB").save(output, format="PNG", optimize=True)
+    output.seek(0)
+    filename = f"{'departure' if departure else 'welcome'}-{member.guild.id}-{member.id}.png"
+    return discord.File(output, filename=filename)
+
 async def send_dashboard_member_event(member, departure=False):
     cfg = get_cfg(member.guild.id)
     system = cfg.get("welcome_system") or {}
@@ -4507,11 +4672,22 @@ async def send_dashboard_member_event(member, departure=False):
     title = "👋 Départ" if departure else "👋 Bienvenue"
     embed = EG(title, content, 0xED4245 if departure else 0x5865F2, member.guild.id)
     embed.set_thumbnail(url=member.display_avatar.url)
-    background = system.get("background")
-    if background:
-        embed.set_image(url=background)
+    card_file = await build_member_event_card(member, system, departure)
+    if card_file:
+        embed.set_image(url=f"attachment://{card_file.filename}")
+    else:
+        background = system.get("background")
+        if background:
+            embed.set_image(url=background)
     try:
-        await channel.send(content=content, embed=embed, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+        kwargs = {
+            "content": content,
+            "embed": embed,
+            "allowed_mentions": discord.AllowedMentions(users=True, roles=False, everyone=False),
+        }
+        if card_file:
+            kwargs["file"] = card_file
+        await channel.send(**kwargs)
         dashboard_log("member_departure" if departure else "member_welcome", member.guild, member, content)
     except Exception:
         pass
@@ -4823,7 +4999,8 @@ async def on_message(message):
                 except Exception:
                     pass
                 try:
-                    await message.guild.ban(message.author, reason="[ModBot] 4 avertissements", delete_message_days=0)
+                    if sanction.get("type") != "ban" or not sanction.get("success"):
+                        await message.guild.ban(message.author, reason="[ModBot] 4 avertissements", delete_message_days=0)
                     add_ban(gid, uid, str(message.author))
                     reset_avert(uid, gid)
                 except Exception:
