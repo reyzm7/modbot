@@ -3167,7 +3167,7 @@ async def api_login(request):
     }
     query = urllib.parse.urlencode(params)
     print(f"OAuth Discord login demarre: redirect={redirect}")
-    raise web.HTTPFound(f"https://discord.com/api/oauth2/authorize?{query}")
+    raise web.HTTPFound(f"https://discord.com/oauth2/authorize?{query}")
 
 async def api_oauth_callback(request):
     code = request.query.get("code")
