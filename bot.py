@@ -209,6 +209,7 @@ F_PREMIUM = "premium.json"
 F_BLACKLIST = "blacklist.json"
 F_DASHBOARD_LOGS = "dashboard_logs.json"
 F_DATABASE = os.environ.get("MODBOT_DATABASE", os.path.join(BASE_DIR, "modbot_dashboard.db"))
+UNLIMITED_PREMIUM_SERVERS = 999999
 LINK_RE = re.compile(
     r'(?:https?://[^\s<>()]+|www\.[^\s<>()]+|(?:canary\.|ptb\.)?discord(?:app)?\.com/invite/[A-Za-z0-9-]+|discord\.gg/[A-Za-z0-9-]+|discord\.me/[A-Za-z0-9-]+|dsc\.gg/[A-Za-z0-9-]+|invite\.gg/[A-Za-z0-9-]+)',
     re.I
@@ -269,7 +270,7 @@ def init_database():
                     username TEXT,
                     plan TEXT NOT NULL DEFAULT 'free',
                     duration TEXT,
-                    servers_limit INTEGER NOT NULL DEFAULT 1,
+                    servers_limit INTEGER NOT NULL DEFAULT 999999,
                     payment TEXT,
                     status TEXT NOT NULL DEFAULT 'active',
                     created_by TEXT,
@@ -321,6 +322,10 @@ def init_database():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_guild_date ON dashboard_events(guild_id, date)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sanctions_guild_date ON moderation_sanctions(guild_id, date)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_plan ON premium_subscriptions(plan, status)")
+            conn.execute(
+                "UPDATE premium_subscriptions SET servers_limit = ? WHERE servers_limit < ?",
+                (UNLIMITED_PREMIUM_SERVERS, UNLIMITED_PREMIUM_SERVERS),
+            )
     except Exception as ex:
         print(f"Erreur init database ModBot: {ex}")
 
@@ -378,7 +383,7 @@ def db_upsert_premium(member, item):
                     str(data.get("username") or data.get("member") or member),
                     plan,
                     str(data.get("duration") or ""),
-                    int(data.get("servers_limit") or premium_limit_for_plan(plan)),
+                    int(premium_limit_for_plan(plan)),
                     str(data.get("payment") or ""),
                     str(data.get("status") or "active"),
                     str(data.get("created_by") or ""),
@@ -2629,14 +2634,18 @@ def guild_initials(guild):
 def serialize_guild(guild):
     icon_asset = getattr(guild, "icon", None)
     icon_hash = getattr(icon_asset, "key", None) if icon_asset else None
+    banner_asset = getattr(guild, "banner", None)
+    banner_hash = getattr(banner_asset, "key", None) if banner_asset else None
     icon_url = oauth_guild_icon_url(guild.id, icon_hash)
+    banner_url = oauth_guild_banner_url(guild.id, banner_hash)
     return {
         "id": str(guild.id),
         "name": guild.name,
         "icon": icon_url,
         "icon_hash": icon_hash or "",
         "logo": icon_url,
-        "banner": guild.banner.url if getattr(guild, "banner", None) else None,
+        "banner": banner_url,
+        "banner_hash": banner_hash or "",
         "initials": guild_initials(guild),
         "member_count": guild.member_count,
         "owner_id": str(guild.owner_id) if guild.owner_id else None,
@@ -2670,12 +2679,7 @@ def dashboard_guild_logs(guild_id, limit=40):
     return [entry for entry in logs if str(entry.get("guild_id") or "") == gid][:limit]
 
 def premium_limit_for_plan(plan):
-    return {
-        "free": 1,
-        "partner": 1,
-        "premium": 3,
-        "ultra": 5,
-    }.get(str(plan or "free"), 1)
+    return UNLIMITED_PREMIUM_SERVERS
 
 def normalize_premium_plan(value):
     text = str(value or "free").strip().lower()
@@ -2734,7 +2738,8 @@ def premium_for_identity(identity):
             plan = normalize_premium_plan(item.get("plan"))
             return {
                 "plan": plan,
-                "servers_limit": int(item.get("servers_limit") or premium_limit_for_plan(plan)),
+                "servers_limit": premium_limit_for_plan(plan),
+                "premium_unlimited": True,
                 "duration": item.get("duration") or "",
                 "status": item.get("status") or "active",
                 "source": "database",
@@ -2744,17 +2749,18 @@ def premium_for_identity(identity):
 
     data = jload(F_PREMIUM)
     if not isinstance(data, dict):
-        return {"plan": "free", "servers_limit": 1, "duration": "48 heures"}
+        return {"plan": "free", "servers_limit": premium_limit_for_plan("free"), "premium_unlimited": True, "duration": "48 heures"}
     for key, item in data.items():
         if str(key).lower() in candidates or str(item.get("member") or "").lower() in candidates:
             plan = normalize_premium_plan(item.get("plan") or item.get("premium_tier"))
             return {
                 "plan": plan,
-                "servers_limit": int(item.get("servers_limit") or premium_limit_for_plan(plan)),
+                "servers_limit": premium_limit_for_plan(plan),
+                "premium_unlimited": True,
                 "duration": item.get("duration") or "",
                 "source": "json",
             }
-    return {"plan": "free", "servers_limit": 1, "duration": "48 heures"}
+    return {"plan": "free", "servers_limit": premium_limit_for_plan("free"), "premium_unlimited": True, "duration": "48 heures"}
 
 def sync_premium_json_to_database():
     data = jload(F_PREMIUM)
@@ -2791,18 +2797,26 @@ def oauth_guild_icon_url(gid, icon_hash):
     ext = "gif" if str(icon_hash).startswith("a_") else "png"
     return f"https://cdn.discordapp.com/icons/{gid}/{icon_hash}.{ext}?size=128"
 
+def oauth_guild_banner_url(gid, banner_hash):
+    if not gid or not banner_hash:
+        return "assets/default_banner.png"
+    ext = "gif" if str(banner_hash).startswith("a_") else "png"
+    return f"https://cdn.discordapp.com/banners/{gid}/{banner_hash}.{ext}?size=320"
+
 def serialize_oauth_guild(item, installed=False):
     gid = str(item.get("id") or "")
     name = item.get("name") or "Serveur Discord"
     initials = "".join(part[0].upper() for part in re.split(r"\s+", name) if part)[:3] or "MB"
     icon_url = oauth_guild_icon_url(gid, item.get("icon"))
+    banner_url = oauth_guild_banner_url(gid, item.get("banner"))
     return {
         "id": gid,
         "name": name,
         "icon": icon_url,
         "icon_hash": str(item.get("icon") or ""),
         "logo": icon_url,
-        "banner": None,
+        "banner": banner_url,
+        "banner_hash": str(item.get("banner") or ""),
         "initials": initials,
         "member_count": None,
         "owner_id": None,
@@ -3010,6 +3024,7 @@ def serialize_dashboard_config(guild):
         "social_relays": cfg.get("social_relays", []),
         "premium_tier": premium_plan,
         "premium_limit": premium_limit_for_plan(premium_plan),
+        "premium_unlimited": True,
         "premium_servers": cfg.get("premium_servers", []),
         "ratings": {
             "average": round(float(rating_stats.get("avg", 0)), 2),
@@ -3112,12 +3127,12 @@ async def apply_dashboard_config(guild, payload):
     if "premium_tier" in payload or "premium_plan" in payload:
         cfg["premium_tier"] = normalize_premium_plan(payload.get("premium_tier") or payload.get("premium_plan"))
         cfg["premium_limit"] = premium_limit_for_plan(cfg["premium_tier"])
+        cfg["premium_unlimited"] = True
 
     premium_servers = payload.get("premium_servers")
     if isinstance(premium_servers, list):
-        premium_limit = int(cfg.get("premium_limit") or premium_limit_for_plan(cfg.get("premium_tier")))
         cleaned_servers = []
-        for server in premium_servers[:premium_limit]:
+        for server in premium_servers:
             if not isinstance(server, dict):
                 continue
             cleaned_servers.append({
@@ -3157,7 +3172,10 @@ async def api_login(request):
 async def api_oauth_callback(request):
     code = request.query.get("code")
     state = request.query.get("state")
+    state_known = state in _oauth_states
     redirect = _oauth_states.pop(state, DASHBOARD_SITE_URL)
+    if state and not state_known:
+        print(f"OAuth Discord state inconnu ou expire: state={state[:8]}...")
     if not code:
         raise web.HTTPFound(f"{redirect}#login_error=missing_code")
     async with aiohttp.ClientSession() as session:
@@ -3176,8 +3194,16 @@ async def api_oauth_callback(request):
         bearer = token_data.get("access_token")
         headers = {"Authorization": f"Bearer {bearer}"}
         async with session.get("https://discord.com/api/users/@me", headers=headers) as response:
+            if response.status >= 400:
+                body = await response.text()
+                print(f"OAuth Discord user refuse: status={response.status} body={body[:250]}")
+                raise web.HTTPFound(f"{redirect}#login_error=oauth_user")
             user = await response.json()
         async with session.get("https://discord.com/api/users/@me/guilds", headers=headers) as response:
+            if response.status >= 400:
+                body = await response.text()
+                print(f"OAuth Discord guilds refuse: status={response.status} body={body[:250]}")
+                raise web.HTTPFound(f"{redirect}#login_error=oauth_guilds")
             user_guilds = await response.json()
     session_token = make_session(user, user_guilds if isinstance(user_guilds, list) else [])
     guild_count = len(user_guilds) if isinstance(user_guilds, list) else 0
@@ -3387,7 +3413,7 @@ async def api_admin_premium(request):
     member = clean_short_text(payload.get("member"), "", 80)
     duration = clean_short_text(payload.get("duration"), "2 mois", 40)
     plan = normalize_premium_plan(payload.get("plan") or payload.get("premium_tier"))
-    servers_limit = max(1, min(5, int(parse_int(payload.get("servers_limit")) or premium_limit_for_plan(plan))))
+    servers_limit = premium_limit_for_plan(plan)
     if not member:
         raise web.HTTPBadRequest(text="Membre manquant.")
     data[member] = {
@@ -3395,6 +3421,7 @@ async def api_admin_premium(request):
         "duration": duration,
         "plan": plan,
         "servers_limit": servers_limit,
+        "premium_unlimited": True,
         "created_at": now().isoformat(),
         "created_by": identity.get("user_id"),
         "payment": "ticket_required",
