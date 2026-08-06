@@ -3307,7 +3307,57 @@ def serialize_oauth_guild(item, installed=False):
         "permissions": str(item.get("permissions") or "0"),
     }
 
-def make_session(user, user_guilds):
+# Cache court des serveurs Discord par utilisateur : evite d'interroger
+# l'API Discord a chaque clic tout en gardant des permissions fraiches.
+_guilds_cache = {}
+GUILDS_CACHE_SECONDS = 60
+
+async def fetch_user_guilds_live(identity):
+    """
+    Redemande a Discord la liste reelle des serveurs de l'utilisateur.
+
+    C'est la seule source fiable : les permissions memorisees a la connexion
+    deviennent fausses des qu'un role change, et laissaient apparaitre des
+    serveurs auxquels l'utilisateur n'a plus droit.
+
+    Retourne None si l'appel echoue (jeton expire, Discord indisponible) :
+    l'appelant retombe alors sur les donnees de session.
+    """
+    token = identity.get("access_token")
+    if not token:
+        return None
+
+    cle = str(identity.get("user_id") or "")
+    entree = _guilds_cache.get(cle)
+    if entree and time.monotonic() - entree["ts"] < GUILDS_CACHE_SECONDS:
+        return entree["guilds"]
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                "https://discord.com/api/users/@me/guilds",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as response:
+                if response.status == 401:
+                    print(f"Jeton Discord expire pour {cle} : permissions de session utilisees")
+                    return None
+                if response.status >= 400:
+                    return None
+                donnees = await response.json()
+    except Exception as ex:
+        print(f"Rafraichissement des serveurs impossible: {type(ex).__name__}: {ex}")
+        return None
+
+    if not isinstance(donnees, list):
+        return None
+    _guilds_cache[cle] = {"ts": time.monotonic(), "guilds": donnees}
+    if len(_guilds_cache) > 500:  # garde-fou memoire
+        for vieille in sorted(_guilds_cache, key=lambda k: _guilds_cache[k]["ts"])[:250]:
+            _guilds_cache.pop(vieille, None)
+    return donnees
+
+def make_session(user, user_guilds, access_token=""):
     allowed = []
     manageable_guilds = []
     bot_guild_ids = {str(g.id) for g in bot.guilds}
@@ -3334,6 +3384,9 @@ def make_session(user, user_guilds):
 
     data["sessions"][token] = {
         "version": SESSION_VERSION,
+        # Conserve pour reinterroger Discord : sans lui, les permissions
+        # resteraient figees a l'instant de la connexion.
+        "access_token": str(access_token or ""),
         "user_id": user_id,
         "username": user.get("global_name") or user.get("username") or "Utilisateur Discord",
         "discriminator": str(user.get("discriminator") or "0"),
@@ -3387,7 +3440,23 @@ async def api_guild_from_request(request, identity=None):
     if not guild:
         raise web.HTTPNotFound(
             text="ModBot n'est pas present sur ce serveur. Invite le bot puis reessaie.")
-    if not identity_can_manage_guild(identity, gid):
+
+    if identity.get("admin"):
+        return guild
+
+    # Verification en direct aupres de Discord, sur CHAQUE requete touchant
+    # a un serveur : lire ou ecrire une configuration exige les droits actuels.
+    source = await fetch_user_guilds_live(identity)
+    if source is not None:
+        autorise = any(
+            isinstance(item, dict) and str(item.get("id") or "") == gid
+            and user_can_manage_guild(item)
+            for item in source
+        )
+    else:
+        autorise = identity_can_manage_guild(identity, gid)
+
+    if not autorise:
         print(f"Dashboard API acces refuse: user={identity.get('user_id')} guild_id={gid}")
         raise web.HTTPForbidden(text="Tu n'as pas les permissions pour gerer ce serveur.")
     return guild
@@ -3758,7 +3827,7 @@ async def api_oauth_callback(request):
 
     if not isinstance(user_guilds, list):
         user_guilds = []
-    session_token = make_session(user, user_guilds)
+    session_token = make_session(user, user_guilds, bearer)
     manageable = sum(1 for g in user_guilds if user_can_manage_guild(g))
     print(f"OAuth Discord session creee: user={user.get('id')} "
           f"serveurs={len(user_guilds)} administrables={manageable}")
@@ -3791,24 +3860,36 @@ async def api_guilds(request):
     if identity.get("admin"):
         guilds = list(live_guilds.values())
     else:
-        # On part des serveurs Discord memorises a la connexion et on
-        # revalide la permission de chacun : jamais d'une liste d'ids figee.
+        # Source de verite : Discord lui-meme. On retombe sur les donnees de
+        # session uniquement si l'appel echoue (jeton expire, panne Discord).
+        source = await fetch_user_guilds_live(identity)
+        if source is None:
+            source = identity.get("manageable_guilds") or []
+            origine = "session"
+        else:
+            origine = "discord"
+
         guilds = []
         seen = set()
-        for item in identity.get("manageable_guilds") or []:
+        for item in source:
             if not isinstance(item, dict):
                 continue
             gid = str(item.get("id") or "")
-            if not gid or gid in seen or gid not in live_guilds:
+            # Trois conditions cumulatives, sans exception
+            if not gid or gid in seen:
                 continue
-            if not identity_can_manage_guild(identity, gid):
+            if gid not in live_guilds:          # ModBot n'y est pas
+                continue
+            if not user_can_manage_guild(item):  # pas administrateur
                 continue
             seen.add(gid)
-            guilds.append({**item, **live_guilds[gid], "installed": True, "can_manage": True})
-
-    # Chaque serveur porte desormais son propre abonnement
-    for item in guilds:
-        item["premium"] = guild_premium_state(item["id"])
+            guilds.append({
+                **serialize_oauth_guild(item, installed=True),
+                **live_guilds[gid],
+                "installed": True,
+                "can_manage": True,
+            })
+        print(f"Dashboard guilds: source={origine} retenus={len(guilds)}/{len(source)}")
 
     guilds.sort(key=lambda g: str(g.get("name") or "").lower())
     print(f"Dashboard guilds: user={identity.get('user_id')} "
