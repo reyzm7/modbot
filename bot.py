@@ -1,11 +1,24 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json, os, re, asyncio, io, aiohttp, random, string, html, unicodedata, base64, hashlib, sqlite3
+import json, os, re, sys, asyncio, io, aiohttp, random, string, html, unicodedata, base64, hashlib, sqlite3, time
 import secrets
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 from aiohttp import web
+
+import security_core as sc
+
+# Sortie non bufferisee : sans cela Python accumule les messages quand la
+# sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
+# en retard, voire seraient perdus si le processus s'arrete brutalement —
+# exactement au moment ou ils sont le plus utiles pour diagnostiquer.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageOps
     PIL_AVAILABLE = True
@@ -16,6 +29,39 @@ except Exception:
 # ════════════════════════════════════════════════
 #  CONFIGURATION
 # ════════════════════════════════════════════════
+
+def load_env_file(path=None):
+    """
+    Charge un fichier .env place a cote de bot.py.
+
+    Aucune dependance externe n'est requise. Les variables deja definies dans
+    l'environnement ne sont JAMAIS ecrasees : sur un hebergeur, les reglages
+    du panneau restent prioritaires sur un .env oublie dans le depot.
+    """
+    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(path):
+        return 0
+    chargees = 0
+    try:
+        with open(path, encoding="utf-8") as fp:
+            for ligne in fp:
+                ligne = ligne.strip()
+                if not ligne or ligne.startswith("#") or "=" not in ligne:
+                    continue
+                cle, _, valeur = ligne.partition("=")
+                cle = cle.strip().lstrip("export ").strip()
+                valeur = valeur.strip().strip('"').strip("'")
+                if cle and cle not in os.environ:
+                    os.environ[cle] = valeur
+                    chargees += 1
+    except OSError as ex:
+        print(f"Lecture du .env impossible : {ex}")
+        return 0
+    if chargees:
+        print(f"{chargees} variable(s) chargee(s) depuis .env")
+    return chargees
+
+load_env_file()
 
 TOKEN               = os.environ.get("TOKEN")
 MAX_AVERT           = 4  # 1=warn, 2=mute 4h, 3=mute 24h, 4=ban
@@ -210,6 +256,14 @@ F_BLACKLIST = "blacklist.json"
 F_DASHBOARD_LOGS = "dashboard_logs.json"
 F_DATABASE = os.environ.get("MODBOT_DATABASE", os.path.join(BASE_DIR, "modbot_dashboard.db"))
 UNLIMITED_PREMIUM_SERVERS = 999999
+
+# ── Offre Premium unique ──────────────────────────────────────────────────────
+# Une seule offre commerciale : 29,99 € pour 5 mois d'acces complet.
+PREMIUM_PRICE_EUR       = 29.99
+PREMIUM_PRICE_LABEL     = "29,99 €"
+PREMIUM_DURATION_MONTHS = 5
+PREMIUM_DURATION_DAYS   = 150          # 5 mois
+PREMIUM_DURATION_LABEL  = "5 mois"
 LINK_RE = re.compile(
     r'(?:https?://[^\s<>()]+|www\.[^\s<>()]+|(?:canary\.|ptb\.)?discord(?:app)?\.com/invite/[A-Za-z0-9-]+|discord\.gg/[A-Za-z0-9-]+|discord\.me/[A-Za-z0-9-]+|dsc\.gg/[A-Za-z0-9-]+|invite\.gg/[A-Za-z0-9-]+)',
     re.I
@@ -319,6 +373,16 @@ def init_database():
                     raw_json TEXT
                 )
             """)
+            # Migration : colonnes de duree d'abonnement ajoutees en v2
+            for column, ddl in (
+                ("started_at", "ALTER TABLE premium_subscriptions ADD COLUMN started_at TEXT"),
+                ("expires_at", "ALTER TABLE premium_subscriptions ADD COLUMN expires_at TEXT"),
+                ("price", "ALTER TABLE premium_subscriptions ADD COLUMN price REAL"),
+            ):
+                try:
+                    conn.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass  # la colonne existe deja
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_guild_date ON dashboard_events(guild_id, date)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sanctions_guild_date ON moderation_sanctions(guild_id, date)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_plan ON premium_subscriptions(plan, status)")
@@ -356,15 +420,20 @@ def db_upsert_premium(member, item):
     data = item if isinstance(item, dict) else {}
     timestamp = now().isoformat()
     plan = normalize_premium_plan(data.get("plan") or data.get("premium_tier"))
+    # L'offre unique dure 5 mois : la date de fin est calculee une fois pour toutes.
+    started_at = str(data.get("started_at") or data.get("created_at") or timestamp)
+    expires_at = data.get("expires_at")
+    if plan == "premium" and not expires_at:
+        expires_at = premium_expiry_from(started_at).isoformat()
     try:
         with db_connect() as conn:
             conn.execute(
                 """
                 INSERT INTO premium_subscriptions(
                     member, discord_id, username, plan, duration, servers_limit, payment, status,
-                    created_by, created_at, updated_at, raw_json
+                    created_by, created_at, updated_at, raw_json, started_at, expires_at, price
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(member) DO UPDATE SET
                     discord_id=excluded.discord_id,
                     username=excluded.username,
@@ -375,14 +444,17 @@ def db_upsert_premium(member, item):
                     status=excluded.status,
                     created_by=excluded.created_by,
                     updated_at=excluded.updated_at,
-                    raw_json=excluded.raw_json
+                    raw_json=excluded.raw_json,
+                    started_at=excluded.started_at,
+                    expires_at=excluded.expires_at,
+                    price=excluded.price
                 """,
                 (
                     str(member),
                     str(data.get("discord_id") or data.get("user_id") or ""),
                     str(data.get("username") or data.get("member") or member),
                     plan,
-                    str(data.get("duration") or ""),
+                    str(data.get("duration") or (PREMIUM_DURATION_LABEL if plan == "premium" else "")),
                     int(premium_limit_for_plan(plan)),
                     str(data.get("payment") or ""),
                     str(data.get("status") or "active"),
@@ -390,6 +462,9 @@ def db_upsert_premium(member, item):
                     str(data.get("created_at") or timestamp),
                     timestamp,
                     db_json(data),
+                    str(started_at),
+                    str(expires_at) if expires_at else "",
+                    float(data.get("price") or (PREMIUM_PRICE_EUR if plan == "premium" else 0)),
                 ),
             )
     except Exception as ex:
@@ -1180,13 +1255,9 @@ def del_member_imm(gid, uid):
         return True
     return False
 
-def detecter(texte, gid):
-    msg = re.sub(r'[*_~`|\\]', ' ', texte.lower())
-    msg = re.sub(r'\s+', ' ', msg).strip()
-    for ins in INSULTES_BASE + get_custom(gid):
-        if re.search(r'(?<![a-zA-ZÀ-ÿ0-9])' + re.escape(ins.lower()) + r'(?![a-zA-ZÀ-ÿ0-9])', msg):
-            return ins
-    return None
+# La detection d'insultes est desormais assuree par security_core
+# (voir detect_message_content) : normalisation unicode, leet speak,
+# separateurs et protection contre les faux positifs.
 
 def est_immunise(member, gid):
     if str(member.id) in {str(mid) for mid in get_members_imm(gid)}:
@@ -1596,7 +1667,23 @@ class VueTranslateMessage(discord.ui.View):
 #  BOT
 # ════════════════════════════════════════════════
 
-intents = discord.Intents.all()
+# Etat de la connexion Discord, expose par /api/health pour que l'hebergeur
+# et le dashboard affichent une cause precise au lieu d'une erreur generique.
+BOT_STATUS = {"state": "demarrage", "detail": ""}
+
+# Intents explicites plutot que Intents.all() : cela evite d'exiger l'intent
+# PRESENCE, qu'aucune fonctionnalite du bot n'utilise. Deux intents
+# privilegies restent necessaires et doivent etre coches dans le portail
+# developpeur Discord (onglet Bot) :
+#   • SERVER MEMBERS  -> arrivees/departs, anti-raid, changements de roles
+#   • MESSAGE CONTENT -> filtre de langage, anti-lien, anti-spam
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+intents.guilds = True
+intents.voice_states = True
+intents.moderation = True  # bannissements (on_member_ban / on_member_unban)
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 async def _safe_defer(interaction: discord.Interaction, ephemeral=True):
@@ -2553,44 +2640,251 @@ _dashboard_api_runner = None
 _dashboard_recurring_task = None
 _dashboard_social_task = None
 _oauth_states = {}
+_rate_buckets = {}
 
-def api_json(data, status=200):
-    response = web.json_response(data, status=status)
-    response.headers["Access-Control-Allow-Origin"] = DASHBOARD_ALLOWED_ORIGINS
+# Duree de vie d'une session dashboard (en heures) et d'un state OAuth (minutes)
+SESSION_TTL_HOURS = int(os.environ.get("DASHBOARD_SESSION_TTL_HOURS", "168"))  # 7 jours
+OAUTH_STATE_TTL_MINUTES = 10
+MAX_OAUTH_STATES = 500
+MAX_SESSIONS = 2000
+
+# ── CORS : liste blanche d'origines ───────────────────────────────────────────
+def _parse_origins(raw):
+    """'*' ou 'https://a.com, https://b.com' -> set normalise."""
+    text = str(raw or "").strip()
+    if not text or text == "*":
+        return {"*"}
+    origins = set()
+    for item in text.split(","):
+        item = item.strip().rstrip("/")
+        if not item:
+            continue
+        parsed = urllib.parse.urlparse(item if "//" in item else f"https://{item}")
+        if parsed.scheme and parsed.netloc:
+            origins.add(f"{parsed.scheme}://{parsed.netloc}")
+    return origins or {"*"}
+
+ALLOWED_ORIGINS = _parse_origins(DASHBOARD_ALLOWED_ORIGINS)
+# L'origine du site officiel est toujours autorisee
+try:
+    _site = urllib.parse.urlparse(DASHBOARD_SITE_URL)
+    if _site.scheme and _site.netloc and "*" not in ALLOWED_ORIGINS:
+        ALLOWED_ORIGINS.add(f"{_site.scheme}://{_site.netloc}")
+except Exception:
+    pass
+
+def resolve_cors_origin(request):
+    """Renvoie l'origine a autoriser pour cette requete, ou None."""
+    origin = (request.headers.get("Origin") or "").strip().rstrip("/") if request else ""
+    if "*" in ALLOWED_ORIGINS:
+        return origin or "*"
+    if origin and origin in ALLOWED_ORIGINS:
+        return origin
+    return None
+
+def apply_cors(response, request=None):
+    origin = resolve_cors_origin(request)
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        if origin != "*":
+            response.headers["Vary"] = "Origin"
     response.headers["Access-Control-Allow-Headers"] = "Authorization, X-ModBot-Api-Token, Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Max-Age"] = "600"
+    # Durcissement generique
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
     return response
+
+def api_json(data, status=200, request=None):
+    return apply_cors(web.json_response(data, status=status), request)
+
+# ── Limitation de debit ───────────────────────────────────────────────────────
+def rate_limit_ok(key, limit=60, window=60):
+    """Fenetre glissante simple, en memoire. Retourne False si le quota est depasse."""
+    bucket = _rate_buckets.setdefault(key, [])
+    cutoff = time.monotonic() - window
+    bucket[:] = [t for t in bucket if t > cutoff]
+    if len(bucket) >= limit:
+        return False
+    bucket.append(time.monotonic())
+    if len(_rate_buckets) > 5000:  # garde-fou memoire
+        for stale in [k for k, v in list(_rate_buckets.items()) if not v][:2000]:
+            _rate_buckets.pop(stale, None)
+    return True
+
+def client_ip(request):
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    peer = request.transport.get_extra_info("peername") if request.transport else None
+    return peer[0] if peer else "unknown"
+
+# Quotas par prefixe de route : (requetes, fenetre en secondes)
+RATE_LIMITS = [
+    ("/api/auth/", (10, 60)),
+    ("/api/admin/", (30, 60)),
+    ("/api/", (120, 60)),
+]
 
 @web.middleware
 async def api_cors_middleware(request, handler):
     if request.method == "OPTIONS":
-        return api_json({"ok": True})
+        return api_json({"ok": True}, request=request)
+
+    path = request.path
+    for prefix, (limit, window) in RATE_LIMITS:
+        if path.startswith(prefix):
+            if not rate_limit_ok(f"{client_ip(request)}:{prefix}", limit, window):
+                return api_json(
+                    {"ok": False, "error": "Trop de requetes, reessaie dans un instant.", "status": 429},
+                    status=429, request=request,
+                )
+            break
+
     try:
         response = await handler(request)
     except web.HTTPException as ex:
         if 300 <= ex.status < 400:
-            response = ex
-        else:
-            message = (ex.text or ex.reason or "Erreur API ModBot").strip()
-            response = api_json({"ok": False, "error": message, "status": ex.status}, status=ex.status)
+            return ex  # redirections OAuth : pas de corps JSON
+        message = (ex.text or ex.reason or "Erreur API ModBot").strip()
+        response = api_json({"ok": False, "error": message, "status": ex.status},
+                            status=ex.status, request=request)
+    except asyncio.CancelledError:
+        raise
     except Exception as ex:
-        print(f"Erreur API dashboard: {ex}")
-        response = api_json({"ok": False, "error": "Erreur interne API ModBot", "status": 500}, status=500)
+        print(f"Erreur API dashboard [{request.method} {path}]: {type(ex).__name__}: {ex}")
+        # Ne jamais renvoyer la trace interne au client
+        response = api_json({"ok": False, "error": "Erreur interne API ModBot", "status": 500},
+                            status=500, request=request)
     if isinstance(response, web.StreamResponse):
-        response.headers["Access-Control-Allow-Origin"] = DASHBOARD_ALLOWED_ORIGINS
-        response.headers["Access-Control-Allow-Headers"] = "Authorization, X-ModBot-Api-Token, Content-Type"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        apply_cors(response, request)
     return response
 
-def read_dashboard_sessions():
+# ── Sessions dashboard ────────────────────────────────────────────────────────
+def _session_expired(entry):
+    created = sc.parse_iso((entry or {}).get("created_at"))
+    if not created:
+        return True
+    return (now() - created) > timedelta(hours=SESSION_TTL_HOURS)
+
+def read_dashboard_sessions(purge=True):
     data = jload(F_DASHBOARD_SESSIONS)
     if not isinstance(data, dict):
         data = {}
-    data.setdefault("sessions", {})
+    sessions = data.setdefault("sessions", {})
+    if not isinstance(sessions, dict):
+        data["sessions"] = sessions = {}
+    if purge:
+        expired = [token for token, entry in sessions.items() if _session_expired(entry)]
+        for token in expired:
+            sessions.pop(token, None)
+        # Garde-fou : conserve les sessions les plus recentes
+        if len(sessions) > MAX_SESSIONS:
+            ordered = sorted(sessions.items(),
+                             key=lambda kv: str(kv[1].get("created_at") or ""), reverse=True)
+            data["sessions"] = sessions = dict(ordered[:MAX_SESSIONS])
+            expired.append("overflow")
+        if expired:
+            save_dashboard_sessions(data)
     return data
 
 def save_dashboard_sessions(data):
     jsave(F_DASHBOARD_SESSIONS, data)
+
+def drop_session(token):
+    if not token:
+        return False
+    data = read_dashboard_sessions(purge=False)
+    if data["sessions"].pop(token, None) is not None:
+        save_dashboard_sessions(data)
+        return True
+    return False
+
+# ── Redirections OAuth : liste blanche stricte ────────────────────────────────
+def request_origin(request):
+    """Origine publique reelle du bot pour cette requete (proxy compris)."""
+    if request is None:
+        return ""
+    scheme = request.headers.get("X-Forwarded-Proto") or request.scheme
+    host = request.headers.get("X-Forwarded-Host") or request.host
+    return f"{scheme}://{host}" if host else ""
+
+def default_redirect_target(request=None):
+    """
+    Page de retour apres connexion. Quand le bot sert lui-meme le site,
+    on reste sur sa propre origine : rien a configurer.
+    """
+    if resolve_site_directory():
+        origin = request_origin(request)
+        if origin:
+            return f"{origin}/dashboard.html"
+    return DASHBOARD_SITE_URL
+
+def safe_redirect_target(candidate, request=None):
+    """
+    Empeche l'open redirect : le jeton de session est passe dans le fragment de
+    l'URL de retour, donc une URL arbitraire permettrait de le voler.
+    Seules les origines connues — plus celle du bot lui-meme — sont acceptees.
+    """
+    default = default_redirect_target(request)
+    text = str(candidate or "").strip()
+    if not text:
+        return default
+    try:
+        parsed = urllib.parse.urlparse(text)
+    except Exception:
+        return default
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return default
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    allowed = set(ALLOWED_ORIGINS)
+    own = request_origin(request)
+    if own:
+        allowed.add(own)  # le bot peut toujours renvoyer vers lui-meme
+    if "*" in allowed or origin in allowed:
+        return urllib.parse.urlunparse(parsed._replace(fragment=""))
+    print(f"OAuth: redirection refusee vers une origine non autorisee: {origin}")
+    return default
+
+def remember_oauth_state(state, redirect):
+    """Stocke un state OAuth avec expiration, en bornant la memoire."""
+    stale = [key for key, value in _oauth_states.items()
+             if time.monotonic() - value["ts"] > OAUTH_STATE_TTL_MINUTES * 60]
+    for key in stale:
+        _oauth_states.pop(key, None)
+    if len(_oauth_states) >= MAX_OAUTH_STATES:
+        oldest = sorted(_oauth_states.items(), key=lambda kv: kv[1]["ts"])[: len(_oauth_states) // 2]
+        for key, _ in oldest:
+            _oauth_states.pop(key, None)
+    _oauth_states[state] = {"redirect": redirect, "ts": time.monotonic()}
+
+def consume_oauth_state(state):
+    """Retourne (connu, redirection). Le state est a usage unique."""
+    entry = _oauth_states.pop(str(state or ""), None)
+    if not entry:
+        return False, DASHBOARD_SITE_URL
+    if time.monotonic() - entry["ts"] > OAUTH_STATE_TTL_MINUTES * 60:
+        return False, DASHBOARD_SITE_URL
+    return True, entry["redirect"]
+
+def resolve_redirect_uri(request=None):
+    """
+    URL de callback OAuth. Utilise DISCORD_REDIRECT_URI si defini, sinon la
+    deduit de l'URL publique reelle (indispensable derriere un proxy Heroku,
+    Railway, Render...).
+    """
+    if DISCORD_REDIRECT_URI:
+        return DISCORD_REDIRECT_URI
+    public = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if public:
+        return f"{public}/api/auth/discord/callback"
+    if request is not None:
+        scheme = request.headers.get("X-Forwarded-Proto") or request.scheme
+        host = request.headers.get("X-Forwarded-Host") or request.host
+        if host:
+            return f"{scheme}://{host}/api/auth/discord/callback"
+    return ""
 
 def dashboard_log(action, guild=None, actor=None, detail=""):
     db_log_event(action, guild, actor, detail)
@@ -2682,14 +2976,68 @@ def premium_limit_for_plan(plan):
     return UNLIMITED_PREMIUM_SERVERS
 
 def normalize_premium_plan(value):
+    """
+    Offre unique : soit 'premium', soit 'free' (aucun abonnement).
+    Les anciens plans (ultra, partner...) sont convertis en 'premium'.
+    """
     text = str(value or "free").strip().lower()
-    if text in {"partner", "partenaire", "collaborateur", "collaborator"}:
-        return "partner"
-    if text in {"premium"}:
-        return "premium"
-    if text in {"ultra", "ultra_premium", "ultra premium", "complet"}:
-        return "ultra"
-    return "free"
+    if text in {"free", "gratuit", "", "none", "aucun"}:
+        return "free"
+    return "premium"
+
+def premium_expiry_from(start, duration_days=PREMIUM_DURATION_DAYS):
+    started = sc.parse_iso(start) or now()
+    return started + timedelta(days=duration_days)
+
+def build_premium_state(item, source="database"):
+    """
+    Etat premium normalise a partir d'une ligne d'abonnement.
+    Retourne toujours les memes clefs, que l'abonnement existe ou non.
+    """
+    item = item if isinstance(item, dict) else {}
+    plan = normalize_premium_plan(item.get("plan") or item.get("premium_tier"))
+    started_at = item.get("started_at") or item.get("created_at")
+    expires_at = sc.parse_iso(item.get("expires_at")) or (
+        premium_expiry_from(started_at) if plan == "premium" else None
+    )
+    active = bool(plan == "premium" and expires_at and expires_at > now())
+    days_left = max(0, (expires_at - now()).days) if (expires_at and active) else 0
+    status = str(item.get("status") or "active").lower()
+    if plan == "premium" and not active:
+        status = "expired"
+
+    return {
+        "plan": "premium" if active else "free",
+        "active": active,
+        "status": status,
+        "price": PREMIUM_PRICE_EUR,
+        "price_label": PREMIUM_PRICE_LABEL,
+        "duration_months": PREMIUM_DURATION_MONTHS,
+        "duration": PREMIUM_DURATION_LABEL,
+        "started_at": (sc.parse_iso(started_at) or now()).isoformat() if plan == "premium" else None,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "days_left": days_left,
+        "servers_limit": premium_limit_for_plan(plan),
+        "premium_unlimited": True,
+        "source": source,
+    }
+
+def empty_premium_state():
+    return {
+        "plan": "free",
+        "active": False,
+        "status": "none",
+        "price": PREMIUM_PRICE_EUR,
+        "price_label": PREMIUM_PRICE_LABEL,
+        "duration_months": PREMIUM_DURATION_MONTHS,
+        "duration": PREMIUM_DURATION_LABEL,
+        "started_at": None,
+        "expires_at": None,
+        "days_left": 0,
+        "servers_limit": premium_limit_for_plan("free"),
+        "premium_unlimited": True,
+        "source": "none",
+    }
 
 def parse_role_reference(guild, value):
     rid = parse_int(value)
@@ -2718,13 +3066,26 @@ def normalize_reaction_role(guild, item):
     }
 
 def premium_for_identity(identity):
+    """
+    Etat premium d'un utilisateur connecte. La base fait foi ; le fichier JSON
+    sert de secours pour les abonnements crees avant la migration.
+    """
+    if not isinstance(identity, dict):
+        return empty_premium_state()
     candidates = [
         str(identity.get("user_id") or "").lower(),
         str(identity.get("username") or "").lower(),
     ]
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        return empty_premium_state()
+    # La requete attend deux valeurs par colonne
+    if len(candidates) == 1:
+        candidates = candidates * 2
+
     try:
         with db_connect() as conn:
-            rows = conn.execute(
+            row = conn.execute(
                 """
                 SELECT * FROM premium_subscriptions
                 WHERE lower(member) IN (?, ?) OR lower(discord_id) IN (?, ?) OR lower(username) IN (?, ?)
@@ -2732,35 +3093,50 @@ def premium_for_identity(identity):
                 LIMIT 1
                 """,
                 tuple(candidates + candidates + candidates),
-            ).fetchall()
-        if rows:
-            item = dict(rows[0])
-            plan = normalize_premium_plan(item.get("plan"))
-            return {
-                "plan": plan,
-                "servers_limit": premium_limit_for_plan(plan),
-                "premium_unlimited": True,
-                "duration": item.get("duration") or "",
-                "status": item.get("status") or "active",
-                "source": "database",
-            }
-    except Exception:
-        pass
+            ).fetchone()
+        if row:
+            return build_premium_state(dict(row), source="database")
+    except Exception as ex:
+        print(f"Lecture premium (base) impossible: {ex}")
 
     data = jload(F_PREMIUM)
-    if not isinstance(data, dict):
-        return {"plan": "free", "servers_limit": premium_limit_for_plan("free"), "premium_unlimited": True, "duration": "48 heures"}
-    for key, item in data.items():
-        if str(key).lower() in candidates or str(item.get("member") or "").lower() in candidates:
-            plan = normalize_premium_plan(item.get("plan") or item.get("premium_tier"))
-            return {
-                "plan": plan,
-                "servers_limit": premium_limit_for_plan(plan),
-                "premium_unlimited": True,
-                "duration": item.get("duration") or "",
-                "source": "json",
-            }
-    return {"plan": "free", "servers_limit": premium_limit_for_plan("free"), "premium_unlimited": True, "duration": "48 heures"}
+    if isinstance(data, dict):
+        for key, item in data.items():
+            if not isinstance(item, dict):
+                continue
+            keys = {str(key).lower(), str(item.get("member") or "").lower(),
+                    str(item.get("discord_id") or "").lower()}
+            if keys & set(candidates):
+                return build_premium_state(item, source="json")
+    return empty_premium_state()
+
+def premium_active_for_guild(guild_id):
+    """Un serveur est premium si un abonnement actif le reference."""
+    gid = str(guild_id)
+    try:
+        with db_connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT l.owner_key, p.plan, p.status, p.created_at, p.raw_json
+                FROM premium_server_links l
+                LEFT JOIN premium_subscriptions p ON lower(p.member) = lower(l.owner_key)
+                WHERE l.guild_id = ?
+                """,
+                (gid,),
+            ).fetchall()
+        for row in rows:
+            item = dict(row)
+            try:
+                raw = json.loads(item.get("raw_json") or "{}")
+                if isinstance(raw, dict):
+                    item = {**raw, **{k: v for k, v in item.items() if v is not None}}
+            except (json.JSONDecodeError, TypeError):
+                pass
+            if build_premium_state(item)["active"]:
+                return True
+    except Exception:
+        pass
+    return bool(get_cfg(gid).get("premium_active"))
 
 def sync_premium_json_to_database():
     data = jload(F_PREMIUM)
@@ -2792,16 +3168,39 @@ def identity_can_manage_guild(identity, gid):
     return False
 
 def oauth_guild_icon_url(gid, icon_hash):
-    if not gid or not icon_hash:
-        return "assets/default_logo.png"
-    ext = "gif" if str(icon_hash).startswith("a_") else "png"
-    return f"https://cdn.discordapp.com/icons/{gid}/{icon_hash}.{ext}?size=128"
+    """
+    URL CDN Discord d'une icone de serveur.
+    Retourne "" si le serveur n'a pas d'icone : c'est au client d'afficher son
+    propre visuel de repli (initiales). Renvoyer un chemin local ici casserait
+    l'affichage, le site et le bot n'ayant pas la meme racine de fichiers.
+    """
+    gid = str(gid or "").strip()
+    icon_hash = str(icon_hash or "").strip()
+    if not gid.isdigit() or not icon_hash:
+        return ""
+    ext = "gif" if icon_hash.startswith("a_") else "png"
+    return f"https://cdn.discordapp.com/icons/{gid}/{icon_hash}.{ext}?size=256"
 
 def oauth_guild_banner_url(gid, banner_hash):
-    if not gid or not banner_hash:
-        return "assets/default_banner.png"
-    ext = "gif" if str(banner_hash).startswith("a_") else "png"
-    return f"https://cdn.discordapp.com/banners/{gid}/{banner_hash}.{ext}?size=320"
+    gid = str(gid or "").strip()
+    banner_hash = str(banner_hash or "").strip()
+    if not gid.isdigit() or not banner_hash:
+        return ""
+    ext = "gif" if banner_hash.startswith("a_") else "png"
+    return f"https://cdn.discordapp.com/banners/{gid}/{banner_hash}.{ext}?size=512"
+
+def user_avatar_url(user_id, avatar_hash):
+    """Avatar Discord d'un utilisateur, ou avatar par defaut Discord."""
+    uid = str(user_id or "").strip()
+    avatar_hash = str(avatar_hash or "").strip()
+    if uid.isdigit() and avatar_hash:
+        ext = "gif" if avatar_hash.startswith("a_") else "png"
+        return f"https://cdn.discordapp.com/avatars/{uid}/{avatar_hash}.{ext}?size=128"
+    try:
+        index = (int(uid) >> 22) % 6 if uid.isdigit() else 0
+    except (ValueError, TypeError):
+        index = 0
+    return f"https://cdn.discordapp.com/embed/avatars/{index}.png"
 
 def serialize_oauth_guild(item, installed=False):
     gid = str(item.get("id") or "")
@@ -2831,23 +3230,37 @@ def make_session(user, user_guilds):
     manageable_guilds = []
     bot_guild_ids = {str(g.id) for g in bot.guilds}
     for item in user_guilds:
-        gid = str(item.get("id"))
-        if not user_can_manage_guild(item):
+        if not isinstance(item, dict):
+            continue
+        gid = str(item.get("id") or "")
+        if not gid or not user_can_manage_guild(item):
             continue
         installed = gid in bot_guild_ids
         manageable_guilds.append(serialize_oauth_guild(item, installed=installed))
         if installed:
             allowed.append(gid)
+
+    user_id = str(user.get("id") or "")
     token = secrets.token_urlsafe(32)
-    data = read_dashboard_sessions()
+    created = now()
+    data = read_dashboard_sessions(purge=True)
+
+    # Une seule session active par utilisateur : evite l'accumulation de jetons
+    for old_token in [t for t, entry in data["sessions"].items()
+                      if str(entry.get("user_id") or "") == user_id]:
+        data["sessions"].pop(old_token, None)
+
     data["sessions"][token] = {
-        "user_id": str(user.get("id")),
-        "username": user.get("username") or user.get("global_name") or "Discord user",
+        "user_id": user_id,
+        "username": user.get("global_name") or user.get("username") or "Utilisateur Discord",
+        "discriminator": str(user.get("discriminator") or "0"),
         "avatar": user.get("avatar"),
+        "avatar_url": user_avatar_url(user_id, user.get("avatar")),
         "guild_ids": allowed,
         "manageable_guilds": manageable_guilds,
-        "admin": str(user.get("id")) in DASHBOARD_ADMIN_IDS,
-        "created_at": now().isoformat(),
+        "admin": user_id in DASHBOARD_ADMIN_IDS,
+        "created_at": created.isoformat(),
+        "expires_at": (created + timedelta(hours=SESSION_TTL_HOURS)).isoformat(),
     }
     save_dashboard_sessions(data)
     return token
@@ -2867,26 +3280,33 @@ async def api_identity(request, admin_required=False):
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     if not token:
         token = request.query.get("session", "").strip()
+    if not token:
+        raise web.HTTPUnauthorized(text="Connexion Discord requise.")
+
     sessions = read_dashboard_sessions().get("sessions", {})
     identity = sessions.get(token)
     if not identity:
-        raise web.HTTPUnauthorized(text="Session dashboard invalide.")
+        # Soit le jeton n'a jamais existe, soit la session a expire et a ete purgee
+        raise web.HTTPUnauthorized(text="Session expiree, reconnecte-toi avec Discord.")
+    if _session_expired(identity):
+        drop_session(token)
+        raise web.HTTPUnauthorized(text="Session expiree, reconnecte-toi avec Discord.")
     if admin_required and not identity.get("admin"):
         raise web.HTTPForbidden(text="Acces administrateur refuse.")
     return identity
 
 async def api_guild_from_request(request, identity=None):
     identity = identity or await api_identity(request)
-    gid = str(request.match_info.get("guild_id"))
-    if gid not in {str(g.id) for g in bot.guilds}:
-        print(f"Dashboard API guild introuvable: guild_id={gid}")
-        raise web.HTTPNotFound(text="Serveur introuvable pour ce bot.")
-    if not identity_can_manage_guild(identity, gid):
-        print(f"Dashboard API acces refuse: user={identity.get('user_id')} guild_id={gid}")
-        raise web.HTTPForbidden(text="Tu n'as pas acces a ce serveur.")
+    gid = str(request.match_info.get("guild_id") or "")
+    if not gid.isdigit():
+        raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
     guild = bot.get_guild(int(gid))
     if not guild:
-        raise web.HTTPNotFound(text="Serveur introuvable.")
+        raise web.HTTPNotFound(
+            text="ModBot n'est pas present sur ce serveur. Invite le bot puis reessaie.")
+    if not identity_can_manage_guild(identity, gid):
+        print(f"Dashboard API acces refuse: user={identity.get('user_id')} guild_id={gid}")
+        raise web.HTTPForbidden(text="Tu n'as pas les permissions pour gerer ce serveur.")
     return guild
 
 def dashboard_asset_channel(guild, cfg):
@@ -3149,42 +3569,89 @@ async def apply_dashboard_config(guild, payload):
     return cfg
 
 async def api_health(request):
-    return api_json({"ok": True, "bot": str(bot.user) if bot.user else None, "guilds": len(bot.guilds)})
+    """
+    Sonde publique. Sert aussi au site pour detecter automatiquement l'API :
+    elle expose donc le minimum utile a l'ecran de connexion.
+    """
+    redirect_uri = resolve_redirect_uri(request)
+    connecte = bot.is_ready()
+    if connecte:
+        BOT_STATUS["state"] = "connecte"
+        BOT_STATUS["detail"] = ""
+    return api_json({
+        # ok=True signifie « l'API repond ». L'etat Discord est distinct :
+        # cela permet de diagnostiquer un bot en ligne mais non connecte.
+        "ok": True,
+        "bot": str(bot.user) if bot.user else None,
+        "bot_id": str(bot.user.id) if bot.user else DISCORD_CLIENT_ID,
+        "guilds": len(bot.guilds),
+        "ready": connecte,
+        "discord_state": BOT_STATUS["state"],
+        "discord_detail": BOT_STATUS["detail"],
+        "oauth_configured": bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and redirect_uri),
+        "client_id": DISCORD_CLIENT_ID,
+        "version": "2.0",
+    }, request=request)
 
 async def api_login(request):
-    redirect = request.query.get("redirect") or DASHBOARD_SITE_URL
-    if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URI):
-        print("OAuth Discord non configure: CLIENT_ID/SECRET/REDIRECT_URI incomplet")
+    redirect = safe_redirect_target(request.query.get("redirect"), request)
+    redirect_uri = resolve_redirect_uri(request)
+
+    missing = []
+    if not DISCORD_CLIENT_ID:
+        missing.append("DISCORD_CLIENT_ID")
+    if not DISCORD_CLIENT_SECRET:
+        missing.append("DISCORD_CLIENT_SECRET")
+    if not redirect_uri:
+        missing.append("DISCORD_REDIRECT_URI (ou PUBLIC_BASE_URL)")
+    if missing:
+        print(f"OAuth Discord non configure — variables manquantes : {', '.join(missing)}")
         raise web.HTTPFound(f"{redirect}#login_error=oauth_not_configured")
+
     state = secrets.token_urlsafe(24)
-    _oauth_states[state] = redirect
+    remember_oauth_state(state, redirect)
     params = {
         "client_id": DISCORD_CLIENT_ID,
-        "redirect_uri": DISCORD_REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": "identify email guilds",
+        "scope": "identify guilds",
         "state": state,
+        "prompt": "consent",
     }
     query = urllib.parse.urlencode(params)
-    print(f"OAuth Discord login demarre: redirect={redirect}")
+    print(f"OAuth Discord login demarre: retour={redirect} callback={redirect_uri}")
     raise web.HTTPFound(f"https://discord.com/oauth2/authorize?{query}")
+
+async def api_logout(request):
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        token = request.query.get("session", "").strip()
+    removed = drop_session(token)
+    return api_json({"ok": True, "removed": removed}, request=request)
 
 async def api_oauth_callback(request):
     code = request.query.get("code")
     state = request.query.get("state")
-    state_known = state in _oauth_states
-    redirect = _oauth_states.pop(state, DASHBOARD_SITE_URL)
-    if state and not state_known:
-        print(f"OAuth Discord state inconnu ou expire: state={state[:8]}...")
+    state_known, redirect = consume_oauth_state(state)
+    redirect = safe_redirect_target(redirect, request)
+    redirect_uri = resolve_redirect_uri(request)
+
+    # Le state protege contre le CSRF de connexion : sans lui, on refuse.
+    if not state_known:
+        print(f"OAuth Discord: state inconnu ou expire ({str(state)[:8]}...)")
+        raise web.HTTPFound(f"{redirect}#login_error=oauth_state")
     if not code:
         raise web.HTTPFound(f"{redirect}#login_error=missing_code")
-    async with aiohttp.ClientSession() as session:
+
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post("https://discord.com/api/oauth2/token", data={
             "client_id": DISCORD_CLIENT_ID,
             "client_secret": DISCORD_CLIENT_SECRET,
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": DISCORD_REDIRECT_URI,
+            "redirect_uri": redirect_uri,
         }, headers={"Content-Type": "application/x-www-form-urlencoded"}) as response:
             if response.status >= 400:
                 body = await response.text()
@@ -3205,14 +3672,24 @@ async def api_oauth_callback(request):
                 print(f"OAuth Discord guilds refuse: status={response.status} body={body[:250]}")
                 raise web.HTTPFound(f"{redirect}#login_error=oauth_guilds")
             user_guilds = await response.json()
-    session_token = make_session(user, user_guilds if isinstance(user_guilds, list) else [])
-    guild_count = len(user_guilds) if isinstance(user_guilds, list) else 0
-    print(f"OAuth Discord session creee: user={user.get('id')} guilds={guild_count}")
+
+    if not isinstance(user_guilds, list):
+        user_guilds = []
+    session_token = make_session(user, user_guilds)
+    manageable = sum(1 for g in user_guilds if user_can_manage_guild(g))
+    print(f"OAuth Discord session creee: user={user.get('id')} "
+          f"serveurs={len(user_guilds)} administrables={manageable}")
+    dashboard_log("dashboard_login", None, user.get("username") or user.get("id"),
+                  f"{manageable} serveur(s) administrable(s)")
     raise web.HTTPFound(f"{redirect}#session={session_token}")
 
 async def api_me(request):
     identity = await api_identity(request)
-    return api_json({"ok": True, "user": identity})
+    return api_json({
+        "ok": True,
+        "user": identity,
+        "premium": premium_for_identity(identity),
+    }, request=request)
 
 async def api_guilds(request):
     identity = await api_identity(request)
@@ -3374,26 +3851,252 @@ async def api_test_social(request):
     dashboard_log("social_test", guild, identity.get("username"), f"{platform} -> #{channel.name}")
     return api_json({"ok": True, "channel_id": str(channel.id)})
 
-async def api_admin_stats(request):
+# ════════════════════════════════════════════════
+#  API — LOGS, SECURITE, SAUVEGARDES
+# ════════════════════════════════════════════════
+
+async def api_guild_logs(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    category = str(request.query.get("category") or "all").strip().lower()
+    if category not in LOG_CATEGORIES and category != "all":
+        category = "all"
     try:
-        await api_identity(request, admin_required=True)
-    except web.HTTPException:
-        if DASHBOARD_API_TOKEN:
-            raise
+        limit = max(1, min(300, int(request.query.get("limit") or 100)))
+    except (TypeError, ValueError):
+        limit = 100
+    cfg = get_cfg(guild.id)
+    toggles = cfg.get("logs_enabled") if isinstance(cfg.get("logs_enabled"), dict) else {}
     return api_json({
         "ok": True,
-        "visits": 0,
-        "today": 0,
-        "dashboardOpens": 0,
+        "guild": serialize_guild(guild),
+        "category": category,
+        "categories": [
+            {
+                "id": key,
+                "label": spec["fr"],
+                "emoji": spec["emoji"],
+                "enabled": bool(toggles.get(key, True)),
+                "channel_id": str(cfg.get(spec["key"]) or ""),
+            }
+            for key, spec in LOG_CATEGORIES.items()
+        ],
+        "logs": db_guild_logs(guild.id, category, limit),
+    }, request=request)
+
+def serialize_security_config(guild):
+    gid = str(guild.id)
+    raid = get_raid_cfg(gid)
+    nuke = get_nuke_cfg(gid)
+    filt = get_filter_cfg(gid)
+    cfg = get_cfg(gid)
+    perms = guild.me.guild_permissions
+    return {
+        "antiraid": raid,
+        "antinuke": nuke,
+        "filter": {
+            "enabled": filt["enabled"],
+            "tolerant": filt["tolerant"],
+            "ladder": filt["ladder"],
+            "allowlist": filt["allowlist"],
+            "custom_words": get_custom(gid),
+        },
+        "safe_mode_active": RAID.safe_mode_active(gid),
+        "auto_backup": {
+            "enabled": bool(cfg.get("auto_backup_enabled")),
+            "interval_hours": int(cfg.get("auto_backup_interval_hours") or 24),
+            "last": cfg.get("auto_backup_last") or "",
+        },
+        "logs_enabled": cfg.get("logs_enabled") if isinstance(cfg.get("logs_enabled"), dict) else {},
+        "permissions": {
+            "view_audit_log": perms.view_audit_log,
+            "ban_members": perms.ban_members,
+            "kick_members": perms.kick_members,
+            "manage_roles": perms.manage_roles,
+            "manage_channels": perms.manage_channels,
+            "moderate_members": perms.moderate_members,
+            "manage_guild": perms.manage_guild,
+        },
+    }
+
+async def api_get_guild_security(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    return api_json({"ok": True, "security": serialize_security_config(guild)}, request=request)
+
+async def api_save_guild_security(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="Corps de requete invalide.")
+    gid = str(guild.id)
+    cfg = get_cfg(gid)
+
+    raid = payload.get("antiraid")
+    if isinstance(raid, dict):
+        current = get_raid_cfg(gid)
+        current["enabled"] = bool(raid.get("enabled", current["enabled"]))
+        for field, lo, hi in (("join_threshold", 2, 100), ("join_window", 3, 300),
+                              ("min_account_age_days", 0, 365), ("auto_release_minutes", 1, 1440)):
+            if field in raid:
+                value = parse_int(raid.get(field))
+                if value is not None:
+                    current[field] = max(lo, min(hi, value))
+        if str(raid.get("action") or "").lower() in {"lockdown", "kick", "ban"}:
+            current["action"] = str(raid["action"]).lower()
+        current["quarantine_new"] = bool(raid.get("quarantine_new", current.get("quarantine_new")))
+        cfg["antiraid_config"] = current
+        cfg["antiraid"] = current["enabled"]
+
+    nuke = payload.get("antinuke")
+    if isinstance(nuke, dict):
+        current = get_nuke_cfg(gid)
+        current["enabled"] = bool(nuke.get("enabled", current["enabled"]))
+        if str(nuke.get("punishment") or "").lower() in {"strip", "kick", "ban"}:
+            current["punishment"] = str(nuke["punishment"]).lower()
+        current["auto_restore"] = bool(nuke.get("auto_restore", current.get("auto_restore")))
+        current["trust_owner"] = bool(nuke.get("trust_owner", current.get("trust_owner")))
+        for field in ("whitelist_users", "whitelist_roles"):
+            if isinstance(nuke.get(field), list):
+                current[field] = [str(parse_int(x)) for x in nuke[field] if parse_int(x)][:100]
+        cfg["antinuke_config"] = current
+
+    filt = payload.get("filter")
+    if isinstance(filt, dict):
+        cfg["insultes_enabled"] = bool(filt.get("enabled", cfg.get("insultes_enabled", True)))
+        cfg["insultes_tolerant"] = bool(filt.get("tolerant", cfg.get("insultes_tolerant", True)))
+        if isinstance(filt.get("ladder"), list):
+            cfg["sanction_ladder"] = sc.normalize_ladder(filt["ladder"])
+        if isinstance(filt.get("allowlist"), list):
+            cfg["insultes_allowlist"] = [
+                normalize_filtered_word(w) for w in filt["allowlist"][:200] if str(w).strip()
+            ]
+        if isinstance(filt.get("custom_words"), list):
+            cfg["insultes_custom"] = [
+                normalize_filtered_word(w) for w in filt["custom_words"][:500] if str(w).strip()
+            ]
+            sc.clear_pattern_cache()
+
+    logs_enabled = payload.get("logs_enabled")
+    if isinstance(logs_enabled, dict):
+        cfg["logs_enabled"] = {key: bool(logs_enabled.get(key, True)) for key in LOG_CATEGORIES}
+
+    log_channels = payload.get("log_channels")
+    if isinstance(log_channels, dict):
+        for key, spec in LOG_CATEGORIES.items():
+            if key in log_channels:
+                cfg[spec["key"]] = parse_int(log_channels[key]) or None
+
+    auto_backup = payload.get("auto_backup")
+    if isinstance(auto_backup, dict):
+        cfg["auto_backup_enabled"] = bool(auto_backup.get("enabled"))
+        interval = parse_int(auto_backup.get("interval_hours"))
+        if interval:
+            cfg["auto_backup_interval_hours"] = max(1, min(720, interval))
+
+    set_cfg(gid, cfg)
+    dashboard_log("security_update", guild, identity.get("username"), "Securite mise a jour depuis le dashboard")
+    await log_event(guild, "admin", "Configuration securite modifiee",
+                    "Les protections ont ete mises a jour depuis le dashboard.",
+                    fields=[("👤 Par", identity.get("username") or identity.get("user_id"))],
+                    severity="warning")
+    return api_json({"ok": True, "security": serialize_security_config(guild)}, request=request)
+
+async def api_guild_backups(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    return api_json({
+        "ok": True,
+        "backups": BACKUPS.list(guild.id),
+        "max": BACKUPS.max_per_guild,
+    }, request=request)
+
+async def api_create_backup(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    note = clean_short_text((payload or {}).get("note"), "", 200)
+    try:
+        entry = BACKUPS.create(str(guild.id), build_guild_snapshot(guild),
+                               author=identity.get("username") or "Dashboard", note=note)
+    except Exception as ex:
+        raise web.HTTPInternalServerError(text=f"Sauvegarde impossible : {ex}")
+    dashboard_log("backup_create", guild, identity.get("username"), entry["id"])
+    await log_event(guild, "admin", "Sauvegarde creee depuis le dashboard",
+                    f"Sauvegarde `{entry['id']}` generee.", severity="success")
+    return api_json({"ok": True, "backup": {k: v for k, v in entry.items() if k != "data"}},
+                    request=request)
+
+async def api_restore_backup(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    backup_id = str(request.match_info.get("backup_id") or "")
+    entry = BACKUPS.get(str(guild.id), backup_id)
+    if not entry:
+        raise web.HTTPNotFound(text="Sauvegarde introuvable.")
+
+    payload = await request.json() if request.can_read_body else {}
+    # Confirmation explicite obligatoire, meme cote API
+    if not (payload or {}).get("confirm"):
+        raise web.HTTPBadRequest(
+            text="Confirmation requise : renvoie {\"confirm\": true} pour lancer la restauration.")
+    if not guild.me.guild_permissions.manage_channels or not guild.me.guild_permissions.manage_roles:
+        raise web.HTTPForbidden(
+            text="ModBot doit avoir 'Gerer les salons' et 'Gerer les roles' pour restaurer.")
+
+    report = await restore_guild_snapshot(guild, entry.get("data") or {})
+    dashboard_log("backup_restore", guild, identity.get("username"), backup_id)
+    await log_event(guild, "admin", "Sauvegarde restauree depuis le dashboard",
+                    f"Sauvegarde `{backup_id}` appliquee.",
+                    fields=[("📦 Resultat", f"{report['roles']} roles, "
+                                            f"{report['categories']} categories, "
+                                            f"{report['channels']} salons")],
+                    severity="warning")
+    return api_json({"ok": True, "report": report}, request=request)
+
+async def api_delete_backup(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    backup_id = str(request.match_info.get("backup_id") or "")
+    if not BACKUPS.delete(str(guild.id), backup_id):
+        raise web.HTTPNotFound(text="Sauvegarde introuvable.")
+    dashboard_log("backup_delete", guild, identity.get("username"), backup_id)
+    return api_json({"ok": True, "deleted": backup_id}, request=request)
+
+async def api_guild_infractions(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    rows = INFRACTIONS.guild_summary(guild.id, limit=100)
+    for row in rows:
+        member = guild.get_member(int(row["user_id"])) if row["user_id"].isdigit() else None
+        row["username"] = str(member) if member else f"Utilisateur {row['user_id']}"
+        row["avatar"] = member.display_avatar.url if member else ""
+    return api_json({"ok": True, "infractions": rows}, request=request)
+
+async def api_admin_stats(request):
+    # Toujours exiger l'authentification : sans jeton API configure, l'ancienne
+    # version renvoyait ces donnees a n'importe qui.
+    await api_identity(request, admin_required=True)
+    premium = db_all_premium()
+    return api_json({
+        "ok": True,
         "installs": len(bot.guilds),
         "servers": len(bot.guilds),
+        "members": sum(g.member_count or 0 for g in bot.guilds),
         "guilds": [serialize_guild(g) for g in bot.guilds],
-        "premium": db_all_premium() or jload(F_PREMIUM),
-        "premium_database": db_all_premium(),
+        "premium": premium or jload(F_PREMIUM),
+        "premium_database": premium,
+        "premium_offer": {
+            "price": PREMIUM_PRICE_EUR,
+            "price_label": PREMIUM_PRICE_LABEL,
+            "duration_months": PREMIUM_DURATION_MONTHS,
+            "duration": PREMIUM_DURATION_LABEL,
+        },
         "blacklist": jload(F_BLACKLIST),
         "logs": db_recent_events(80) or jload(F_DASHBOARD_LOGS)[:80],
         "events_database": db_recent_events(80),
-    })
+    }, request=request)
 
 async def api_admin_database(request):
     identity = await api_identity(request, admin_required=True)
@@ -3407,29 +4110,62 @@ async def api_admin_database(request):
     })
 
 async def api_admin_premium(request):
+    """
+    Accorde ou revoque l'offre Premium unique (29,99 € / 5 mois).
+    Le champ `plan` n'accepte plus que 'premium' ou 'free'.
+    """
     identity = await api_identity(request, admin_required=True)
     payload = await request.json()
-    data = jload(F_PREMIUM)
     member = clean_short_text(payload.get("member"), "", 80)
-    duration = clean_short_text(payload.get("duration"), "2 mois", 40)
-    plan = normalize_premium_plan(payload.get("plan") or payload.get("premium_tier"))
-    servers_limit = premium_limit_for_plan(plan)
     if not member:
-        raise web.HTTPBadRequest(text="Membre manquant.")
-    data[member] = {
+        raise web.HTTPBadRequest(text="Identifiant ou pseudo du membre manquant.")
+
+    plan = normalize_premium_plan(payload.get("plan") or payload.get("premium_tier") or "premium")
+    data = jload(F_PREMIUM)
+    if not isinstance(data, dict):
+        data = {}
+
+    if plan == "free":
+        data.pop(member, None)
+        jsave(F_PREMIUM, data)
+        try:
+            with db_connect() as conn:
+                conn.execute(
+                    "UPDATE premium_subscriptions SET plan='free', status='revoked', updated_at=? "
+                    "WHERE lower(member) = lower(?)",
+                    (now().isoformat(), member),
+                )
+        except Exception as ex:
+            print(f"Revocation premium impossible: {ex}")
+        dashboard_log("premium_revoke", None, identity.get("username"), member)
+        return api_json({"ok": True, "premium": empty_premium_state()}, request=request)
+
+    started = now()
+    expires = started + timedelta(days=PREMIUM_DURATION_DAYS)
+    entry = {
         "member": member,
-        "duration": duration,
-        "plan": plan,
-        "servers_limit": servers_limit,
+        "discord_id": clean_short_text(payload.get("discord_id") or payload.get("user_id"), "", 32),
+        "plan": "premium",
+        "duration": PREMIUM_DURATION_LABEL,
+        "duration_months": PREMIUM_DURATION_MONTHS,
+        "price": PREMIUM_PRICE_EUR,
+        "servers_limit": premium_limit_for_plan("premium"),
         "premium_unlimited": True,
-        "created_at": now().isoformat(),
+        "started_at": started.isoformat(),
+        "created_at": started.isoformat(),
+        "expires_at": expires.isoformat(),
+        "status": "active",
         "created_by": identity.get("user_id"),
-        "payment": "ticket_required",
+        "payment": clean_short_text(payload.get("payment"), "manuel", 40),
     }
+    data[member] = entry
     jsave(F_PREMIUM, data)
-    db_upsert_premium(member, data[member])
-    dashboard_log("premium_grant", None, identity.get("username"), f"{member} -> {duration}")
-    return api_json({"ok": True, "premium": data[member]})
+    db_upsert_premium(member, entry)
+    dashboard_log("premium_grant", None, identity.get("username"),
+                  f"{member} -> Premium {PREMIUM_PRICE_LABEL} / {PREMIUM_DURATION_LABEL} "
+                  f"(fin {expires.strftime('%d/%m/%Y')})")
+    return api_json({"ok": True, "premium": build_premium_state(entry, source="database")},
+                    request=request)
 
 async def api_admin_blacklist(request):
     identity = await api_identity(request, admin_required=True)
@@ -3444,33 +4180,162 @@ async def api_admin_blacklist(request):
     dashboard_log("blacklist_add", None, identity.get("username"), f"{member}: {reason}")
     return api_json({"ok": True, "blacklist": data[member]})
 
+# ── Service du site web par le bot ────────────────────────────────────────────
+
+SITE_MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".map": "application/json; charset=utf-8",
+}
+
+_site_directory = None
+
+def resolve_site_directory():
+    """
+    Localise le dossier du site. Ordre : MODBOT_SITE_DIR, puis les
+    emplacements habituels a cote du bot. Retourne None si introuvable.
+    """
+    global _site_directory
+    if _site_directory is not None:
+        return _site_directory or None
+
+    candidates = []
+    configured = os.environ.get("MODBOT_SITE_DIR", "").strip()
+    if configured:
+        candidates.append(configured)
+    candidates += [
+        os.path.join(BASE_DIR, "site"),
+        os.path.join(BASE_DIR, "public"),
+        os.path.join(BASE_DIR, "..", "modbot-site"),
+    ]
+    for candidate in candidates:
+        path = os.path.abspath(candidate)
+        if os.path.isfile(os.path.join(path, "dashboard.html")):
+            _site_directory = path
+            return path
+    _site_directory = ""
+    return None
+
+def site_file_response(filename):
+    """Sert un fichier du site, en refusant toute sortie du dossier."""
+    site_dir = resolve_site_directory()
+    if not site_dir:
+        raise web.HTTPNotFound(text="Site non deploye avec le bot.")
+    # basename() neutralise les tentatives de traversee ("../.env")
+    safe_name = os.path.basename(str(filename or ""))
+    extension = os.path.splitext(safe_name)[1].lower()
+    if extension not in SITE_MIME_TYPES:
+        raise web.HTTPNotFound(text="Type de fichier non servi.")
+    path = os.path.abspath(os.path.join(site_dir, safe_name))
+    if not path.startswith(site_dir) or not os.path.isfile(path):
+        raise web.HTTPNotFound(text="Fichier introuvable.")
+    response = web.FileResponse(path)
+    response.headers["Content-Type"] = SITE_MIME_TYPES.get(extension, "application/octet-stream")
+    # Les pages ne sont pas mises en cache pour que les corrections
+    # arrivent immediatement ; les media le sont.
+    response.headers["Cache-Control"] = (
+        "no-cache" if extension in (".html", ".js", ".css") else "public, max-age=86400"
+    )
+    return response
+
+async def serve_site_index(request):
+    return site_file_response("index.html")
+
+async def serve_site_file(request):
+    return site_file_response(request.match_info.get("filename"))
+
 async def start_dashboard_api():
     global _dashboard_api_runner
     if _dashboard_api_runner:
         return
     sync_premium_json_to_database()
-    app = web.Application(middlewares=[api_cors_middleware])
+    app = web.Application(middlewares=[api_cors_middleware], client_max_size=2 * 1024 * 1024)
+
+    # Authentification
     app.router.add_route("*", "/api/health", api_health)
     app.router.add_get("/api/auth/discord/login", api_login)
     app.router.add_get("/api/auth/discord/callback", api_oauth_callback)
+    app.router.add_post("/api/auth/logout", api_logout)
     app.router.add_get("/api/me", api_me)
+
+    # Serveurs et configuration
     app.router.add_get("/api/guilds", api_guilds)
     app.router.add_get("/api/guilds/{guild_id}/resources", api_guild_resources)
     app.router.add_get("/api/guilds/{guild_id}/config", api_get_guild_config)
-    app.router.add_get("/api/guilds/{guild_id}/sanctions", api_get_guild_sanctions)
     app.router.add_put("/api/guilds/{guild_id}/config", api_save_guild_config)
+    app.router.add_get("/api/guilds/{guild_id}/sanctions", api_get_guild_sanctions)
+
+    # Securite, logs, infractions
+    app.router.add_get("/api/guilds/{guild_id}/security", api_get_guild_security)
+    app.router.add_put("/api/guilds/{guild_id}/security", api_save_guild_security)
+    app.router.add_get("/api/guilds/{guild_id}/logs", api_guild_logs)
+    app.router.add_get("/api/guilds/{guild_id}/infractions", api_guild_infractions)
+
+    # Sauvegardes
+    app.router.add_get("/api/guilds/{guild_id}/backups", api_guild_backups)
+    app.router.add_post("/api/guilds/{guild_id}/backups", api_create_backup)
+    app.router.add_post("/api/guilds/{guild_id}/backups/{backup_id}/restore", api_restore_backup)
+    app.router.add_delete("/api/guilds/{guild_id}/backups/{backup_id}", api_delete_backup)
+
+    # Publication
     app.router.add_post("/api/guilds/{guild_id}/tickets/publish", api_publish_ticket)
     app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
     app.router.add_post("/api/guilds/{guild_id}/socials/test", api_test_social)
+
+    # Administration
     app.router.add_get("/api/admin/stats", api_admin_stats)
     app.router.add_get("/api/admin/database", api_admin_database)
     app.router.add_post("/api/admin/premium", api_admin_premium)
     app.router.add_post("/api/admin/blacklist", api_admin_blacklist)
+
+    # ── Site web servi par le bot (optionnel mais recommande) ──────────
+    # Quand le dossier du site est present, le bot le sert directement.
+    # Le dashboard est alors sur la MEME ORIGINE que l'API : plus aucune URL
+    # a configurer, plus de CORS, plus de probleme de connexion.
+    site_dir = resolve_site_directory()
+    if site_dir:
+        assets_dir = os.path.join(site_dir, "assets")
+        if os.path.isdir(assets_dir):
+            app.router.add_static("/assets/", assets_dir, show_index=False, follow_symlinks=False)
+        app.router.add_get("/", serve_site_index)
+        # Enregistre en DERNIER : les routes /api/... ont la priorite.
+        app.router.add_get("/{filename}", serve_site_file)
+
     _dashboard_api_runner = web.AppRunner(app)
     await _dashboard_api_runner.setup()
     site = web.TCPSite(_dashboard_api_runner, API_HOST, API_PORT)
     await site.start()
+
     print(f"API dashboard ModBot active sur {API_HOST}:{API_PORT}")
+    if site_dir:
+        print(f"  • Site servi par le bot depuis : {site_dir}")
+        print("    → dashboard sur la meme origine : aucune URL a configurer.")
+    else:
+        print("  • Site non servi par le bot (dossier introuvable).")
+        print("    → renseigne <meta name=\"modbot-api-url\"> dans les pages du site,")
+        print("      ou definis MODBOT_SITE_DIR pour que le bot serve le site.")
+    print(f"  • Origines CORS autorisees : {', '.join(sorted(ALLOWED_ORIGINS))}")
+    redirect_uri = resolve_redirect_uri()
+    if DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and redirect_uri:
+        print(f"  • OAuth Discord pret — callback : {redirect_uri}")
+    else:
+        manquantes = [name for name, value in (
+            ("DISCORD_CLIENT_ID", DISCORD_CLIENT_ID),
+            ("DISCORD_CLIENT_SECRET", DISCORD_CLIENT_SECRET),
+            ("DISCORD_REDIRECT_URI ou PUBLIC_BASE_URL", redirect_uri),
+        ) if not value]
+        print(f"  ⚠️  OAuth Discord INCOMPLET — variables manquantes : {', '.join(manquantes)}")
+        print("     La connexion au dashboard ne fonctionnera pas tant qu'elles ne sont pas definies.")
 
 def recurring_interval_seconds(message):
     try:
@@ -4945,12 +5810,6 @@ class ModalMassDM(discord.ui.Modal, title="📨 Message en masse"):
                   f"**{len(self.cibles)} destinataire(s)**\nVérifiez l'aperçu ci-dessous avant d'envoyer.")
         await i.followup.send(embeds=[info, e], view=VueMassDMConfirm(self.cibles, e), ephemeral=True)
 
-# ════════════════════════════════════════════════
-#  ANTI-RAID
-# ════════════════════════════════════════════════
-
-_joins: dict = {}
-
 def render_member_template(template, member):
     text = str(template or "")
     replacements = {
@@ -5166,40 +6025,54 @@ async def on_member_join(member):
             except Exception:
                 pass
 
-    # Anti-Raid
-    if not cfg.get("antiraid"): return
+    # Journalisation de l'arrivee
+    account_age = (now() - member.created_at.replace(tzinfo=timezone.utc)).days
+    await log_event(
+        member.guild, "members", "Nouveau membre",
+        f"{member.mention} a rejoint le serveur.",
+        fields=[
+            ("📅 Compte cree le", f"{fmt(member.created_at)} ({account_age} jour(s))"),
+            ("👥 Total membres", str(member.guild.member_count)),
+        ],
+        severity="success", target=member,
+        thumbnail=member.display_avatar.url,
+    )
 
-    age = (now() - member.created_at.replace(tzinfo=timezone.utc)).days
-    if age < 7:
-        try:
-            dm = E("🛡️ Accès refusé — Anti-Raid", couleur=0xED4245)
-            dm.description = f"Expulsé de **{member.guild.name}** (compte trop récent : {age} jour(s))."
-            await member.send(embed=dm)
-        except Exception:
-            pass
-        try:
-            await member.kick(reason="[ModBot Anti-Raid] Compte trop récent")
-        except Exception:
-            pass
-        le = E("🛡️ LOG — Anti-Raid Kick", couleur=0xED4245)
-        le.add_field(name="👤 Membre", value=str(member), inline=True)
-        le.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
-        le.add_field(name="📅 Âge", value=f"`{age} jour(s)`", inline=True)
-        await send_log(member.guild, le)
-        return
-
-    if gid not in _joins: _joins[gid] = []
-    _joins[gid].append(now().timestamp())
-    _joins[gid] = [t for t in _joins[gid] if now().timestamp() - t < 10]
-    if len(_joins[gid]) >= 5:
-        le = E("🚨 RAID DÉTECTÉ !",
-               f"**{len(_joins[gid])} membres** ont rejoint en moins de 10 secondes !\n"
-               f"⚠️ Dashboard → Sécurité → Lockdown.", 0xED4245)
-        await send_log(member.guild, le)
+    # Anti-raid : comptes suspects + detection de vagues d'arrivees
+    await handle_raid_join(member)
 
 @bot.event
 async def on_member_remove(member):
     await send_dashboard_member_event(member, departure=True)
+
+    # Distingue un depart volontaire d'une expulsion via les logs d'audit
+    actor, entry = await fetch_audit_actor(
+        member.guild, discord.AuditLogAction.kick, member.id)
+    if actor:
+        reason = getattr(entry, "reason", None) or "Aucune raison fournie"
+        await log_event(
+            member.guild, "moderation", "Membre expulse",
+            f"**{member}** a ete expulse du serveur.",
+            fields=[("📋 Raison", reason)],
+            severity="danger", actor=actor, target=member,
+            thumbnail=member.display_avatar.url,
+        )
+        if getattr(actor, "id", None) != getattr(bot.user, "id", None):
+            await guard_sensitive_action(
+                member.guild, actor, "member_kick", f"{member} ({member.id})")
+        return
+
+    roles = [r.mention for r in member.roles if not r.is_default()]
+    await log_event(
+        member.guild, "members", "Membre parti",
+        f"**{member}** a quitte le serveur.",
+        fields=[
+            ("👥 Total membres", str(member.guild.member_count)),
+            ("🎭 Roles", " ".join(roles[:15]) if roles else "aucun"),
+        ],
+        severity="warning", target=member,
+        thumbnail=member.display_avatar.url,
+    )
 
 async def handle_dashboard_reaction_role(payload, remove=False):
     if not payload.guild_id or payload.user_id == getattr(bot.user, "id", None):
@@ -5259,6 +6132,1966 @@ async def on_voice_state_update(member, before, after):
             if secs > 0:
                 add_voice_min(uid, gid, secs)
 
+# ════════════════════════════════════════════════════════════════════
+#  SECURITE — ANTI-RAID / ANTI-NUKE / LOGS / BACKUPS
+# ════════════════════════════════════════════════════════════════════
+
+def init_security_database():
+    """Table dediee aux logs serveur consultables depuis le dashboard."""
+    try:
+        with db_connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS guild_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    guild_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    title TEXT,
+                    description TEXT,
+                    actor TEXT,
+                    actor_id TEXT,
+                    target TEXT,
+                    target_id TEXT,
+                    severity TEXT,
+                    payload_json TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_guild_logs ON guild_logs(guild_id, category, id DESC)")
+    except Exception as ex:
+        print(f"Erreur init table guild_logs: {ex}")
+
+init_security_database()
+
+# --- instances partagees ------------------------------------------------------
+F_INFRACTIONS = os.path.join(BASE_DIR, "infractions.json")
+D_BACKUPS = os.environ.get("MODBOT_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
+
+INFRACTIONS = sc.InfractionStore(F_INFRACTIONS, retention_days=180)
+RAID = sc.RaidDetector()
+NUKE = sc.NukeGuard()
+BACKUPS = sc.BackupStore(D_BACKUPS)
+
+_security_task = None
+_autobackup_task = None
+# Cache des objets supprimes pour la restauration automatique anti-nuke
+_deleted_cache: dict = {}
+
+# --- palette et embeds standardises -------------------------------------------
+
+class Palette:
+    """Couleurs coherentes sur tous les embeds du bot."""
+    PRIMARY  = 0x5865F2   # Blurple Discord
+    SUCCESS  = 0x2ECC71
+    INFO     = 0x3498DB
+    WARNING  = 0xF39C12
+    DANGER   = 0xED4245
+    CRITICAL = 0x992D22
+    NEUTRAL  = 0x99AAB5
+    PREMIUM  = 0xF1C40F
+
+ICONS = {
+    "success": "✅", "error": "❌", "warning": "⚠️", "info": "ℹ️",
+    "security": "🛡️", "raid": "🚨", "nuke": "💥", "backup": "💾",
+    "logs": "🧾", "ban": "🔨", "kick": "👢", "mute": "🔇",
+    "warn": "⚠️", "channel": "📁", "role": "🎭", "member": "👤",
+    "message": "💬", "permission": "🔑", "admin": "🛠️", "premium": "💎",
+}
+
+def embed_base(title, description="", color=Palette.PRIMARY, gid=None, icon=""):
+    heading = f"{icon} {title}".strip() if icon else title
+    return EG(heading, description, color, gid)
+
+def embed_success(title, description="", gid=None):
+    return embed_base(title, description, Palette.SUCCESS, gid, ICONS["success"])
+
+def embed_error(title, description="", gid=None):
+    return embed_base(title, description, Palette.DANGER, gid, ICONS["error"])
+
+def embed_warning(title, description="", gid=None):
+    return embed_base(title, description, Palette.WARNING, gid, ICONS["warning"])
+
+def embed_info(title, description="", gid=None):
+    return embed_base(title, description, Palette.INFO, gid, ICONS["info"])
+
+def embed_critical(title, description="", gid=None):
+    return embed_base(title, description, Palette.CRITICAL, gid, ICONS["nuke"])
+
+async def send_error(interaction: discord.Interaction, title, description=""):
+    """Message d'erreur propre et ephemere, quelle que soit l'etape de l'interaction."""
+    gid = str(interaction.guild.id) if interaction.guild else None
+    await safe_ephemeral(interaction, embed=embed_error(title, description, gid))
+
+# --- vue de confirmation reutilisable -----------------------------------------
+
+class ConfirmView(discord.ui.View):
+    """
+    Confirmation obligatoire avant une action importante.
+    Seul l'auteur de la commande peut repondre ; expire automatiquement.
+    """
+
+    def __init__(self, author_id, confirm_label="Confirmer", cancel_label="Annuler",
+                 danger=True, timeout=60):
+        super().__init__(timeout=timeout)
+        self.author_id = int(author_id)
+        self.value = None
+        self.interaction = None
+        self.confirm.label = confirm_label
+        self.confirm.style = discord.ButtonStyle.danger if danger else discord.ButtonStyle.success
+        self.cancel.label = cancel_label
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=embed_error("Action refusee", "Seule la personne qui a lance la commande peut confirmer."),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Confirmer", style=discord.ButtonStyle.danger, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = True
+        self.interaction = interaction
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception:
+            pass
+        self.stop()
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = False
+        self.interaction = interaction
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.response.edit_message(
+                embed=embed_info("Action annulee", "Aucune modification n'a ete effectuee."),
+                view=self,
+            )
+        except Exception:
+            pass
+        self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+async def ask_confirmation(interaction: discord.Interaction, title, description,
+                           confirm_label="Confirmer", danger=True, fields=None):
+    """
+    Affiche une demande de confirmation et attend la reponse.
+    Retourne (confirme: bool, view: ConfirmView).
+    """
+    gid = str(interaction.guild.id) if interaction.guild else None
+    embed = embed_warning(title, description, gid)
+    for name, value in (fields or []):
+        embed.add_field(name=name, value=str(value)[:1024], inline=False)
+    embed.add_field(
+        name="⏱️ Delai",
+        value="Cette confirmation expire dans 60 secondes.",
+        inline=False,
+    )
+    view = ConfirmView(interaction.user.id, confirm_label=confirm_label, danger=danger)
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    await view.wait()
+    return bool(view.value), view
+
+# ════════════════════════════════════════════════
+#  SYSTEME DE LOGS
+# ════════════════════════════════════════════════
+
+LOG_CATEGORIES = {
+    "messages":    {"key": "log_channel_messages",    "fr": "Messages",           "en": "Messages",           "emoji": "💬"},
+    "members":     {"key": "log_channel_members",     "fr": "Membres",            "en": "Members",            "emoji": "👥"},
+    "moderation":  {"key": "log_channel_moderation",  "fr": "Moderation",         "en": "Moderation",         "emoji": "⚒️"},
+    "roles":       {"key": "log_channel_roles",       "fr": "Roles",              "en": "Roles",              "emoji": "🎭"},
+    "channels":    {"key": "log_channel_channels",    "fr": "Salons",             "en": "Channels",           "emoji": "📁"},
+    "permissions": {"key": "log_channel_permissions", "fr": "Permissions",        "en": "Permissions",        "emoji": "🔑"},
+    "admin":       {"key": "log_channel_admin",       "fr": "Actions admin",      "en": "Admin actions",      "emoji": "🛠️"},
+    "security":    {"key": "log_channel_security",    "fr": "Alertes securite",   "en": "Security alerts",    "emoji": "🚨"},
+}
+
+def log_category_enabled(gid, category):
+    cfg = get_cfg(gid)
+    toggles = cfg.get("logs_enabled")
+    if not isinstance(toggles, dict):
+        return True  # tout est actif par defaut
+    return bool(toggles.get(category, True))
+
+def log_channel_for(guild, category):
+    """Salon dedie a la categorie, sinon salon de logs global, sinon defaut."""
+    cfg = get_cfg(guild.id)
+    spec = LOG_CATEGORIES.get(category) or {}
+    candidates = [cfg.get(spec.get("key")), cfg.get("salon_logs"), DEFAULT_LOGS]
+    for candidate in candidates:
+        cid = parse_int(candidate)
+        if not cid:
+            continue
+        channel = guild.get_channel(cid)
+        if channel and channel.permissions_for(guild.me).send_messages:
+            return channel
+    return None
+
+def db_insert_guild_log(guild_id, category, title, description="", actor=None,
+                        actor_id=None, target=None, target_id=None,
+                        severity="info", payload=None):
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO guild_logs(date, guild_id, category, title, description,
+                                       actor, actor_id, target, target_id, severity, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now().isoformat(), str(guild_id), str(category),
+                    str(title or "")[:200], str(description or "")[:1000],
+                    str(actor or ""), str(actor_id or ""),
+                    str(target or ""), str(target_id or ""),
+                    str(severity or "info"), db_json(payload or {}),
+                ),
+            )
+    except Exception as ex:
+        print(f"Erreur ecriture guild_logs: {ex}")
+
+def db_guild_logs(guild_id, category=None, limit=100):
+    try:
+        with db_connect() as conn:
+            if category and category != "all":
+                rows = conn.execute(
+                    "SELECT * FROM guild_logs WHERE guild_id = ? AND category = ? ORDER BY id DESC LIMIT ?",
+                    (str(guild_id), str(category), int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM guild_logs WHERE guild_id = ? ORDER BY id DESC LIMIT ?",
+                    (str(guild_id), int(limit)),
+                ).fetchall()
+        return [dict(row) for row in rows]
+    except Exception:
+        return []
+
+def db_purge_guild_logs(guild_id, keep=2000):
+    """Empeche la table de grossir indefiniment sur les gros serveurs."""
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM guild_logs WHERE guild_id = ? AND id NOT IN (
+                    SELECT id FROM guild_logs WHERE guild_id = ? ORDER BY id DESC LIMIT ?
+                )
+                """,
+                (str(guild_id), str(guild_id), int(keep)),
+            )
+    except Exception:
+        pass
+
+async def log_event(guild, category, title, description="", fields=None, color=None,
+                    actor=None, target=None, severity="info", thumbnail=None):
+    """
+    Point d'entree unique du systeme de logs.
+    Publie un embed propre dans le bon salon Discord ET enregistre en base
+    pour l'affichage dashboard.
+    """
+    if not guild:
+        return
+    gid = str(guild.id)
+    spec = LOG_CATEGORIES.get(category) or {"emoji": "📝", "fr": category}
+    colors = {
+        "info": Palette.INFO, "success": Palette.SUCCESS,
+        "warning": Palette.WARNING, "danger": Palette.DANGER,
+        "critical": Palette.CRITICAL,
+    }
+    embed_color = color if color is not None else colors.get(severity, Palette.INFO)
+
+    db_insert_guild_log(
+        gid, category, title, description,
+        actor=str(actor) if actor else "",
+        actor_id=str(getattr(actor, "id", "") or ""),
+        target=str(target) if target else "",
+        target_id=str(getattr(target, "id", "") or ""),
+        severity=severity,
+        payload={"fields": [[str(n), str(v)] for n, v in (fields or [])]},
+    )
+
+    if not log_category_enabled(gid, category):
+        return
+    channel = log_channel_for(guild, category)
+    if not channel:
+        return
+
+    embed = EG(f"{spec['emoji']} {title}", description, embed_color, gid)
+    embed.set_author(name=f"{spec.get('fr', category)} • {guild.name}")
+    if actor is not None:
+        embed.add_field(
+            name="👮 Auteur",
+            value=f"{getattr(actor, 'mention', str(actor))}\n`{getattr(actor, 'id', '?')}`",
+            inline=True,
+        )
+    if target is not None:
+        embed.add_field(
+            name="🎯 Cible",
+            value=f"{getattr(target, 'mention', str(target))}\n`{getattr(target, 'id', '?')}`",
+            inline=True,
+        )
+    for name, value in (fields or []):
+        embed.add_field(name=name, value=str(value)[:1024] or "-", inline=False)
+    if thumbnail:
+        try:
+            embed.set_thumbnail(url=thumbnail)
+        except Exception:
+            pass
+    try:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass
+
+# ════════════════════════════════════════════════
+#  CONFIGURATION SECURITE
+# ════════════════════════════════════════════════
+
+def get_raid_cfg(gid):
+    cfg = get_cfg(gid)
+    data = dict(sc.DEFAULT_RAID_CONFIG)
+    stored = cfg.get("antiraid_config")
+    if isinstance(stored, dict):
+        data.update(stored)
+    # compatibilite avec l'ancien booleen "antiraid"
+    if "enabled" not in (stored or {}):
+        data["enabled"] = bool(cfg.get("antiraid", data.get("enabled")))
+    return data
+
+def get_nuke_cfg(gid):
+    cfg = get_cfg(gid)
+    data = dict(sc.DEFAULT_NUKE_CONFIG)
+    stored = cfg.get("antinuke_config")
+    if isinstance(stored, dict):
+        data.update(stored)
+    return data
+
+def get_filter_cfg(gid):
+    cfg = get_cfg(gid)
+    return {
+        "enabled": bool(cfg.get("insultes_enabled", True)),
+        "tolerant": bool(cfg.get("insultes_tolerant", True)),
+        "ladder": sc.normalize_ladder(cfg.get("sanction_ladder")),
+        "severities": cfg.get("insultes_severities") if isinstance(cfg.get("insultes_severities"), dict) else {},
+        "allowlist": cfg.get("insultes_allowlist") if isinstance(cfg.get("insultes_allowlist"), list) else [],
+    }
+
+def set_nuke_cfg(gid, **changes):
+    cfg = get_cfg(gid)
+    data = get_nuke_cfg(gid)
+    data.update(changes)
+    cfg["antinuke_config"] = data
+    set_cfg(gid, cfg)
+    return data
+
+def set_raid_cfg(gid, **changes):
+    cfg = get_cfg(gid)
+    data = get_raid_cfg(gid)
+    data.update(changes)
+    cfg["antiraid_config"] = data
+    set_cfg(gid, cfg)
+    return data
+
+# ════════════════════════════════════════════════
+#  ANTI-RAID
+# ════════════════════════════════════════════════
+
+async def engage_safe_mode(guild, reason, triggered_by=None):
+    """
+    Mode securite : eleve le niveau de verification Discord, coupe les invites
+    si possible et previent le staff. Reversible automatiquement.
+    """
+    gid = str(guild.id)
+    cfg = get_raid_cfg(gid)
+    if RAID.safe_mode_active(gid):
+        return False
+
+    minutes = int(cfg.get("auto_release_minutes") or 15)
+    RAID.engage_safe_mode(gid, minutes)
+
+    previous_level = str(guild.verification_level)
+    stored = get_cfg(gid)
+    stored["safe_mode_previous_verification"] = previous_level
+    stored["safe_mode_started_at"] = now().isoformat()
+    set_cfg(gid, stored)
+
+    try:
+        if guild.verification_level < discord.VerificationLevel.high:
+            await guild.edit(verification_level=discord.VerificationLevel.high,
+                             reason=f"[ModBot Anti-Raid] {reason}")
+    except Exception:
+        pass
+
+    await log_event(
+        guild, "security", "MODE SECURITE ACTIVE",
+        f"Une activite anormale a ete detectee sur **{guild.name}**.\n"
+        f"Le serveur passe en mode protege pendant **{minutes} minutes**.",
+        fields=[
+            ("📋 Declencheur", reason),
+            ("🔒 Niveau de verification", f"`{previous_level}` → `high`"),
+            ("♻️ Levee automatique", f"dans {minutes} minutes"),
+        ],
+        severity="critical", actor=triggered_by,
+    )
+    dashboard_log("safe_mode_on", guild, str(triggered_by or "ModBot"), reason)
+    return True
+
+async def release_safe_mode(guild, automatic=True):
+    gid = str(guild.id)
+    RAID.release_safe_mode(gid)
+    stored = get_cfg(gid)
+    previous = stored.pop("safe_mode_previous_verification", None)
+    stored.pop("safe_mode_started_at", None)
+    set_cfg(gid, stored)
+    if previous:
+        try:
+            level = getattr(discord.VerificationLevel, previous.replace(" ", "_"), None)
+            if level is not None:
+                await guild.edit(verification_level=level, reason="[ModBot] Fin du mode securite")
+        except Exception:
+            pass
+    await log_event(
+        guild, "security", "Mode securite desactive",
+        "Le serveur revient a son fonctionnement normal."
+        + (" (levee automatique)" if automatic else " (levee manuelle)"),
+        severity="success",
+    )
+    dashboard_log("safe_mode_off", guild, "ModBot", "automatique" if automatic else "manuel")
+
+async def quarantine_member(member, reason):
+    """Isole un membre suspect : timeout court plutot qu'un kick immediat."""
+    try:
+        await member.timeout(discord.utils.utcnow() + timedelta(minutes=10),
+                             reason=f"[ModBot Anti-Raid] {reason}")
+        return True
+    except Exception:
+        return False
+
+async def handle_raid_join(member):
+    """Analyse une arrivee : compte suspect + detection de vague."""
+    guild = member.guild
+    gid = str(guild.id)
+    cfg = get_raid_cfg(gid)
+    if not cfg.get("enabled"):
+        return False
+
+    risk = sc.account_risk(member.created_at, bool(member.avatar), cfg)
+    burst = RAID.register_join(gid, cfg)
+
+    # 1. Vague d'arrivees -> mode securite
+    if burst["burst"]:
+        await engage_safe_mode(
+            guild,
+            f"{burst['count']} arrivees en {burst['window']}s (seuil : {burst['threshold']})",
+        )
+
+    handled = False
+    safe_mode = RAID.safe_mode_active(gid)
+
+    # 2. Compte suspect
+    if risk["suspicious"]:
+        action = str(cfg.get("action") or "lockdown").lower()
+        detail = ", ".join(risk["flags"]) or "profil a risque"
+        try:
+            dm = embed_warning(
+                "Acces restreint",
+                f"Ton acces a **{guild.name}** est temporairement restreint.\n"
+                f"Raison : {detail}.",
+            )
+            await member.send(embed=dm)
+        except Exception:
+            pass
+
+        if action == "ban" and safe_mode:
+            try:
+                await guild.ban(member, reason=f"[ModBot Anti-Raid] {detail}", delete_message_days=1)
+                handled = True
+            except Exception:
+                pass
+        elif action == "kick" or (safe_mode and action == "lockdown"):
+            try:
+                await member.kick(reason=f"[ModBot Anti-Raid] {detail}")
+                handled = True
+            except Exception:
+                pass
+        elif cfg.get("quarantine_new") and safe_mode:
+            handled = await quarantine_member(member, detail)
+
+        await log_event(
+            guild, "security", "Compte suspect detecte",
+            f"{member.mention} presente un profil a risque.",
+            fields=[
+                ("📊 Score de risque", f"`{risk['score']}/100`"),
+                ("🚩 Signaux", "\n".join(f"• {flag}" for flag in risk["flags"]) or "-"),
+                ("⚡ Action", "expulse" if handled and action == "kick" else
+                              "banni" if handled and action == "ban" else
+                              "mis en quarantaine" if handled else "surveille"),
+                ("📅 Compte cree le", fmt(member.created_at)),
+            ],
+            severity="warning" if not handled else "danger",
+            target=member,
+            thumbnail=member.display_avatar.url,
+        )
+    return handled
+
+# ════════════════════════════════════════════════
+#  ANTI-NUKE
+# ════════════════════════════════════════════════
+
+async def fetch_audit_actor(guild, action, target_id=None, attempts=3):
+    """
+    Retrouve l'auteur d'une action sensible via les logs d'audit.
+    Discord publie ces entrees avec un leger decalage : on reessaie.
+    """
+    if not guild.me.guild_permissions.view_audit_log:
+        return None, None
+    for attempt in range(attempts):
+        try:
+            async for entry in guild.audit_logs(limit=6, action=action):
+                age = (discord.utils.utcnow() - entry.created_at).total_seconds()
+                if age > 15:
+                    continue
+                if target_id and getattr(entry.target, "id", None) not in (None, int(target_id)):
+                    continue
+                return entry.user, entry
+        except discord.Forbidden:
+            return None, None
+        except Exception:
+            pass
+        if attempt < attempts - 1:
+            await asyncio.sleep(0.9)
+    return None, None
+
+async def punish_nuker(guild, actor, action_label, detail):
+    """Applique la sanction anti-nuke configuree. Retourne le libelle applique."""
+    cfg = get_nuke_cfg(guild.id)
+    punishment = str(cfg.get("punishment") or "strip").lower()
+    member = guild.get_member(getattr(actor, "id", 0)) if actor else None
+    reason = f"[ModBot Anti-Nuke] {action_label} — {detail}"
+
+    if not member:
+        return "aucune (acteur introuvable)"
+    if member.id == guild.owner_id:
+        return "aucune (proprietaire du serveur)"
+
+    try:
+        if punishment == "ban":
+            await guild.ban(member, reason=reason, delete_message_days=0)
+            return "banni"
+        if punishment == "kick":
+            await member.kick(reason=reason)
+            return "expulse"
+        # strip : retire tous les roles que le bot peut retirer
+        keep = [r for r in member.roles
+                if r.is_default() or r.managed or r >= guild.me.top_role]
+        if len(keep) != len(member.roles):
+            await member.edit(roles=keep, reason=reason)
+            return "roles retires"
+        return "aucune (roles hors de portee du bot)"
+    except discord.Forbidden:
+        return "echec (permissions insuffisantes)"
+    except Exception as ex:
+        return f"echec ({type(ex).__name__})"
+
+async def restore_deleted_channel(guild, snapshot):
+    """Recree un salon supprime a partir de son instantane."""
+    try:
+        overwrites = {}
+        for entry in snapshot.get("overwrites", []):
+            target = (guild.get_role(int(entry["id"])) if entry["type"] == "role"
+                      else guild.get_member(int(entry["id"])))
+            if target:
+                overwrites[target] = discord.PermissionOverwrite.from_pair(
+                    discord.Permissions(int(entry["allow"])),
+                    discord.Permissions(int(entry["deny"])),
+                )
+        category = guild.get_channel(int(snapshot["category_id"])) if snapshot.get("category_id") else None
+        kind = snapshot.get("type")
+        reason = "[ModBot Anti-Nuke] Restauration automatique"
+        if kind == "voice":
+            channel = await guild.create_voice_channel(
+                snapshot["name"], category=category, overwrites=overwrites,
+                bitrate=snapshot.get("bitrate") or 64000,
+                user_limit=snapshot.get("user_limit") or 0, reason=reason)
+        elif kind == "category":
+            channel = await guild.create_category(
+                snapshot["name"], overwrites=overwrites, reason=reason)
+        else:
+            channel = await guild.create_text_channel(
+                snapshot["name"], category=category, overwrites=overwrites,
+                topic=snapshot.get("topic") or None,
+                nsfw=bool(snapshot.get("nsfw")),
+                slowmode_delay=int(snapshot.get("slowmode") or 0), reason=reason)
+        try:
+            await channel.edit(position=int(snapshot.get("position") or 0))
+        except Exception:
+            pass
+        return channel
+    except Exception as ex:
+        print(f"Restauration salon echouee: {ex}")
+        return None
+
+async def restore_deleted_role(guild, snapshot):
+    """Recree un role supprime a partir de son instantane."""
+    try:
+        role = await guild.create_role(
+            name=snapshot["name"],
+            permissions=discord.Permissions(int(snapshot.get("permissions") or 0)),
+            colour=discord.Colour(int(snapshot.get("color") or 0)),
+            hoist=bool(snapshot.get("hoist")),
+            mentionable=bool(snapshot.get("mentionable")),
+            reason="[ModBot Anti-Nuke] Restauration automatique",
+        )
+        try:
+            target = min(int(snapshot.get("position") or 1), guild.me.top_role.position - 1)
+            if target > 0:
+                await role.edit(position=target)
+        except Exception:
+            pass
+        return role
+    except Exception as ex:
+        print(f"Restauration role echouee: {ex}")
+        return None
+
+async def guard_sensitive_action(guild, actor, action_key, detail, restore=None):
+    """
+    Coeur de l'anti-nuke : compte l'action, verifie la whitelist, sanctionne
+    et restaure si le seuil est franchi.
+    """
+    if not guild or not actor:
+        return
+    gid = str(guild.id)
+    cfg = get_nuke_cfg(gid)
+    if not cfg.get("enabled"):
+        return
+
+    member = guild.get_member(getattr(actor, "id", 0))
+    role_ids = [r.id for r in getattr(member, "roles", [])] if member else []
+    if sc.is_whitelisted(actor.id, role_ids, guild.owner_id, getattr(bot.user, "id", None), cfg):
+        return
+
+    result = NUKE.register(gid, actor.id, action_key, cfg.get("limits"))
+    if not result["tripped"]:
+        return
+
+    sanction = await punish_nuker(guild, actor, result["label_fr"], detail)
+
+    restored_label = "-"
+    if cfg.get("auto_restore") and restore:
+        restored = await restore()
+        restored_label = f"✅ {restored}" if restored else "❌ echec"
+
+    await log_event(
+        guild, "security", "ALERTE ANTI-NUKE",
+        f"**{actor}** a declenche la protection anti-nuke sur **{guild.name}**.",
+        fields=[
+            ("💥 Type d'attaque", result["label_fr"]),
+            ("📊 Seuil", f"`{result['count']}` actions en `{result['window']}s` (limite : `{result['limit']}`)"),
+            ("📋 Detail", detail),
+            ("⚡ Sanction appliquee", sanction),
+            ("♻️ Restauration", restored_label),
+        ],
+        severity="critical", actor=actor,
+        thumbnail=getattr(actor, "display_avatar", None) and actor.display_avatar.url,
+    )
+    dashboard_log("antinuke_trigger", guild, str(actor), f"{result['label_fr']} -> {sanction}")
+
+    # Une attaque anti-nuke justifie aussi le mode securite
+    await engage_safe_mode(guild, f"Anti-nuke : {result['label_fr']}", triggered_by=actor)
+
+# ════════════════════════════════════════════════
+#  EVENEMENTS SURVEILLES
+# ════════════════════════════════════════════════
+
+def snapshot_channel(channel):
+    """Instantane d'un salon, suffisant pour le recreer a l'identique."""
+    overwrites = []
+    for target, overwrite in getattr(channel, "overwrites", {}).items():
+        allow, deny = overwrite.pair()
+        overwrites.append({
+            "type": "role" if isinstance(target, discord.Role) else "member",
+            "id": str(target.id),
+            "name": getattr(target, "name", ""),
+            "allow": str(allow.value),
+            "deny": str(deny.value),
+        })
+    kind = "text"
+    if isinstance(channel, discord.VoiceChannel):
+        kind = "voice"
+    elif isinstance(channel, discord.CategoryChannel):
+        kind = "category"
+    elif isinstance(channel, discord.ForumChannel):
+        kind = "forum"
+    elif isinstance(channel, discord.StageChannel):
+        kind = "stage"
+    return {
+        "id": str(channel.id),
+        "name": channel.name,
+        "type": kind,
+        "position": getattr(channel, "position", 0),
+        "category_id": str(channel.category.id) if getattr(channel, "category", None) else "",
+        "category_name": channel.category.name if getattr(channel, "category", None) else "",
+        "topic": getattr(channel, "topic", "") or "",
+        "nsfw": bool(getattr(channel, "nsfw", False)),
+        "slowmode": int(getattr(channel, "slowmode_delay", 0) or 0),
+        "bitrate": int(getattr(channel, "bitrate", 0) or 0),
+        "user_limit": int(getattr(channel, "user_limit", 0) or 0),
+        "overwrites": overwrites,
+    }
+
+def snapshot_role(role):
+    """Instantane d'un role."""
+    return {
+        "id": str(role.id),
+        "name": role.name,
+        "color": role.color.value,
+        "permissions": str(role.permissions.value),
+        "hoist": role.hoist,
+        "mentionable": role.mentionable,
+        "position": role.position,
+        "managed": role.managed,
+    }
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    guild = channel.guild
+    snapshot = snapshot_channel(channel)
+    actor, _ = await fetch_audit_actor(guild, discord.AuditLogAction.channel_delete, channel.id)
+
+    await log_event(
+        guild, "channels", "Salon supprime",
+        f"Le salon **#{channel.name}** a ete supprime.",
+        fields=[("📁 Type", snapshot["type"]),
+                ("🗂️ Categorie", snapshot["category_name"] or "aucune")],
+        severity="warning", actor=actor,
+    )
+    if actor:
+        await guard_sensitive_action(
+            guild, actor, "channel_delete", f"#{channel.name}",
+            restore=lambda: restore_deleted_channel(guild, snapshot),
+        )
+
+@bot.event
+async def on_guild_channel_create(channel):
+    guild = channel.guild
+    actor, _ = await fetch_audit_actor(guild, discord.AuditLogAction.channel_create, channel.id)
+    await log_event(
+        guild, "channels", "Salon cree",
+        f"Le salon {getattr(channel, 'mention', '#' + channel.name)} a ete cree.",
+        severity="info", actor=actor,
+    )
+    if actor:
+        await guard_sensitive_action(
+            guild, actor, "channel_create", f"#{channel.name}",
+            restore=lambda: channel.delete(reason="[ModBot Anti-Nuke] Creation massive annulee"),
+        )
+
+@bot.event
+async def on_guild_channel_update(before, after):
+    guild = after.guild
+    changes = []
+    if before.name != after.name:
+        changes.append(f"nom : `{before.name}` → `{after.name}`")
+    if getattr(before, "topic", None) != getattr(after, "topic", None):
+        changes.append("sujet modifie")
+    if before.overwrites != after.overwrites:
+        changes.append("permissions modifiees")
+
+    if not changes:
+        return
+
+    actor, _ = await fetch_audit_actor(guild, discord.AuditLogAction.channel_update, after.id)
+    if before.overwrites != after.overwrites:
+        actor = actor or (await fetch_audit_actor(guild, discord.AuditLogAction.overwrite_update, after.id))[0]
+        await log_event(
+            guild, "permissions", "Permissions de salon modifiees",
+            f"Les permissions de {getattr(after, 'mention', after.name)} ont change.",
+            fields=[("🔑 Modifications", "\n".join(f"• {c}" for c in changes))],
+            severity="warning", actor=actor,
+        )
+        if actor:
+            await guard_sensitive_action(guild, actor, "permission_edit", f"#{after.name}")
+    else:
+        await log_event(
+            guild, "channels", "Salon modifie",
+            f"Le salon {getattr(after, 'mention', after.name)} a ete modifie.",
+            fields=[("✏️ Modifications", "\n".join(f"• {c}" for c in changes))],
+            severity="info", actor=actor,
+        )
+
+@bot.event
+async def on_guild_role_delete(role):
+    guild = role.guild
+    snapshot = snapshot_role(role)
+    actor, _ = await fetch_audit_actor(guild, discord.AuditLogAction.role_delete, role.id)
+    await log_event(
+        guild, "roles", "Role supprime",
+        f"Le role **@{role.name}** a ete supprime.",
+        fields=[("👥 Membres concernes", str(len(role.members))),
+                ("🎨 Couleur", f"`#{role.color.value:06X}`")],
+        severity="warning", actor=actor,
+    )
+    if actor:
+        await guard_sensitive_action(
+            guild, actor, "role_delete", f"@{role.name}",
+            restore=lambda: restore_deleted_role(guild, snapshot),
+        )
+
+@bot.event
+async def on_guild_role_create(role):
+    guild = role.guild
+    actor, _ = await fetch_audit_actor(guild, discord.AuditLogAction.role_create, role.id)
+    await log_event(
+        guild, "roles", "Role cree",
+        f"Le role **@{role.name}** a ete cree.",
+        severity="info", actor=actor,
+    )
+    if actor:
+        await guard_sensitive_action(
+            guild, actor, "role_create", f"@{role.name}",
+            restore=lambda: role.delete(reason="[ModBot Anti-Nuke] Creation massive annulee"),
+        )
+
+@bot.event
+async def on_guild_role_update(before, after):
+    guild = after.guild
+    if before.permissions == after.permissions and before.name == after.name:
+        return
+    actor, _ = await fetch_audit_actor(guild, discord.AuditLogAction.role_update, after.id)
+
+    dangerous = []
+    if before.permissions != after.permissions:
+        added = discord.Permissions(after.permissions.value & ~before.permissions.value)
+        for name in ("administrator", "manage_guild", "manage_roles", "manage_channels",
+                     "ban_members", "kick_members", "manage_webhooks", "mention_everyone"):
+            if getattr(added, name, False):
+                dangerous.append(name)
+
+    fields = []
+    if before.name != after.name:
+        fields.append(("✏️ Nom", f"`{before.name}` → `{after.name}`"))
+    if dangerous:
+        fields.append(("⚠️ Permissions sensibles ajoutees", ", ".join(f"`{p}`" for p in dangerous)))
+
+    await log_event(
+        guild, "permissions" if dangerous else "roles",
+        "Permissions de role elevees" if dangerous else "Role modifie",
+        f"Le role **@{after.name}** a ete modifie.",
+        fields=fields, severity="danger" if dangerous else "info", actor=actor,
+    )
+    if actor and dangerous:
+        await guard_sensitive_action(guild, actor, "role_update", f"@{after.name} (+{', '.join(dangerous)})")
+
+@bot.event
+async def on_member_ban(guild, user):
+    actor, entry = await fetch_audit_actor(guild, discord.AuditLogAction.ban, user.id)
+    reason = getattr(entry, "reason", None) or "Aucune raison fournie"
+    await log_event(
+        guild, "moderation", "Membre banni",
+        f"**{user}** a ete banni du serveur.",
+        fields=[("📋 Raison", reason)],
+        severity="danger", actor=actor, target=user,
+        thumbnail=user.display_avatar.url,
+    )
+    if actor and getattr(actor, "id", None) != getattr(bot.user, "id", None):
+        await guard_sensitive_action(guild, actor, "member_ban", f"{user} ({user.id})")
+
+@bot.event
+async def on_member_unban(guild, user):
+    actor, entry = await fetch_audit_actor(guild, discord.AuditLogAction.unban, user.id)
+    await log_event(
+        guild, "moderation", "Membre debanni",
+        f"**{user}** peut de nouveau rejoindre le serveur.",
+        severity="success", actor=actor, target=user,
+    )
+
+@bot.event
+async def on_member_update(before, after):
+    guild = after.guild
+    added = [r for r in after.roles if r not in before.roles]
+    removed = [r for r in before.roles if r not in after.roles]
+
+    if added or removed:
+        actor, _ = await fetch_audit_actor(guild, discord.AuditLogAction.member_role_update, after.id)
+        fields = []
+        if added:
+            fields.append(("➕ Roles ajoutes", " ".join(r.mention for r in added)))
+        if removed:
+            fields.append(("➖ Roles retires", " ".join(r.mention for r in removed)))
+        elevated = [r for r in added if r.permissions.administrator or r.permissions.manage_guild]
+        await log_event(
+            guild, "roles", "Roles d'un membre modifies",
+            f"Les roles de {after.mention} ont change.",
+            fields=fields,
+            severity="danger" if elevated else "info",
+            actor=actor, target=after,
+        )
+        if actor and elevated and getattr(actor, "id", None) != getattr(bot.user, "id", None):
+            await guard_sensitive_action(
+                guild, actor, "role_update",
+                f"role administrateur donne a {after} ({after.id})",
+            )
+
+    if before.nick != after.nick:
+        await log_event(
+            guild, "members", "Pseudo modifie",
+            f"{after.mention} a change de pseudo.",
+            fields=[("✏️ Avant", before.nick or before.name),
+                    ("✏️ Apres", after.nick or after.name)],
+            severity="info", target=after,
+        )
+
+@bot.event
+async def on_message_delete(message):
+    if not message.guild or message.author.bot:
+        return
+    content = (message.content or "").strip()
+    attachments = [a.filename for a in message.attachments]
+    if not content and not attachments:
+        return
+    await log_event(
+        message.guild, "messages", "Message supprime",
+        f"Un message de {message.author.mention} a ete supprime dans {message.channel.mention}.",
+        fields=[
+            ("💬 Contenu", f"```{content[:900]}```" if content else "_aucun texte_"),
+            ("📎 Pieces jointes", ", ".join(attachments) if attachments else "-"),
+        ],
+        severity="warning", target=message.author,
+    )
+
+@bot.event
+async def on_message_edit(before, after):
+    if not after.guild or after.author.bot or before.content == after.content:
+        return
+    await log_event(
+        after.guild, "messages", "Message modifie",
+        f"{after.author.mention} a modifie un message dans {after.channel.mention}.\n"
+        f"[Aller au message]({after.jump_url})",
+        fields=[
+            ("📝 Avant", f"```{(before.content or '')[:450]}```"),
+            ("✏️ Apres", f"```{(after.content or '')[:450]}```"),
+        ],
+        severity="info", target=after.author,
+    )
+
+@bot.event
+async def on_webhooks_update(channel):
+    guild = channel.guild
+    actor, _ = await fetch_audit_actor(guild, discord.AuditLogAction.webhook_create)
+    await log_event(
+        guild, "security", "Webhooks modifies",
+        f"Les webhooks de {channel.mention} ont ete modifies.",
+        severity="warning", actor=actor,
+    )
+    if actor:
+        await guard_sensitive_action(guild, actor, "webhook_create", f"#{channel.name}")
+
+# ════════════════════════════════════════════════
+#  SAUVEGARDES SERVEUR
+# ════════════════════════════════════════════════
+
+def build_guild_snapshot(guild):
+    """Instantane complet : roles, categories, salons, permissions, reglages."""
+    roles = [snapshot_role(r) for r in sorted(guild.roles, key=lambda r: r.position, reverse=True)
+             if not r.is_default() and not r.managed]
+    categories = [snapshot_channel(c) for c in sorted(guild.categories, key=lambda c: c.position)]
+    channels = [snapshot_channel(c) for c in sorted(guild.channels, key=lambda c: getattr(c, "position", 0))
+                if not isinstance(c, discord.CategoryChannel)]
+    return {
+        "version": 2,
+        "guild": {
+            "id": str(guild.id),
+            "name": guild.name,
+            "icon": discord_asset_url(guild.icon),
+            "verification_level": str(guild.verification_level),
+            "afk_timeout": guild.afk_timeout,
+            "system_channel_id": str(guild.system_channel.id) if guild.system_channel else "",
+            "rules_channel_id": str(guild.rules_channel.id) if guild.rules_channel else "",
+            "member_count": guild.member_count,
+        },
+        "roles": roles,
+        "categories": categories,
+        "channels": channels,
+        "settings": get_cfg(guild.id),
+    }
+
+async def restore_guild_snapshot(guild, snapshot, progress=None):
+    """
+    Restauration additive : recree ce qui manque sans rien supprimer.
+    C'est volontaire — une restauration destructive serait irreversible.
+    Retourne un rapport {roles_created, categories_created, channels_created, errors}
+    """
+    report = {"roles": 0, "categories": 0, "channels": 0, "errors": []}
+    existing_roles = {r.name.lower() for r in guild.roles}
+    role_map = {}
+
+    for item in reversed(snapshot.get("roles") or []):
+        if item.get("name", "").lower() in existing_roles:
+            match = discord.utils.find(lambda r: r.name.lower() == item["name"].lower(), guild.roles)
+            if match:
+                role_map[item["id"]] = match
+            continue
+        role = await restore_deleted_role(guild, item)
+        if role:
+            role_map[item["id"]] = role
+            report["roles"] += 1
+        else:
+            report["errors"].append(f"role @{item.get('name')}")
+        await asyncio.sleep(0.6)  # respecte le rate limit Discord
+
+    existing_categories = {c.name.lower(): c for c in guild.categories}
+    category_map = {}
+    for item in snapshot.get("categories") or []:
+        found = existing_categories.get(item.get("name", "").lower())
+        if found:
+            category_map[item["id"]] = found
+            continue
+        created = await restore_deleted_channel(guild, {**item, "type": "category", "category_id": ""})
+        if created:
+            category_map[item["id"]] = created
+            report["categories"] += 1
+        else:
+            report["errors"].append(f"categorie {item.get('name')}")
+        await asyncio.sleep(0.6)
+
+    existing_channels = {c.name.lower() for c in guild.channels}
+    for item in snapshot.get("channels") or []:
+        if item.get("name", "").lower() in existing_channels:
+            continue
+        target_category = category_map.get(item.get("category_id"))
+        payload = {**item, "category_id": str(target_category.id) if target_category else ""}
+        created = await restore_deleted_channel(guild, payload)
+        if created:
+            report["channels"] += 1
+        else:
+            report["errors"].append(f"salon #{item.get('name')}")
+        if progress and (report["channels"] % 5 == 0):
+            try:
+                await progress(report)
+            except Exception:
+                pass
+        await asyncio.sleep(0.6)
+
+    return report
+
+backup_group = app_commands.Group(
+    name="backup",
+    description="Sauvegardes du serveur",
+    default_permissions=discord.Permissions(administrator=True),
+    guild_only=True,
+)
+
+@backup_group.command(name="create", description="Creer une sauvegarde complete du serveur")
+@app_commands.describe(note="Note optionnelle pour retrouver cette sauvegarde")
+async def backup_create(i: discord.Interaction, note: str = ""):
+    await _safe_defer(i)
+    gid = str(i.guild.id)
+    try:
+        snapshot = build_guild_snapshot(i.guild)
+        entry = BACKUPS.create(gid, snapshot, author=str(i.user), note=note)
+    except Exception as ex:
+        return await i.followup.send(
+            embed=embed_error("Sauvegarde impossible", f"Une erreur est survenue : `{ex}`", gid),
+            ephemeral=True,
+        )
+
+    embed = embed_success("Sauvegarde creee", f"Le serveur **{i.guild.name}** a ete sauvegarde.", gid)
+    embed.add_field(name="🆔 Identifiant", value=f"`{entry['id']}`", inline=True)
+    embed.add_field(name="📅 Date", value=fmt(), inline=True)
+    embed.add_field(name="👤 Auteur", value=str(i.user), inline=True)
+    embed.add_field(name="🎭 Roles", value=str(entry["counts"]["roles"]), inline=True)
+    embed.add_field(name="🗂️ Categories", value=str(entry["counts"]["categories"]), inline=True)
+    embed.add_field(name="📁 Salons", value=str(entry["counts"]["channels"]), inline=True)
+    if note:
+        embed.add_field(name="📝 Note", value=note[:200], inline=False)
+    embed.add_field(
+        name="♻️ Restaurer",
+        value=f"`/backup restore identifiant:{entry['id']}`",
+        inline=False,
+    )
+    await i.followup.send(embed=embed, ephemeral=True)
+
+    await log_event(i.guild, "admin", "Sauvegarde creee",
+                    f"Une sauvegarde du serveur a ete generee (`{entry['id']}`).",
+                    fields=[("📝 Note", note or "-")], severity="success", actor=i.user)
+
+@backup_group.command(name="list", description="Lister les sauvegardes disponibles")
+async def backup_list(i: discord.Interaction):
+    await _safe_defer(i)
+    gid = str(i.guild.id)
+    entries = BACKUPS.list(gid)
+    if not entries:
+        return await i.followup.send(
+            embed=embed_info("Aucune sauvegarde",
+                             "Utilise `/backup create` pour en generer une premiere.", gid),
+            ephemeral=True,
+        )
+    embed = embed_base("Sauvegardes du serveur",
+                       f"**{len(entries)}** sauvegarde(s) disponible(s) — la plus recente en premier.",
+                       Palette.PRIMARY, gid, ICONS["backup"])
+    for entry in entries[:10]:
+        created = sc.parse_iso(entry.get("created_at"))
+        counts = entry.get("counts") or {}
+        embed.add_field(
+            name=f"🆔 {entry.get('id')}",
+            value=(f"📅 {fmt(created) if created else '?'}\n"
+                   f"👤 {entry.get('author', '?')}\n"
+                   f"🎭 {counts.get('roles', 0)} roles · 🗂️ {counts.get('categories', 0)} categories · "
+                   f"📁 {counts.get('channels', 0)} salons"
+                   + (f"\n📝 {entry['note']}" if entry.get("note") else "")),
+            inline=False,
+        )
+    await i.followup.send(embed=embed, view=BackupListView(entries[:25], i.user.id), ephemeral=True)
+
+@backup_group.command(name="restore", description="Restaurer une sauvegarde (confirmation obligatoire)")
+@app_commands.describe(identifiant="Identifiant de la sauvegarde (voir /backup list)")
+async def backup_restore(i: discord.Interaction, identifiant: str):
+    gid = str(i.guild.id)
+    entry = BACKUPS.get(gid, identifiant.strip())
+    if not entry:
+        return await send_error(i, "Sauvegarde introuvable",
+                                f"Aucune sauvegarde `{identifiant}` sur ce serveur. Utilise `/backup list`.")
+
+    if not i.guild.me.guild_permissions.manage_channels or not i.guild.me.guild_permissions.manage_roles:
+        return await send_error(i, "Permissions insuffisantes",
+                                "ModBot a besoin de **Gerer les salons** et **Gerer les roles** pour restaurer.")
+
+    counts = entry.get("counts") or {}
+    created = sc.parse_iso(entry.get("created_at"))
+    confirmed, view = await ask_confirmation(
+        i,
+        "Confirmer la restauration",
+        f"Tu es sur le point de restaurer la sauvegarde `{entry['id']}` sur **{i.guild.name}**.\n\n"
+        "La restauration est **additive** : les roles et salons manquants sont recrees, "
+        "rien n'est supprime. L'operation peut prendre plusieurs minutes.",
+        confirm_label="Restaurer maintenant",
+        fields=[
+            ("📅 Sauvegarde du", fmt(created) if created else "?"),
+            ("👤 Creee par", entry.get("author", "?")),
+            ("📦 Contenu", f"🎭 {counts.get('roles', 0)} roles · "
+                           f"🗂️ {counts.get('categories', 0)} categories · "
+                           f"📁 {counts.get('channels', 0)} salons"),
+        ],
+    )
+    if not confirmed:
+        return
+
+    target = view.interaction or i
+    try:
+        await target.followup.send(
+            embed=embed_info("Restauration en cours", "Merci de patienter, cela peut prendre plusieurs minutes...", gid),
+            ephemeral=True,
+        )
+    except Exception:
+        pass
+
+    report = await restore_guild_snapshot(i.guild, entry.get("data") or {})
+    embed = embed_success("Restauration terminee", f"Sauvegarde `{entry['id']}` appliquee.", gid)
+    embed.add_field(name="🎭 Roles recrees", value=str(report["roles"]), inline=True)
+    embed.add_field(name="🗂️ Categories recreees", value=str(report["categories"]), inline=True)
+    embed.add_field(name="📁 Salons recrees", value=str(report["channels"]), inline=True)
+    if report["errors"]:
+        embed.color = Palette.WARNING
+        embed.add_field(name="⚠️ Echecs", value="\n".join(f"• {e}" for e in report["errors"][:10])[:1024], inline=False)
+    try:
+        await target.followup.send(embed=embed, ephemeral=True)
+    except Exception:
+        pass
+
+    await log_event(i.guild, "admin", "Sauvegarde restauree",
+                    f"La sauvegarde `{entry['id']}` a ete restauree.",
+                    fields=[("📦 Resultat", f"{report['roles']} roles, "
+                                            f"{report['categories']} categories, "
+                                            f"{report['channels']} salons")],
+                    severity="warning", actor=i.user)
+    dashboard_log("backup_restore", i.guild, str(i.user), entry["id"])
+
+@backup_group.command(name="delete", description="Supprimer une sauvegarde")
+@app_commands.describe(identifiant="Identifiant de la sauvegarde a supprimer")
+async def backup_delete(i: discord.Interaction, identifiant: str):
+    gid = str(i.guild.id)
+    entry = BACKUPS.get(gid, identifiant.strip())
+    if not entry:
+        return await send_error(i, "Sauvegarde introuvable", f"Aucune sauvegarde `{identifiant}` sur ce serveur.")
+    confirmed, view = await ask_confirmation(
+        i, "Supprimer cette sauvegarde ?",
+        f"La sauvegarde `{entry['id']}` sera definitivement supprimee.",
+        confirm_label="Supprimer",
+    )
+    if not confirmed:
+        return
+    BACKUPS.delete(gid, entry["id"])
+    target = view.interaction or i
+    try:
+        await target.followup.send(
+            embed=embed_success("Sauvegarde supprimee", f"`{entry['id']}` a ete supprimee.", gid),
+            ephemeral=True,
+        )
+    except Exception:
+        pass
+    await log_event(i.guild, "admin", "Sauvegarde supprimee",
+                    f"La sauvegarde `{entry['id']}` a ete supprimee.",
+                    severity="warning", actor=i.user)
+
+class BackupSelect(discord.ui.Select):
+    def __init__(self, entries):
+        options = []
+        for entry in entries[:25]:
+            created = sc.parse_iso(entry.get("created_at"))
+            counts = entry.get("counts") or {}
+            options.append(discord.SelectOption(
+                label=entry.get("id", "?")[:100],
+                description=(f"{fmt(created) if created else '?'} · "
+                             f"{counts.get('channels', 0)} salons")[:100],
+                emoji="💾",
+                value=entry.get("id", "?"),
+            ))
+        super().__init__(placeholder="Selectionne une sauvegarde a inspecter",
+                         options=options or [discord.SelectOption(label="Aucune", value="none")],
+                         min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        gid = str(interaction.guild.id)
+        entry = BACKUPS.get(gid, self.values[0])
+        if not entry:
+            return await send_error(interaction, "Sauvegarde introuvable", "Elle a peut-etre ete supprimee entre-temps.")
+        data = entry.get("data") or {}
+        created = sc.parse_iso(entry.get("created_at"))
+        embed = embed_base(f"Sauvegarde {entry['id']}", entry.get("note") or "Aucune note.",
+                           Palette.PRIMARY, gid, ICONS["backup"])
+        embed.add_field(name="📅 Creee le", value=fmt(created) if created else "?", inline=True)
+        embed.add_field(name="👤 Auteur", value=entry.get("author", "?"), inline=True)
+        embed.add_field(name="👥 Membres a l'epoque",
+                        value=str((data.get("guild") or {}).get("member_count", "?")), inline=True)
+        roles = data.get("roles") or []
+        channels = data.get("channels") or []
+        embed.add_field(name=f"🎭 Roles ({len(roles)})",
+                        value="\n".join(f"• {r['name']}" for r in roles[:12]) or "-", inline=True)
+        embed.add_field(name=f"📁 Salons ({len(channels)})",
+                        value="\n".join(f"• #{c['name']}" for c in channels[:12]) or "-", inline=True)
+        embed.add_field(name="♻️ Restaurer",
+                        value=f"`/backup restore identifiant:{entry['id']}`", inline=False)
+        await safe_ephemeral(interaction, embed=embed)
+
+class BackupListView(discord.ui.View):
+    def __init__(self, entries, author_id):
+        super().__init__(timeout=180)
+        self.author_id = int(author_id)
+        self.add_item(BackupSelect(entries))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=embed_error("Action refusee", "Ce menu appartient a la personne qui a lance la commande."),
+                ephemeral=True)
+            return False
+        return True
+
+bot.tree.add_command(backup_group)
+
+# ════════════════════════════════════════════════
+#  COMMANDES SECURITE
+# ════════════════════════════════════════════════
+
+security_group = app_commands.Group(
+    name="securite",
+    description="Protection anti-raid et anti-nuke",
+    default_permissions=discord.Permissions(administrator=True),
+    guild_only=True,
+)
+
+def build_security_status_embed(guild):
+    gid = str(guild.id)
+    raid = get_raid_cfg(gid)
+    nuke = get_nuke_cfg(gid)
+    filt = get_filter_cfg(gid)
+    safe = RAID.safe_mode_active(gid)
+
+    embed = embed_base("Etat de la securite", f"Protection de **{guild.name}**",
+                       Palette.CRITICAL if safe else Palette.PRIMARY, gid, ICONS["security"])
+    if safe:
+        embed.description += "\n\n🚨 **MODE SECURITE ACTIF** — le serveur est en protection renforcee."
+
+    embed.add_field(
+        name="🛡️ Anti-raid",
+        value=(f"{status_badge(raid.get('enabled'), gid)}\n"
+               f"Seuil : `{raid.get('join_threshold')}` arrivees / `{raid.get('join_window')}s`\n"
+               f"Age minimum : `{raid.get('min_account_age_days')}` jours\n"
+               f"Action : `{raid.get('action')}`"),
+        inline=True,
+    )
+    embed.add_field(
+        name="💥 Anti-nuke",
+        value=(f"{status_badge(nuke.get('enabled'), gid)}\n"
+               f"Sanction : `{nuke.get('punishment')}`\n"
+               f"Restauration auto : {'🟢 oui' if nuke.get('auto_restore') else '🔴 non'}\n"
+               f"Whitelist : `{len(nuke.get('whitelist_users') or [])}` membres · "
+               f"`{len(nuke.get('whitelist_roles') or [])}` roles"),
+        inline=True,
+    )
+    embed.add_field(
+        name="🚫 Filtre de langage",
+        value=(f"{status_badge(filt['enabled'], gid)}\n"
+               f"Detection avancee : {'🟢 oui' if filt['tolerant'] else '🔴 non'}\n"
+               f"Paliers : `{len(filt['ladder'])}`"),
+        inline=True,
+    )
+
+    missing = []
+    perms = guild.me.guild_permissions
+    for name, label in (("view_audit_log", "Voir les logs d'audit"),
+                        ("ban_members", "Bannir des membres"),
+                        ("kick_members", "Expulser des membres"),
+                        ("manage_roles", "Gerer les roles"),
+                        ("manage_channels", "Gerer les salons"),
+                        ("moderate_members", "Exclure temporairement")):
+        if not getattr(perms, name, False):
+            missing.append(label)
+    embed.add_field(
+        name="🔑 Permissions ModBot",
+        value=("🟢 Toutes les permissions necessaires sont accordees."
+               if not missing else
+               "🔴 Permissions manquantes :\n" + "\n".join(f"• {m}" for m in missing)),
+        inline=False,
+    )
+    ladder_txt = "\n".join(
+        f"`{step['threshold']} pt` → {step['fr']}" for step in filt["ladder"]
+    )
+    embed.add_field(name="⚖️ Echelle de sanctions", value=ladder_txt or "-", inline=False)
+    return embed
+
+@security_group.command(name="status", description="Voir l'etat complet des protections")
+async def security_status(i: discord.Interaction):
+    await _safe_defer(i)
+    await i.followup.send(embed=build_security_status_embed(i.guild),
+                          view=SecurityPanelView(i.user.id), ephemeral=True)
+
+@security_group.command(name="antiraid", description="Activer ou desactiver l'anti-raid")
+@app_commands.describe(actif="Activer la protection", seuil="Arrivees declenchant l'alerte",
+                       fenetre="Fenetre en secondes", age_minimum="Age minimum du compte en jours",
+                       action="Action sur les comptes suspects")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Lockdown (mode securite)", value="lockdown"),
+    app_commands.Choice(name="Expulser", value="kick"),
+    app_commands.Choice(name="Bannir", value="ban"),
+])
+async def security_antiraid(i: discord.Interaction, actif: bool, seuil: int = None,
+                            fenetre: int = None, age_minimum: int = None,
+                            action: app_commands.Choice[str] = None):
+    await _safe_defer(i)
+    changes = {"enabled": actif}
+    if seuil is not None:
+        changes["join_threshold"] = max(2, min(100, seuil))
+    if fenetre is not None:
+        changes["join_window"] = max(3, min(300, fenetre))
+    if age_minimum is not None:
+        changes["min_account_age_days"] = max(0, min(365, age_minimum))
+    if action is not None:
+        changes["action"] = action.value
+    cfg = set_raid_cfg(str(i.guild.id), **changes)
+
+    embed = embed_success("Anti-raid mis a jour", "", str(i.guild.id))
+    embed.add_field(name="🛡️ Etat", value=status_badge(cfg["enabled"], str(i.guild.id)), inline=True)
+    embed.add_field(name="📊 Seuil", value=f"`{cfg['join_threshold']}` / `{cfg['join_window']}s`", inline=True)
+    embed.add_field(name="📅 Age minimum", value=f"`{cfg['min_account_age_days']}` jours", inline=True)
+    embed.add_field(name="⚡ Action", value=f"`{cfg['action']}`", inline=True)
+    await i.followup.send(embed=embed, ephemeral=True)
+    await log_event(i.guild, "admin", "Configuration anti-raid modifiee",
+                    f"Anti-raid {'active' if cfg['enabled'] else 'desactive'}.",
+                    severity="info", actor=i.user)
+
+@security_group.command(name="antinuke", description="Configurer la protection anti-nuke")
+@app_commands.describe(actif="Activer la protection", sanction="Sanction appliquee a l'attaquant",
+                       restauration_auto="Recreer automatiquement ce qui est supprime")
+@app_commands.choices(sanction=[
+    app_commands.Choice(name="Retirer tous les roles", value="strip"),
+    app_commands.Choice(name="Expulser", value="kick"),
+    app_commands.Choice(name="Bannir", value="ban"),
+])
+async def security_antinuke(i: discord.Interaction, actif: bool,
+                            sanction: app_commands.Choice[str] = None,
+                            restauration_auto: bool = None):
+    await _safe_defer(i)
+    changes = {"enabled": actif}
+    if sanction is not None:
+        changes["punishment"] = sanction.value
+    if restauration_auto is not None:
+        changes["auto_restore"] = restauration_auto
+    cfg = set_nuke_cfg(str(i.guild.id), **changes)
+
+    embed = embed_success("Anti-nuke mis a jour", "", str(i.guild.id))
+    embed.add_field(name="💥 Etat", value=status_badge(cfg["enabled"], str(i.guild.id)), inline=True)
+    embed.add_field(name="⚡ Sanction", value=f"`{cfg['punishment']}`", inline=True)
+    embed.add_field(name="♻️ Restauration", value="🟢 oui" if cfg["auto_restore"] else "🔴 non", inline=True)
+    if not i.guild.me.guild_permissions.view_audit_log:
+        embed.add_field(
+            name="⚠️ Attention",
+            value="ModBot n'a pas la permission **Voir les logs d'audit** : "
+                  "il ne pourra pas identifier les attaquants.",
+            inline=False,
+        )
+    await i.followup.send(embed=embed, ephemeral=True)
+    await log_event(i.guild, "admin", "Configuration anti-nuke modifiee",
+                    f"Anti-nuke {'active' if cfg['enabled'] else 'desactive'}.",
+                    severity="info", actor=i.user)
+
+@security_group.command(name="whitelist", description="Gerer la liste blanche anti-nuke")
+@app_commands.describe(action="Ajouter ou retirer", membre="Membre de confiance", role="Role de confiance")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Ajouter", value="add"),
+    app_commands.Choice(name="Retirer", value="remove"),
+    app_commands.Choice(name="Afficher", value="show"),
+])
+async def security_whitelist(i: discord.Interaction, action: app_commands.Choice[str],
+                             membre: discord.Member = None, role: discord.Role = None):
+    await _safe_defer(i)
+    gid = str(i.guild.id)
+    cfg = get_nuke_cfg(gid)
+    users = [str(x) for x in (cfg.get("whitelist_users") or [])]
+    roles = [str(x) for x in (cfg.get("whitelist_roles") or [])]
+
+    if action.value == "show":
+        embed = embed_base("Liste blanche anti-nuke",
+                           "Ces membres et roles ne declenchent jamais la protection.",
+                           Palette.PRIMARY, gid, ICONS["security"])
+        embed.add_field(
+            name=f"👤 Membres ({len(users)})",
+            value="\n".join(f"• <@{u}>" for u in users[:20]) or "_aucun_", inline=False)
+        embed.add_field(
+            name=f"🎭 Roles ({len(roles)})",
+            value="\n".join(f"• <@&{r}>" for r in roles[:20]) or "_aucun_", inline=False)
+        embed.add_field(name="👑 Proprietaire",
+                        value="🟢 toujours de confiance" if cfg.get("trust_owner") else "🔴 surveille",
+                        inline=False)
+        return await i.followup.send(embed=embed, ephemeral=True)
+
+    if not membre and not role:
+        return await i.followup.send(
+            embed=embed_error("Cible manquante", "Indique un `membre` ou un `role`.", gid),
+            ephemeral=True)
+
+    changed = []
+    if membre:
+        uid = str(membre.id)
+        if action.value == "add" and uid not in users:
+            users.append(uid); changed.append(f"➕ {membre.mention}")
+        elif action.value == "remove" and uid in users:
+            users.remove(uid); changed.append(f"➖ {membre.mention}")
+    if role:
+        rid = str(role.id)
+        if action.value == "add" and rid not in roles:
+            roles.append(rid); changed.append(f"➕ {role.mention}")
+        elif action.value == "remove" and rid in roles:
+            roles.remove(rid); changed.append(f"➖ {role.mention}")
+
+    if not changed:
+        return await i.followup.send(
+            embed=embed_info("Aucun changement", "La liste blanche est deja dans cet etat.", gid),
+            ephemeral=True)
+
+    set_nuke_cfg(gid, whitelist_users=users, whitelist_roles=roles)
+    embed = embed_success("Liste blanche mise a jour", "\n".join(changed), gid)
+    embed.add_field(name="👤 Membres", value=str(len(users)), inline=True)
+    embed.add_field(name="🎭 Roles", value=str(len(roles)), inline=True)
+    await i.followup.send(embed=embed, ephemeral=True)
+    await log_event(i.guild, "admin", "Liste blanche anti-nuke modifiee",
+                    "\n".join(changed), severity="warning", actor=i.user)
+
+@security_group.command(name="lockdown", description="Activer ou lever manuellement le mode securite")
+@app_commands.describe(actif="Activer (true) ou lever (false) le mode securite")
+async def security_lockdown(i: discord.Interaction, actif: bool):
+    gid = str(i.guild.id)
+
+    # Levee : action reversible, aucune confirmation necessaire
+    if not actif:
+        await _safe_defer(i)
+        if not RAID.safe_mode_active(gid):
+            return await i.followup.send(
+                embed=embed_info("Mode securite inactif",
+                                 "Le serveur fonctionne deja normalement.", gid),
+                ephemeral=True)
+        await release_safe_mode(i.guild, automatic=False)
+        return await i.followup.send(
+            embed=embed_success("Mode securite leve",
+                                "Le serveur revient a son fonctionnement normal.", gid),
+            ephemeral=True)
+
+    # Activation : confirmation obligatoire
+    confirmed, view = await ask_confirmation(
+        i, "Activer le mode securite ?",
+        "Le niveau de verification du serveur sera eleve et les nouvelles arrivees "
+        "suspectes seront bloquees jusqu'a la levee du mode.",
+        confirm_label="Activer",
+    )
+    if not confirmed:
+        return
+    engaged = await engage_safe_mode(i.guild, "Activation manuelle", triggered_by=i.user)
+    embed = (embed_success("Mode securite active",
+                           "Le serveur est desormais en protection renforcee.", gid)
+             if engaged else
+             embed_info("Mode securite deja actif",
+                        "Aucun changement : la protection etait deja engagee.", gid))
+    target = view.interaction or i
+    try:
+        await target.followup.send(embed=embed, ephemeral=True)
+    except Exception:
+        await safe_ephemeral(i, embed=embed)
+
+class SecurityPanelView(discord.ui.View):
+    """Actions rapides depuis /securite status."""
+
+    def __init__(self, author_id):
+        super().__init__(timeout=300)
+        self.author_id = int(author_id)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=embed_error("Action refusee", "Ce panneau appartient a la personne qui l'a ouvert."),
+                ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Actualiser", emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.edit_message(
+                embed=build_security_status_embed(interaction.guild), view=self)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Sauvegarder maintenant", emoji="💾", style=discord.ButtonStyle.primary)
+    async def backup_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _safe_defer(interaction)
+        gid = str(interaction.guild.id)
+        try:
+            entry = BACKUPS.create(gid, build_guild_snapshot(interaction.guild),
+                                   author=str(interaction.user), note="Depuis le panneau securite")
+        except Exception as ex:
+            return await interaction.followup.send(
+                embed=embed_error("Sauvegarde impossible", f"`{ex}`", gid), ephemeral=True)
+        await interaction.followup.send(
+            embed=embed_success("Sauvegarde creee", f"Identifiant : `{entry['id']}`", gid), ephemeral=True)
+
+    @discord.ui.button(label="Lever le mode securite", emoji="🔓", style=discord.ButtonStyle.success)
+    async def release(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _safe_defer(interaction)
+        gid = str(interaction.guild.id)
+        if not RAID.safe_mode_active(gid):
+            return await interaction.followup.send(
+                embed=embed_info("Mode securite inactif", "Le serveur fonctionne deja normalement.", gid),
+                ephemeral=True)
+        await release_safe_mode(interaction.guild, automatic=False)
+        await interaction.followup.send(
+            embed=embed_success("Mode securite leve", "Le serveur revient a la normale.", gid), ephemeral=True)
+
+bot.tree.add_command(security_group)
+
+# ════════════════════════════════════════════════
+#  HISTORIQUE DES INFRACTIONS
+# ════════════════════════════════════════════════
+
+@bot.tree.command(name="infractions", description="Consulter l'historique des infractions d'un membre")
+@app_commands.describe(membre="Le membre a consulter")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def cmd_infractions(i: discord.Interaction, membre: discord.Member):
+    await _safe_defer(i)
+    gid = str(i.guild.id)
+    history = INFRACTIONS.history(gid, membre.id)
+    points = INFRACTIONS.points(gid, membre.id)
+    ladder = get_filter_cfg(gid)["ladder"]
+
+    if not history:
+        return await i.followup.send(
+            embed=embed_success("Casier vierge", f"{membre.mention} n'a aucune infraction enregistree.", gid),
+            ephemeral=True)
+
+    current = sc.resolve_sanction(points, ladder)
+    next_step = next((s for s in ladder if s["threshold"] > points), None)
+
+    embed = embed_base(f"Infractions de {membre.display_name}", "",
+                       Palette.WARNING if points < 4 else Palette.DANGER, gid, ICONS["warn"])
+    embed.set_thumbnail(url=membre.display_avatar.url)
+    embed.add_field(name="📊 Points cumules", value=f"`{points}`", inline=True)
+    embed.add_field(name="📋 Infractions", value=f"`{len(history)}`", inline=True)
+    embed.add_field(name="⚖️ Palier actuel", value=current["fr"], inline=True)
+    if next_step:
+        embed.add_field(
+            name="📌 Prochain palier",
+            value=f"{next_step['fr']} a `{next_step['threshold']}` points "
+                  f"(encore `{next_step['threshold'] - points}`)",
+            inline=False)
+    lines = []
+    for entry in reversed(history[-10:]):
+        stamp = sc.parse_iso(entry.get("date"))
+        lines.append(f"`{fmt(stamp) if stamp else '?'}` — {entry.get('reason', '?')} "
+                     f"(+{entry.get('points', 1)} pt)")
+    embed.add_field(name="🕒 10 dernieres infractions", value="\n".join(lines)[:1024], inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="infractions-reset", description="Effacer l'historique d'infractions d'un membre")
+@app_commands.describe(membre="Le membre a reinitialiser")
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_infractions_reset(i: discord.Interaction, membre: discord.Member):
+    gid = str(i.guild.id)
+    points = INFRACTIONS.points(gid, membre.id)
+    if not points:
+        return await send_error(i, "Rien a effacer", f"{membre.mention} n'a aucune infraction.")
+    confirmed, view = await ask_confirmation(
+        i, "Effacer l'historique ?",
+        f"L'historique complet de {membre.mention} sera efface definitivement.",
+        confirm_label="Effacer",
+        fields=[("📊 Points actuels", f"`{points}`")],
+    )
+    if not confirmed:
+        return
+    INFRACTIONS.reset(gid, membre.id)
+    reset_avert(str(membre.id), gid)
+    target = view.interaction or i
+    try:
+        await target.followup.send(
+            embed=embed_success("Historique efface", f"{membre.mention} repart de zero.", gid), ephemeral=True)
+    except Exception:
+        pass
+    await log_event(i.guild, "moderation", "Historique d'infractions efface",
+                    f"L'historique de {membre.mention} a ete reinitialise.",
+                    fields=[("📊 Points effaces", str(points))],
+                    severity="warning", actor=i.user, target=membre)
+
+# ════════════════════════════════════════════════
+#  APPLICATION DES SANCTIONS (filtre de langage)
+# ════════════════════════════════════════════════
+
+async def apply_ladder_sanction(member, step, reason):
+    """
+    Applique un palier de l'echelle de sanctions.
+    Retourne {"applied": bool, "label": str, "error": str|None}
+    """
+    action = step.get("action", "warn")
+    minutes = int(step.get("minutes") or 0)
+    label = step.get("fr", action)
+    full_reason = f"[ModBot] {label} — {reason}"[:500]
+    try:
+        if action == "mute" and minutes > 0:
+            await member.timeout(discord.utils.utcnow() + timedelta(minutes=minutes), reason=full_reason)
+        elif action == "kick":
+            await member.kick(reason=full_reason)
+        elif action == "ban":
+            await member.guild.ban(member, reason=full_reason, delete_message_days=0)
+        return {"applied": True, "label": label, "error": None}
+    except discord.Forbidden:
+        return {"applied": False, "label": label, "error": "permissions insuffisantes"}
+    except Exception as ex:
+        return {"applied": False, "label": label, "error": type(ex).__name__}
+
+async def handle_bad_word(message, detection):
+    """Traite une insulte detectee : suppression, sanction graduee, logs, DM."""
+    guild = message.guild
+    gid = str(guild.id)
+    member = message.author
+    filt = get_filter_cfg(gid)
+
+    if not await claim_message_by_delete(message):
+        return
+
+    weight = sc.word_severity(detection["word"], filt["severities"])
+    points, _ = INFRACTIONS.add(
+        gid, member.id,
+        f"Langage interdit : {detection['word']}",
+        points=weight,
+        word=detection["word"],
+        method=detection["method"],
+        channel=str(message.channel.id),
+    )
+    # Maintient l'ancien compteur pour les commandes existantes
+    add_avert(str(member.id), gid, detection["word"])
+
+    step = sc.resolve_sanction(points, filt["ladder"])
+    result = await apply_ladder_sanction(member, step, detection["word"])
+    next_step = next((s for s in filt["ladder"] if s["threshold"] > points), None)
+
+    colors = {"warn": Palette.WARNING, "mute": 0xFF6B35,
+              "kick": Palette.DANGER, "ban": Palette.CRITICAL}
+    color = colors.get(step["action"], Palette.WARNING)
+
+    # 1. Message public (auto-supprime)
+    public = EG("🚫 Message supprime", "", color, gid)
+    public.description = (
+        f"{member.mention}, ton message a ete supprime car il contient un terme interdit."
+    )
+    public.add_field(name="⚡ Sanction", value=result["label"], inline=True)
+    public.add_field(name="📊 Total", value=f"`{points}` point(s)", inline=True)
+    if next_step:
+        public.add_field(
+            name="📌 Prochain palier",
+            value=f"{next_step['fr']} dans `{next_step['threshold'] - points}` point(s)",
+            inline=True)
+    try:
+        await message.channel.send(embed=public, delete_after=12,
+                                   allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass
+
+    # 2. Log detaille
+    methods = {"strict": "correspondance directe",
+               "leet": "caracteres remplaces (leet)",
+               "tolerant": "contournement par separateurs"}
+    await log_event(
+        guild, "moderation", "Filtre de langage declenche",
+        f"Un message de {member.mention} a ete supprime dans {message.channel.mention}.",
+        fields=[
+            ("🚫 Terme detecte", f"`{detection['word']}`"),
+            ("🔍 Methode", methods.get(detection["method"], detection["method"])),
+            ("💬 Extrait detecte", f"`{detection['match'][:100]}`"),
+            ("⚡ Sanction", result["label"] + ("" if result["applied"] else f" (echec : {result['error']})")),
+            ("📊 Points cumules", f"`{points}`"),
+            ("📝 Message original", f"```{(message.content or '')[:500]}```"),
+        ],
+        severity="danger" if step["action"] in ("kick", "ban") else "warning",
+        target=member, color=color,
+    )
+
+    # 3. DM au membre
+    try:
+        dm = embed_base("Sanction recue", "", color, gid, ICONS["warn"])
+        dm.description = f"Tu as recu une sanction sur **{guild.name}**."
+        dm.add_field(name="📋 Motif", value="Langage interdit", inline=True)
+        dm.add_field(name="⚡ Sanction", value=result["label"], inline=True)
+        dm.add_field(name="📊 Points", value=f"`{points}`", inline=True)
+        if next_step:
+            dm.add_field(name="📌 Attention",
+                         value=f"Encore `{next_step['threshold'] - points}` point(s) "
+                               f"avant : **{next_step['fr']}**", inline=False)
+        if step["action"] == "ban":
+            dm.add_field(name="🔓 Contester", value=LIEN_DEBAN, inline=False)
+        await member.send(embed=dm)
+    except Exception:
+        pass
+
+    # 4. Enregistrement du ban dans l'historique global
+    if step["action"] == "ban" and result["applied"]:
+        add_ban(gid, str(member.id), str(member),
+                f"Langage interdit — {detection['word']}", "Permanent", "auto_filter", "ModBot")
+        INFRACTIONS.reset(gid, member.id)
+        reset_avert(str(member.id), gid)
+
+def detect_message_content(message, gid):
+    """Analyse le contenu complet d'un message (texte + embeds)."""
+    filt = get_filter_cfg(gid)
+    if not filt["enabled"]:
+        return None
+    parts = [message.content or ""]
+    for embed in message.embeds:
+        parts.extend(str(x) for x in (embed.title, embed.description) if x)
+    text = "\n".join(parts)
+    words = INSULTES_BASE + get_custom(gid)
+    return sc.detect_bad_word(text, words, tolerant=filt["tolerant"],
+                              extra_safe=filt["allowlist"])
+
+# ════════════════════════════════════════════════
+#  BOUCLES DE FOND SECURITE
+# ════════════════════════════════════════════════
+
+async def security_maintenance_loop():
+    """Leve les modes securite expires et purge les logs trop volumineux."""
+    await bot.wait_until_ready()
+    purge_tick = 0
+    while not bot.is_closed():
+        try:
+            for gid in RAID.expired_guilds():
+                guild = bot.get_guild(int(gid))
+                if guild:
+                    await release_safe_mode(guild, automatic=True)
+            purge_tick += 1
+            if purge_tick >= 120:  # toutes les heures environ
+                purge_tick = 0
+                for guild in bot.guilds:
+                    db_purge_guild_logs(guild.id)
+        except Exception as ex:
+            print(f"security_maintenance_loop: {ex}")
+        await asyncio.sleep(30)
+
+async def auto_backup_loop():
+    """Sauvegarde automatique configurable, par serveur."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            for guild in bot.guilds:
+                cfg = get_cfg(guild.id)
+                if not cfg.get("auto_backup_enabled"):
+                    continue
+                try:
+                    interval_hours = max(1, int(cfg.get("auto_backup_interval_hours") or 24))
+                except (TypeError, ValueError):
+                    interval_hours = 24
+                last = sc.parse_iso(cfg.get("auto_backup_last"))
+                if last and (now() - last) < timedelta(hours=interval_hours):
+                    continue
+                try:
+                    entry = BACKUPS.create(str(guild.id), build_guild_snapshot(guild),
+                                           author="ModBot (automatique)",
+                                           note=f"Sauvegarde automatique ({interval_hours}h)")
+                    update_cfg(guild.id, "auto_backup_last", now().isoformat())
+                    await log_event(guild, "admin", "Sauvegarde automatique",
+                                    f"Sauvegarde `{entry['id']}` creee automatiquement.",
+                                    severity="success")
+                except Exception as ex:
+                    print(f"auto_backup {guild.id}: {ex}")
+                await asyncio.sleep(2)
+        except Exception as ex:
+            print(f"auto_backup_loop: {ex}")
+        await asyncio.sleep(900)  # verifie toutes les 15 minutes
+
+# ════════════════════════════════════════════════
+#  GESTION D'ERREURS — messages propres
+# ════════════════════════════════════════════════
+
+PERMISSION_LABELS_FR = {
+    "administrator": "Administrateur",
+    "manage_guild": "Gerer le serveur",
+    "manage_messages": "Gerer les messages",
+    "manage_channels": "Gerer les salons",
+    "manage_roles": "Gerer les roles",
+    "ban_members": "Bannir des membres",
+    "kick_members": "Expulser des membres",
+    "moderate_members": "Exclure temporairement",
+    "view_audit_log": "Voir les logs d'audit",
+}
+
+def humanize_permissions(perms):
+    return ", ".join(PERMISSION_LABELS_FR.get(p, p.replace("_", " ")) for p in perms) or "-"
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """
+    Transforme toutes les erreurs de slash commandes en embeds lisibles.
+    Sans ce gestionnaire, Discord affiche seulement « L'interaction a echoue ».
+    """
+    gid = str(interaction.guild.id) if interaction.guild else None
+
+    if isinstance(error, app_commands.MissingPermissions):
+        embed = embed_error(
+            "Permission refusee",
+            "Tu n'as pas les permissions necessaires pour utiliser cette commande.",
+            gid,
+        )
+        embed.add_field(name="🔑 Permissions requises",
+                        value=humanize_permissions(error.missing_permissions), inline=False)
+
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        embed = embed_error(
+            "ModBot manque de permissions",
+            "Le bot ne peut pas executer cette action sur ce serveur.",
+            gid,
+        )
+        embed.add_field(name="🔑 A accorder a ModBot",
+                        value=humanize_permissions(error.missing_permissions), inline=False)
+        embed.add_field(name="💡 Comment faire",
+                        value="Parametres du serveur → Roles → ModBot → active les permissions ci-dessus.",
+                        inline=False)
+
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        embed = embed_warning(
+            "Commande en cooldown",
+            f"Merci de patienter encore **{error.retry_after:.1f} seconde(s)**.",
+            gid,
+        )
+
+    elif isinstance(error, app_commands.NoPrivateMessage):
+        embed = embed_error("Commande indisponible en message prive",
+                            "Utilise cette commande depuis un serveur.", gid)
+
+    elif isinstance(error, app_commands.CheckFailure):
+        embed = embed_error("Acces refuse",
+                            "Tu ne remplis pas les conditions requises pour cette commande.", gid)
+
+    elif isinstance(error, app_commands.TransformerError):
+        embed = embed_error("Argument invalide",
+                            f"La valeur `{error.value}` n'est pas valide pour cette commande.", gid)
+
+    else:
+        original = getattr(error, "original", error)
+        if isinstance(original, discord.Forbidden):
+            embed = embed_error(
+                "Action refusee par Discord",
+                "ModBot n'a pas les droits suffisants, ou la cible a un role superieur au sien.",
+                gid,
+            )
+            embed.add_field(
+                name="💡 Verifie",
+                value="Le role **ModBot** doit etre place **au-dessus** des membres a moderer.",
+                inline=False,
+            )
+        elif isinstance(original, discord.NotFound):
+            embed = embed_error("Element introuvable",
+                                "Le salon, le message ou le membre vise n'existe plus.", gid)
+        elif isinstance(original, discord.HTTPException):
+            embed = embed_error("Discord a refuse la requete",
+                                f"Code `{original.status}` — reessaie dans quelques instants.", gid)
+        else:
+            embed = embed_error(
+                "Une erreur inattendue est survenue",
+                "L'incident a ete enregistre. Reessaie, et contacte le support si cela persiste.",
+                gid,
+            )
+            command_name = interaction.command.qualified_name if interaction.command else "?"
+            print(f"[Erreur slash /{command_name}] {type(original).__name__}: {original}")
+            if interaction.guild:
+                await log_event(
+                    interaction.guild, "admin", "Erreur de commande",
+                    f"La commande `/{command_name}` a echoue.",
+                    fields=[("⚠️ Type", type(original).__name__),
+                            ("📋 Detail", str(original)[:500])],
+                    severity="warning", actor=interaction.user,
+                )
+
+    await safe_ephemeral(interaction, embed=embed)
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Meme traitement pour les commandes a prefixe."""
+    if isinstance(error, commands.CommandNotFound):
+        return
+    gid = str(ctx.guild.id) if ctx.guild else None
+
+    if isinstance(error, commands.MissingPermissions):
+        embed = embed_error("Permission refusee",
+                            "Tu n'as pas les permissions necessaires pour cette commande.", gid)
+        embed.add_field(name="🔑 Requis",
+                        value=humanize_permissions(error.missing_permissions), inline=False)
+    elif isinstance(error, commands.BotMissingPermissions):
+        embed = embed_error("ModBot manque de permissions", "", gid)
+        embed.add_field(name="🔑 A accorder",
+                        value=humanize_permissions(error.missing_permissions), inline=False)
+    elif isinstance(error, commands.MissingRequiredArgument):
+        embed = embed_error("Argument manquant",
+                            f"Le parametre `{error.param.name}` est obligatoire.", gid)
+    elif isinstance(error, commands.CommandOnCooldown):
+        embed = embed_warning("Commande en cooldown",
+                              f"Patiente encore {error.retry_after:.1f} seconde(s).", gid)
+    else:
+        original = getattr(error, "original", error)
+        if isinstance(original, discord.Forbidden):
+            embed = embed_error("Action refusee par Discord",
+                                "ModBot n'a pas les droits suffisants pour cette action.", gid)
+        else:
+            embed = embed_error("Une erreur est survenue",
+                                "Reessaie ou contacte le support si le probleme persiste.", gid)
+            print(f"[Erreur commande !{ctx.invoked_with}] {type(original).__name__}: {original}")
+    try:
+        await ctx.send(embed=embed, delete_after=15)
+    except Exception:
+        pass
+
 # ════════════════════════════════════════════════
 #  ON READY
 # ════════════════════════════════════════════════
@@ -5315,6 +8148,8 @@ async def sync_guild_command_language(guild):
 @bot.event
 async def on_ready():
     global _dashboard_recurring_task, _dashboard_social_task
+    global _security_task, _autobackup_task
+    BOT_STATUS.update({"state": "connecte", "detail": ""})
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher()]:
@@ -5330,6 +8165,10 @@ async def on_ready():
         _dashboard_recurring_task = asyncio.create_task(dashboard_recurring_loop())
     if not _dashboard_social_task or _dashboard_social_task.done():
         _dashboard_social_task = asyncio.create_task(dashboard_social_loop())
+    if not _security_task or _security_task.done():
+        _security_task = asyncio.create_task(security_maintenance_loop())
+    if not _autobackup_task or _autobackup_task.done():
+        _autobackup_task = asyncio.create_task(auto_backup_loop())
     try:
         synced = await bot.tree.sync()
         for guild in bot.guilds:
@@ -5419,88 +8258,13 @@ async def on_message(message):
             await send_log(message.guild, le)
             return
 
-        # Détection insultes
-        insulte = detecter(message.content, gid)
-        if cfg.get("insultes_enabled", True) and insulte and not est_immunise(message.author, gid):
-            if not await claim_message_by_delete(message):
-                return
-            nb = add_avert(uid, gid, insulte)
-            sanction = await appliquer_sanction(message.author, nb, insulte)
-
-            if nb >= MAX_AVERT:
-                e = discord.Embed(title="🔨 Bannissement automatique", color=0xED4245, timestamp=now())
-                e.set_author(name=str(message.author), icon_url=message.author.display_avatar.url)
-                e.set_thumbnail(url=message.author.display_avatar.url)
-                e.description = f"{message.author.mention} a été **définitivement banni** du serveur."
-                e.add_field(name="📋 Raison", value="Insultes répétées", inline=False)
-                e.add_field(name="🚫 Dernier mot", value=f"`{insulte}`", inline=True)
-                e.add_field(name="📊 Bilan", value=barre(MAX_AVERT, MAX_AVERT), inline=True)
-                e.set_footer(text="ModBot • Modération automatique")
-                await message.channel.send(embed=e)
-                le = E("🔨 LOG — Bannissement auto", couleur=0xED4245)
-                le.add_field(name="👤 Pseudo", value=str(message.author), inline=True)
-                le.add_field(name="🆔 ID", value=f"`{message.author.id}`", inline=True)
-                le.add_field(name="🚫 Mot", value=f"`{insulte}`", inline=True)
-                le.add_field(name="📍 Salon", value=message.channel.mention, inline=True)
-                await send_log(message.guild, le)
-                try:
-                    dm = EG("🔨 Tu as été banni", couleur=0xED4245, gid=gid)
-                    dm.description = (f"Tu as été **banni** de **{message.guild.name}**.\n\n"
-                                       f"🔓 **Conteste :** {LIEN_DEBAN}\nCrée un ticket **Déban**.")
-                    await message.author.send(embed=dm)
-                except Exception:
-                    pass
-                try:
-                    if sanction.get("type") != "ban" or not sanction.get("success"):
-                        await message.guild.ban(message.author, reason="[ModBot] 4 avertissements", delete_message_days=0)
-                    add_ban(
-                        gid,
-                        uid,
-                        str(message.author),
-                        f"Insultes répétées - dernier mot: {insulte}",
-                        sanction.get("duration", "Permanent"),
-                        "auto_filter",
-                        "ModBot",
-                    )
-                    reset_avert(uid, gid)
-                except Exception:
-                    pass
-
-            else:
-                restants = MAX_AVERT - nb
-                c = 0xFFA500 if nb == 1 else 0xFF4500
-                sanction_txt = ""
-                if nb == 2: sanction_txt = "\n🔇 **Sanction : Mute 4 heures**"
-                elif nb == 3: sanction_txt = "\n🔇 **Sanction : Mute 24 heures**"
-                e = discord.Embed(title="🚫 Message supprimé", color=c, timestamp=now())
-                e.set_author(name=str(message.author), icon_url=message.author.display_avatar.url)
-                e.set_thumbnail(url=message.author.display_avatar.url)
-                e.description = (f"{message.author.mention}, ton message a été supprimé "
-                                  f"car il contient un mot interdit.{sanction_txt}")
-                e.add_field(name="🚫 Mot détecté", value=f"`{insulte}`", inline=True)
-                e.add_field(name="📍 Salon", value=message.channel.mention, inline=True)
-                e.add_field(name="📊 Avertissements", value=f"{barre(nb, MAX_AVERT)} `{nb}/{MAX_AVERT}`", inline=False)
-                e.add_field(name="📌 Attention", value=f"Encore **{restants}** avertissement(s) avant le bannissement.", inline=False)
-                e.set_footer(text="ModBot • Respect des règles")
-                await message.channel.send(embed=e, delete_after=12)
-                le = E(f"⚠️ LOG — Avertissement {nb}/{MAX_AVERT} — {sanction['label']}", couleur=c)
-                le.add_field(name="👤 Pseudo", value=str(message.author), inline=True)
-                le.add_field(name="🆔 ID", value=f"`{message.author.id}`", inline=True)
-                le.add_field(name="🚫 Mot", value=f"`{insulte}`", inline=True)
-                le.add_field(name="📍 Salon", value=message.channel.mention, inline=True)
-                le.add_field(name="⚡ Sanction", value=sanction["label"], inline=True)
-                le.add_field(name="📊 Barre", value=barre(nb, MAX_AVERT), inline=False)
-                await send_log(message.guild, le)
-                try:
-                    dm = EG("⚠️ Avertissement reçu", couleur=c, gid=gid)
-                    dm.description = f"Tu as reçu un avertissement sur **{message.guild.name}**."
-                    dm.add_field(name="🚫 Mot filtré", value=f"`{insulte}`", inline=True)
-                    dm.add_field(name="⚡ Sanction", value=sanction["label"], inline=True)
-                    dm.add_field(name="📊 Progression", value=f"`{nb}/{MAX_AVERT}`", inline=True)
-                    dm.add_field(name="📌 Risque", value=f"Encore `{restants}` avant le bannissement.", inline=False)
-                    await message.author.send(embed=dm)
-                except Exception:
-                    pass
+        # Filtre de langage — moteur anti-contournement (security_core)
+        # Detecte "s a l o p e", "s@l0pe", "s.a.l.o.p.e", zalgo, cyrillique...
+        # tout en evitant les faux positifs ("dispute", "salon", "calcul").
+        detection = detect_message_content(message, gid)
+        if detection and not est_immunise(message.author, gid):
+            await handle_bad_word(message, detection)
+            return
 
     finally:
         _en_cours.discard(message.id)
@@ -5813,30 +8577,72 @@ async def cmd_warn(i: discord.Interaction, membre: discord.Member):
 @app_commands.describe(membre="Le membre à bannir", raison="Raison du bannissement")
 @app_commands.checks.has_permissions(ban_members=True)
 async def cmd_ban(i: discord.Interaction, membre: discord.Member, raison: str = "Aucune raison fournie"):
-    await _safe_defer(i)
     gid = str(i.guild.id)
+
+    # Verifications avant toute action irreversible
+    if membre.id == i.user.id:
+        return await send_error(i, "Action impossible", "Tu ne peux pas te bannir toi-meme.")
+    if membre.id == i.guild.owner_id:
+        return await send_error(i, "Action impossible",
+                                "Le proprietaire du serveur ne peut pas etre banni.")
+    if membre.id == getattr(bot.user, "id", None):
+        return await send_error(i, "Action impossible", "ModBot ne peut pas se bannir lui-meme.")
+    if isinstance(i.user, discord.Member) and membre.top_role >= i.user.top_role \
+            and i.user.id != i.guild.owner_id:
+        return await send_error(
+            i, "Hierarchie insuffisante",
+            f"{membre.mention} a un role superieur ou egal au tien : tu ne peux pas le bannir.")
+    if membre.top_role >= i.guild.me.top_role:
+        return await send_error(
+            i, "ModBot ne peut pas bannir ce membre",
+            f"Le role de {membre.mention} est superieur a celui de ModBot.\n"
+            "Deplace le role **ModBot** plus haut dans la liste des roles.")
+
+    confirmed, view = await ask_confirmation(
+        i, "Confirmer le bannissement",
+        f"Tu es sur le point de bannir **definitivement** {membre.mention} de **{i.guild.name}**.",
+        confirm_label="Bannir",
+        fields=[
+            ("👤 Membre", f"{membre} (`{membre.id}`)"),
+            ("📋 Raison", raison),
+            ("📅 Arrive le", fmt(membre.joined_at) if membre.joined_at else "inconnu"),
+        ],
+    )
+    if not confirmed:
+        return
+    target = view.interaction or i
+
     try:
-        dm = EG("🔨 Tu as été banni", couleur=0xED4245, gid=gid)
+        dm = EG("🔨 Tu as été banni", couleur=Palette.DANGER, gid=gid)
         dm.description = f"Tu as été banni de **{i.guild.name}**.\n\n🔓 **Conteste :** {LIEN_DEBAN}"
         dm.add_field(name="📋 Raison", value=raison, inline=False)
         await membre.send(embed=dm)
     except Exception:
-        pass
-    await i.guild.ban(membre, reason=f"[Manuel] {raison}", delete_message_days=0)
+        pass  # MP fermes : on bannit quand meme
+
+    try:
+        await i.guild.ban(membre, reason=f"[Manuel] {raison}", delete_message_days=0)
+    except discord.Forbidden:
+        return await target.followup.send(
+            embed=embed_error("Bannissement refuse",
+                              "Discord a refuse l'action : verifie les permissions de ModBot.", gid),
+            ephemeral=True)
+
     add_ban(gid, str(membre.id), str(membre), raison, "Permanent", "manual_ban", i.user)
-    e = E("🔨 Membre banni", couleur=0xED4245)
+
+    e = embed_success("Membre banni", "", gid)
     e.set_thumbnail(url=membre.display_avatar.url)
     e.add_field(name="👤 Membre", value=str(membre), inline=True)
     e.add_field(name="🆔 ID", value=f"`{membre.id}`", inline=True)
     e.add_field(name="📋 Raison", value=raison, inline=False)
     e.add_field(name="👮 Par", value=str(i.user), inline=True)
-    await i.followup.send(embed=e, ephemeral=True)
-    le = E("🔨 LOG — Ban manuel", couleur=0xED4245)
-    le.add_field(name="👤 Pseudo", value=str(membre), inline=True)
-    le.add_field(name="🆔 ID", value=f"`{membre.id}`", inline=True)
-    le.add_field(name="📋 Raison", value=raison, inline=False)
-    le.add_field(name="👮 Par", value=str(i.user), inline=True)
-    await send_log(i.guild, le)
+    await target.followup.send(embed=e, ephemeral=True)
+
+    await log_event(i.guild, "moderation", "Bannissement manuel",
+                    f"**{membre}** a ete banni par {i.user.mention}.",
+                    fields=[("📋 Raison", raison)],
+                    severity="danger", actor=i.user, target=membre,
+                    thumbnail=membre.display_avatar.url)
     await alert_staff(i.guild, "BAN MANUEL", i.user, membre, raison)
     track_mod(str(i.user.id), gid, "bans")
 
@@ -6120,7 +8926,90 @@ async def cmd_info(i: discord.Interaction):
 #  LANCEMENT
 # ════════════════════════════════════════════════
 
-if not TOKEN:
-    raise RuntimeError("TOKEN manquant : configure la variable d'environnement TOKEN.")
+async def main():
+    """
+    Demarre le serveur HTTP AVANT la connexion Discord.
 
-bot.run(TOKEN)
+    C'est essentiel sur un hebergeur type Railway, Render ou Heroku : le
+    routeur verifie qu'un processus ecoute sur $PORT des le demarrage. Si le
+    serveur n'ouvrait qu'une fois Discord connecte (dans on_ready), toute
+    lenteur ou tout echec de connexion se traduirait par un 502 opaque.
+
+    En cas d'echec Discord, l'API reste volontairement en vie : /api/health
+    renvoie alors la cause exacte au lieu d'une erreur de passerelle.
+    """
+    try:
+        await start_dashboard_api()
+    except Exception as ex:
+        print(f"⚠️  Impossible de demarrer l'API dashboard : {type(ex).__name__}: {ex}")
+
+    if not TOKEN:
+        BOT_STATUS.update({
+            "state": "token_manquant",
+            "detail": "La variable d'environnement TOKEN n'est pas definie.",
+        })
+        print("\n" + "=" * 64)
+        print("❌ TOKEN manquant.")
+        print("   Definis la variable d'environnement TOKEN avec le jeton du bot")
+        print("   (portail developpeur Discord → ton application → Bot → Reset Token).")
+        print("   Sur Railway/Render/Heroku : onglet Variables du service.")
+        print("=" * 64 + "\n")
+        return await _rester_en_vie()
+
+    try:
+        await bot.start(TOKEN)
+
+    except discord.LoginFailure:
+        BOT_STATUS.update({
+            "state": "token_invalide",
+            "detail": "Discord a refuse le jeton (LoginFailure).",
+        })
+        print("\n" + "=" * 64)
+        print("❌ Jeton Discord refuse.")
+        print("   Le TOKEN est invalide ou a ete regenere.")
+        print("   Genere-en un nouveau : portail Discord → Bot → Reset Token,")
+        print("   puis mets a jour la variable TOKEN chez ton hebergeur.")
+        print("=" * 64 + "\n")
+        return await _rester_en_vie()
+
+    except discord.PrivilegedIntentsRequired:
+        BOT_STATUS.update({
+            "state": "intents_manquants",
+            "detail": "Les intents privilegies ne sont pas actives sur l'application Discord.",
+        })
+        print("\n" + "=" * 64)
+        print("❌ Intents privilegies non actives.")
+        print("   Portail developpeur Discord → ton application → Bot,")
+        print("   puis active :")
+        print("     • SERVER MEMBERS INTENT   (arrivees/departs, anti-raid)")
+        print("     • MESSAGE CONTENT INTENT  (filtre de langage)")
+        print("   Enregistre, puis redemarre le bot.")
+        print("=" * 64 + "\n")
+        return await _rester_en_vie()
+
+    except Exception as ex:
+        BOT_STATUS.update({"state": "erreur", "detail": f"{type(ex).__name__}: {ex}"})
+        print(f"\n❌ Connexion Discord impossible : {type(ex).__name__}: {ex}\n")
+        return await _rester_en_vie()
+
+
+async def _rester_en_vie():
+    """
+    Maintient le processus (et donc l'API de diagnostic) actif malgre l'echec
+    de la connexion Discord, pour que l'hebergeur affiche une cause claire
+    plutot qu'un 502. Ne s'applique pas en execution locale interactive.
+    """
+    if not _dashboard_api_runner:
+        return
+    print("L'API reste active pour le diagnostic : interroge /api/health.")
+    try:
+        await asyncio.Event().wait()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nArret demande, fermeture propre.")

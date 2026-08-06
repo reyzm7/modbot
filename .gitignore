@@ -1,0 +1,29 @@
+# Secrets — ne jamais committer
+.env
+
+# Données générées au premier lancement
+*.db
+*.db-wal
+*.db-shm
+*.json.tmp
+backups/
+
+# Fichiers de données du bot
+config.json
+data.json
+bans.json
+tickets.json
+stats.json
+mod_stats.json
+ratings.json
+premium.json
+blacklist.json
+infractions.json
+dashboard_sessions.json
+dashboard_logs.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
