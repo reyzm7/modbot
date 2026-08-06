@@ -333,6 +333,105 @@ class TestSauvegardes(unittest.TestCase):
         self.assertEqual(self.store.list("2"), [])
 
 
+class TestCaptcha(unittest.TestCase):
+
+    def setUp(self):
+        self.dossier = tempfile.mkdtemp()
+        self.chemin = os.path.join(self.dossier, "captcha.json")
+        self.store = sc.CaptchaStore(self.chemin, ttl_minutes=10, max_attempts=3)
+
+    def tearDown(self):
+        shutil.rmtree(self.dossier, ignore_errors=True)
+
+    def test_alphabet_sans_caracteres_ambigus(self):
+        for ambigu in "OIL0125SZ":
+            self.assertNotIn(ambigu, sc.CAPTCHA_ALPHABET,
+                             f"« {ambigu} » preterait a confusion sur une image")
+
+    def test_code_longueur_et_alphabet(self):
+        code = sc.generate_captcha_code(5)
+        self.assertEqual(len(code), 5)
+        self.assertTrue(all(c in sc.CAPTCHA_ALPHABET for c in code))
+
+    def test_codes_differents(self):
+        codes = {sc.generate_captcha_code() for _ in range(50)}
+        self.assertGreater(len(codes), 40, "les codes doivent etre aleatoires")
+
+    def test_verification_reussie(self):
+        code = self.store.issue("1", "42", role_id="777")
+        res = self.store.verify("1", "42", code)
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["role_id"], "777")
+
+    def test_tolerance_casse_et_espaces(self):
+        code = self.store.issue("1", "42")
+        self.assertEqual(self.store.verify("1", "42", f"  {code.lower()} ")["status"], "ok")
+
+    def test_code_consomme_apres_succes(self):
+        code = self.store.issue("1", "42")
+        self.store.verify("1", "42", code)
+        self.assertEqual(self.store.verify("1", "42", code)["status"], "absent")
+
+    def test_mauvais_code_decompte_les_essais(self):
+        self.store.issue("1", "42")
+        self.assertEqual(self.store.verify("1", "42", "ZZZZZ")["remaining"], 2)
+        self.assertEqual(self.store.verify("1", "42", "ZZZZZ")["remaining"], 1)
+        self.assertEqual(self.store.verify("1", "42", "ZZZZZ")["status"], "bloque")
+
+    def test_bloque_efface_la_verification(self):
+        code = self.store.issue("1", "42")
+        for _ in range(3):
+            self.store.verify("1", "42", "ZZZZZ")
+        # meme le bon code ne passe plus : il faut en redemander un
+        self.assertEqual(self.store.verify("1", "42", code)["status"], "absent")
+
+    def test_expiration(self):
+        store = sc.CaptchaStore(self.chemin, ttl_minutes=-1)
+        code = store.issue("1", "42")
+        self.assertEqual(store.verify("1", "42", code)["status"], "expire")
+
+    def test_persistance_sur_disque(self):
+        """Un redemarrage ne doit pas annuler les verifications en cours."""
+        code = self.store.issue("1", "42", role_id="777")
+        autre = sc.CaptchaStore(self.chemin)  # simule un redemarrage du bot
+        self.assertEqual(autre.verify("1", "42", code)["status"], "ok")
+
+    def test_isolation_par_serveur(self):
+        code = self.store.issue("1", "42")
+        self.assertEqual(self.store.verify("2", "42", code)["status"], "absent")
+
+    def test_nouveau_code_remplace_l_ancien(self):
+        ancien = self.store.issue("1", "42")
+        nouveau = self.store.issue("1", "42")
+        if ancien != nouveau:
+            self.assertEqual(self.store.verify("1", "42", ancien)["status"], "faux")
+
+    def test_compteur_en_attente(self):
+        self.store.issue("1", "42")
+        self.store.issue("1", "43")
+        self.assertEqual(self.store.pending("1"), 2)
+        self.store.clear("1", "42")
+        self.assertEqual(self.store.pending("1"), 1)
+        self.store.clear("1")
+        self.assertEqual(self.store.pending("1"), 0)
+
+    def test_purge_des_expires(self):
+        sc.CaptchaStore(self.chemin, ttl_minutes=-1).issue("1", "42")
+        self.assertEqual(self.store.purge_expired(), 1)
+        self.assertEqual(self.store.purge_expired(), 0)
+
+    def test_purge_epargne_les_valides(self):
+        code = self.store.issue("1", "42")
+        self.store.purge_expired()
+        self.assertEqual(self.store.verify("1", "42", code)["status"], "ok")
+
+    def test_fichier_corrompu_ne_casse_rien(self):
+        with open(self.chemin, "w", encoding="utf-8") as fp:
+            fp.write("{ ceci n'est pas du json")
+        self.assertEqual(self.store.verify("1", "42", "ABCDE")["status"], "absent")
+        self.assertTrue(self.store.issue("1", "42"))
+
+
 class TestUtilitaires(unittest.TestCase):
 
     def test_parse_iso_formats(self):

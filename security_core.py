@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import time
 import unicodedata
@@ -847,7 +848,207 @@ class BackupStore:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  8. UTILITAIRES PARTAGES
+#  8. CAPTCHA
+# ════════════════════════════════════════════════════════════════════
+
+# Alphabet sans caracteres ambigus : ni O/0, ni I/l/1, ni S/5, ni Z/2.
+# Un humain qui lit l'image ne doit jamais hesiter sur un caractere.
+CAPTCHA_ALPHABET = "ABCDEFGHJKMNPQRTUVWXY346789"
+
+CAPTCHA_LENGTH = 5
+CAPTCHA_TTL_MINUTES = 10
+CAPTCHA_MAX_ATTEMPTS = 3
+
+
+def generate_captcha_code(length=CAPTCHA_LENGTH, alphabet=CAPTCHA_ALPHABET):
+    """Code aleatoire lisible, sans caractere ambigu."""
+    length = max(3, min(10, int(length or CAPTCHA_LENGTH)))
+    return "".join(random.choice(alphabet) for _ in range(length))
+
+
+def normalize_captcha_guess(guess):
+    """
+    Prepare la saisie du membre pour la comparaison.
+
+    Tolerant sur la casse, les espaces et les confusions visuelles courantes :
+    quelqu'un qui tape « o » pour « 0 » ne doit pas etre rejete. L'alphabet
+    exclut deja ces caracteres, la substitution est donc sans ambiguite.
+    """
+    text = str(guess or "").upper()
+    text = re.sub(r"[^A-Z0-9]", "", text)
+    return text.translate(str.maketrans({"0": "O", "1": "I", "5": "S", "2": "Z", "L": "I"}))
+
+
+class CaptchaStore:
+    """
+    Verifications en attente, persistees sur disque.
+
+    Structure du fichier :
+        {"<guild_id>": {"<user_id>": {"code", "role_id", "expires",
+                                       "attempts", "created"}}}
+
+    La persistance est essentielle : l'ancienne version gardait les captchas
+    en memoire, si bien qu'un simple redemarrage de l'hebergeur annulait
+    toutes les verifications en cours et bloquait les membres concernes.
+    """
+
+    def __init__(self, path, ttl_minutes=CAPTCHA_TTL_MINUTES,
+                 max_attempts=CAPTCHA_MAX_ATTEMPTS):
+        self.path = path
+        self.ttl_minutes = ttl_minutes
+        self.max_attempts = max_attempts
+
+    # ── persistance ──────────────────────────────────────────────────
+    def _load(self):
+        if not os.path.exists(self.path):
+            return {}
+        try:
+            with open(self.path, encoding="utf-8") as fp:
+                data = json.load(fp)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError, ValueError):
+            return {}
+
+    def _save(self, data):
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fp:
+                json.dump(data, fp, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _expired(entry, reference=None):
+        reference = reference or datetime.now(timezone.utc)
+        stamp = parse_iso((entry or {}).get("expires"))
+        return not stamp or stamp <= reference
+
+    def _purge(self, data):
+        """Retire les entrees expirees. Retourne True si le fichier a change."""
+        reference = datetime.now(timezone.utc)
+        changed = False
+        for gid in list(data.keys()):
+            members = data.get(gid)
+            if not isinstance(members, dict):
+                del data[gid]
+                changed = True
+                continue
+            for uid in list(members.keys()):
+                if self._expired(members[uid], reference):
+                    del members[uid]
+                    changed = True
+            if not members:
+                del data[gid]
+                changed = True
+        return changed
+
+    # ── cycle de vie d'une verification ──────────────────────────────
+    def issue(self, guild_id, user_id, role_id="", length=CAPTCHA_LENGTH):
+        """Cree (ou remplace) le captcha d'un membre et retourne son code."""
+        data = self._load()
+        self._purge(data)
+        code = generate_captcha_code(length)
+        expires = datetime.now(timezone.utc) + timedelta(minutes=self.ttl_minutes)
+        data.setdefault(str(guild_id), {})[str(user_id)] = {
+            "code": code,
+            "role_id": str(role_id or ""),
+            "expires": expires.isoformat(),
+            "created": datetime.now(timezone.utc).isoformat(),
+            "attempts": 0,
+        }
+        self._save(data)
+        return code
+
+    def peek(self, guild_id, user_id):
+        """Retourne l'entree en cours, ou None si absente ou expiree."""
+        data = self._load()
+        entry = data.get(str(guild_id), {}).get(str(user_id))
+        if not entry or self._expired(entry):
+            return None
+        return entry
+
+    def verify(self, guild_id, user_id, guess):
+        """
+        Compare une saisie au code attendu.
+
+        Retourne un dict {"status", "role_id", "remaining"} ou status vaut :
+            ok        - code correct, le role peut etre attribue
+            absent    - aucune verification en cours
+            expire    - le delai est depasse
+            faux      - mauvais code, `remaining` essais restants
+            bloque    - trop d'essais, il faut redemander un code
+        """
+        data = self._load()
+        gid, uid = str(guild_id), str(user_id)
+        entry = data.get(gid, {}).get(uid)
+
+        if not entry:
+            return {"status": "absent", "role_id": "", "remaining": 0}
+
+        if self._expired(entry):
+            self._forget(data, gid, uid)
+            self._save(data)
+            return {"status": "expire", "role_id": "", "remaining": 0}
+
+        attempts = int(entry.get("attempts", 0) or 0)
+        if attempts >= self.max_attempts:
+            self._forget(data, gid, uid)
+            self._save(data)
+            return {"status": "bloque", "role_id": "", "remaining": 0}
+
+        attendu = normalize_captcha_guess(entry.get("code"))
+        if normalize_captcha_guess(guess) == attendu and attendu:
+            role_id = entry.get("role_id", "")
+            self._forget(data, gid, uid)
+            self._save(data)
+            return {"status": "ok", "role_id": role_id, "remaining": 0}
+
+        entry["attempts"] = attempts + 1
+        remaining = max(0, self.max_attempts - entry["attempts"])
+        if remaining <= 0:
+            self._forget(data, gid, uid)
+            self._save(data)
+            return {"status": "bloque", "role_id": "", "remaining": 0}
+        self._save(data)
+        return {"status": "faux", "role_id": "", "remaining": remaining}
+
+    @staticmethod
+    def _forget(data, gid, uid):
+        members = data.get(gid)
+        if isinstance(members, dict):
+            members.pop(uid, None)
+            if not members:
+                data.pop(gid, None)
+
+    def clear(self, guild_id, user_id=None):
+        """Annule la verification d'un membre, ou de tout un serveur."""
+        data = self._load()
+        gid = str(guild_id)
+        if user_id is None:
+            data.pop(gid, None)
+        else:
+            self._forget(data, gid, str(user_id))
+        self._save(data)
+
+    def purge_expired(self):
+        """Nettoyage periodique. Retourne le nombre d'entrees supprimees."""
+        data = self._load()
+        before = sum(len(v) for v in data.values() if isinstance(v, dict))
+        if self._purge(data):
+            self._save(data)
+        after = sum(len(v) for v in data.values() if isinstance(v, dict))
+        return max(0, before - after)
+
+    def pending(self, guild_id):
+        """Nombre de verifications en attente sur un serveur."""
+        data = self._load()
+        self._purge(data)
+        return len(data.get(str(guild_id), {}))
+
+
+# ════════════════════════════════════════════════════════════════════
+#  9. UTILITAIRES PARTAGES
 # ════════════════════════════════════════════════════════════════════
 
 def parse_iso(value):

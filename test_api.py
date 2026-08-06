@@ -53,10 +53,45 @@ async def main():
                      f"valeur={data.get('oauth_configured')}")
             verifier("expose client_id", bool(data.get("client_id")))
 
+        print("\n--- Statistiques publiques (sans authentification) ---")
+        async with s.get(f"{BASE}/api/public/stats") as r:
+            data = await r.json() if r.status == 200 else {}
+            stats = data.get("stats") or {}
+            verifier("/api/public/stats accessible sans jeton", r.status == 200, f"recu {r.status}")
+            verifier("expose members_protected", "members_protected" in stats)
+            verifier("expose la repartition par pays", isinstance(stats.get("top_countries"), list))
+            texte = str(data)
+            verifier("aucun identifiant de serveur expose",
+                     "guild_id" not in texte and "\"id\"" not in texte)
+            verifier("lisible depuis n'importe quelle origine",
+                     r.headers.get("Access-Control-Allow-Origin") == "*",
+                     f"allow={r.headers.get('Access-Control-Allow-Origin')}")
+
+        async with s.get(f"{BASE}/api/public/stats",
+                         headers={"Origin": "https://site-inconnu.example"}) as r:
+            verifier("origine inconnue acceptee sur la route publique",
+                     r.status == 200 and r.headers.get("Access-Control-Allow-Origin") == "*")
+
+        # Le CORS ouvert ne doit surtout pas contaminer les routes privees :
+        # meme depuis une origine quelconque, elles exigent une session.
+        async with s.get(f"{BASE}/api/guilds",
+                         headers={"Origin": "https://site-inconnu.example"}) as r:
+            verifier("route privee protegee quelle que soit l'origine",
+                     r.status == 401, f"recu {r.status}")
+
         print("\n--- Authentification obligatoire ---")
-        for route in ("/api/guilds", "/api/me", "/api/admin/stats", "/api/admin/database"):
+        routes_privees = (
+            "/api/guilds", "/api/me", "/api/admin/stats", "/api/admin/database",
+            "/api/guilds/1/search/members", "/api/guilds/1/search/roles",
+            "/api/guilds/1/members/2",
+        )
+        for route in routes_privees:
             async with s.get(f"{BASE}{route}") as r:
                 verifier(f"{route} sans jeton -> 401", r.status == 401, f"recu {r.status}")
+
+        for route in ("/api/guilds/1/members/2/action", "/api/guilds/1/roles/2/action"):
+            async with s.post(f"{BASE}{route}", json={"action": "warn"}) as r:
+                verifier(f"POST {route} sans jeton -> 401", r.status == 401, f"recu {r.status}")
 
         async with s.get(f"{BASE}/api/guilds", headers={"Authorization": "Bearer faux"}) as r:
             verifier("/api/guilds avec faux jeton -> 401", r.status == 401, f"recu {r.status}")

@@ -254,6 +254,7 @@ F_DASHBOARD_SESSIONS = "dashboard_sessions.json"
 F_PREMIUM = "premium.json"
 F_BLACKLIST = "blacklist.json"
 F_DASHBOARD_LOGS = "dashboard_logs.json"
+F_CAPTCHA = "captcha_pending.json"
 F_DATABASE = os.environ.get("MODBOT_DATABASE", os.path.join(BASE_DIR, "modbot_dashboard.db"))
 UNLIMITED_PREMIUM_SERVERS = 999999
 
@@ -1523,26 +1524,87 @@ def is_spamming(uid, gid) -> bool:
 #  CAPTCHA
 # ════════════════════════════════════════════════
 
-_captcha: dict = {}
+# Les verifications en attente sont persistees sur disque : l'ancienne version
+# les gardait en memoire, si bien qu'un redemarrage de l'hebergeur bloquait
+# tous les membres en cours de verification.
+CAPTCHA_STORE = sc.CaptchaStore(os.path.join(BASE_DIR, F_CAPTCHA))
 
-def new_captcha(gid, uid, role_id) -> str:
-    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    g, u = str(gid), str(uid)
-    if g not in _captcha: _captcha[g] = {}
-    _captcha[g][u] = {"code": code, "role_id": role_id, "exp": now().timestamp() + 300}
-    return code
+
+def captcha_cfg(gid):
+    """Reglages du captcha pour un serveur, avec des valeurs par defaut sures."""
+    cfg = get_cfg(gid)
+    return {
+        "enabled": bool(cfg.get("captcha_enabled")),
+        "role_id": str(cfg.get("captcha_role") or ""),
+        "channel_id": str(cfg.get("captcha_channel") or ""),
+        "kick_minutes": int(cfg.get("captcha_kick_minutes") or 0),
+    }
+
+
+def new_captcha(gid, uid, role_id=""):
+    """Emet un code pour un membre et le retourne."""
+    return CAPTCHA_STORE.issue(gid, uid, role_id)
+
 
 def verify_captcha(gid, uid, guess):
-    g, u = str(gid), str(uid)
-    if g not in _captcha or u not in _captcha[g]: return None
-    p = _captcha[g][u]
-    if now().timestamp() > p["exp"]:
-        del _captcha[g][u]; return None
-    if guess.upper().strip() == p["code"]:
-        rid = p["role_id"]
-        del _captcha[g][u]
-        return rid
-    return None
+    """Compatibilite : retourne l'ID du role si le code est bon, sinon None."""
+    res = CAPTCHA_STORE.verify(gid, uid, guess)
+    return res["role_id"] if res["status"] == "ok" else None
+
+
+def render_captcha_image(code):
+    """
+    Dessine le code sur une image bruitee.
+
+    Retourne un discord.File, ou None si Pillow est absent : dans ce cas
+    l'appelant affiche le code en texte, la verification reste fonctionnelle.
+    """
+    if not PIL_AVAILABLE or not code:
+        return None
+    try:
+        largeur, hauteur = 420, 150
+        image = Image.new("RGB", (largeur, hauteur), (32, 34, 44))
+        dessin = ImageDraw.Draw(image)
+
+        # Fond : degrade discret + traits parasites
+        for y in range(hauteur):
+            teinte = 32 + int(18 * y / hauteur)
+            dessin.line([(0, y), (largeur, y)], fill=(teinte, teinte + 2, teinte + 12))
+        for _ in range(9):
+            x1, y1 = random.randint(0, largeur), random.randint(0, hauteur)
+            x2, y2 = random.randint(0, largeur), random.randint(0, hauteur)
+            dessin.line([(x1, y1), (x2, y2)],
+                        fill=(random.randint(60, 110),) * 3, width=random.randint(1, 3))
+        for _ in range(320):
+            x, y = random.randint(0, largeur), random.randint(0, hauteur)
+            dessin.point((x, y), fill=(random.randint(70, 150),) * 3)
+
+        # Chaque caractere est dessine separement : taille, angle et couleur
+        # varient, ce qui casse la reconnaissance automatique simple.
+        pas = largeur // (len(code) + 1)
+        for index, caractere in enumerate(code):
+            taille = random.randint(52, 68)
+            police = _welcome_font("Inter", taille, bold=True)
+            couleur = (random.randint(190, 255), random.randint(190, 255), random.randint(210, 255))
+            vignette = Image.new("RGBA", (taille + 30, taille + 30), (0, 0, 0, 0))
+            ImageDraw.Draw(vignette).text((14, 4), caractere, font=police, fill=couleur + (255,))
+            vignette = vignette.rotate(random.randint(-26, 26), resample=Image.BICUBIC, expand=False)
+            x = pas * (index + 1) - taille // 2 + random.randint(-6, 6)
+            y = (hauteur - taille) // 2 + random.randint(-12, 12)
+            image.paste(vignette, (max(0, x), max(0, y)), vignette)
+
+        # Arc parasite par-dessus le texte
+        dessin.arc([random.randint(0, 60), 20,
+                    largeur - random.randint(0, 60), hauteur - 20],
+                   start=random.randint(0, 180), end=random.randint(180, 360),
+                   fill=(random.randint(120, 190),) * 3, width=3)
+
+        tampon = io.BytesIO()
+        image.save(tampon, format="PNG")
+        tampon.seek(0)
+        return discord.File(tampon, filename="captcha.png")
+    except Exception:
+        return None
 
 # ════════════════════════════════════════════════
 #  VOICE TRACKING
@@ -2038,6 +2100,181 @@ class VueNotation(discord.ui.View):
     @discord.ui.button(label="5", emoji="⭐", style=discord.ButtonStyle.success, custom_id="nt5")
     async def n5(self, i, b): await self._noter(i, 5)
 
+# ════════════════════════════════════════════════
+#  CAPTCHA — panneau, defi et saisie
+# ════════════════════════════════════════════════
+
+CAPTCHA_TEXTE = (
+    "Pour acceder au serveur, recopie le code affiche sur l'image.\n"
+    "Clique sur **Saisir le code** quand tu es pret."
+)
+
+
+async def _construire_defi(interaction, role_id):
+    """Emet un code et prepare (embed, fichier) pour l'affichage ephemere."""
+    gid = str(interaction.guild.id)
+    code = CAPTCHA_STORE.issue(gid, interaction.user.id, role_id)
+    fichier = render_captcha_image(code)
+
+    embed = E("🔐 Verification humaine", CAPTCHA_TEXTE, 0x5865F2)
+    if fichier:
+        embed.set_image(url="attachment://captcha.png")
+    else:
+        # Pillow indisponible : on reste utilisable en affichant le code.
+        embed.add_field(name="🔑 Code a recopier", value=f"```{code}```", inline=False)
+    embed.add_field(name="⏱️ Valable", value=f"`{sc.CAPTCHA_TTL_MINUTES} minutes`", inline=True)
+    embed.add_field(name="🎯 Essais", value=f"`{sc.CAPTCHA_MAX_ATTEMPTS}`", inline=True)
+    embed.set_footer(text="Ce message n'est visible que par toi.")
+    return embed, fichier
+
+
+async def accorder_acces_captcha(member, role_id):
+    """Attribue le role de verification. Retourne (succes, message d'erreur)."""
+    if not role_id:
+        return True, ""
+    role = member.guild.get_role(int(role_id)) if str(role_id).isdigit() else None
+    if not role:
+        return False, "Le role de verification n'existe plus. Previens un administrateur."
+    if role in member.roles:
+        return True, ""
+    if role >= member.guild.me.top_role:
+        return False, "Le role de verification est au-dessus de ModBot dans la hierarchie."
+    try:
+        await member.add_roles(role, reason="Captcha valide")
+        return True, ""
+    except discord.Forbidden:
+        return False, "ModBot n'a pas la permission « Gerer les roles »."
+    except Exception:
+        return False, "Impossible d'attribuer le role. Previens un administrateur."
+
+
+class ModalCaptcha(discord.ui.Modal):
+    """Saisie du code lu sur l'image."""
+
+    code = discord.ui.TextInput(
+        label="Code affiche sur l'image",
+        placeholder="Exemple : A4KP7",
+        required=True,
+        min_length=3,
+        max_length=10,
+    )
+
+    def __init__(self, role_id=""):
+        super().__init__(title="🔐 Verification humaine")
+        self.role_id = str(role_id or "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        gid = str(interaction.guild.id)
+        resultat = CAPTCHA_STORE.verify(gid, interaction.user.id, self.code.value)
+        statut = resultat["status"]
+
+        if statut == "ok":
+            role_id = resultat.get("role_id") or self.role_id
+            ok, erreur = await accorder_acces_captcha(interaction.user, role_id)
+            if ok:
+                embed = E("✅ Verification reussie", couleur=0x43B581)
+                embed.description = f"Bienvenue sur **{interaction.guild.name}** ! Ton acces est ouvert."
+                await log_event(
+                    interaction.guild, "members", "Captcha valide",
+                    f"{interaction.user.mention} a passe la verification.",
+                    severity="success", target=interaction.user,
+                )
+            else:
+                embed = E("⚠️ Code correct, acces bloque", erreur, 0xFAA61A)
+            await safe_ephemeral(interaction, embed=embed)
+            return
+
+        messages = {
+            "faux": ("❌ Code incorrect",
+                     f"Il te reste **{resultat['remaining']}** essai(s). "
+                     "Rouvre la saisie pour reessayer."),
+            "expire": ("⏱️ Code expire",
+                       "Le delai est depasse. Clique de nouveau sur le bouton de verification."),
+            "bloque": ("🚫 Trop d'essais",
+                       "Demande un nouveau code en cliquant sur le bouton de verification."),
+            "absent": ("🔎 Aucune verification en cours",
+                       "Clique sur le bouton de verification pour recevoir un code."),
+        }
+        titre, detail = messages.get(statut, messages["absent"])
+        await safe_ephemeral(interaction, embed=E(titre, detail, 0xED4245))
+
+
+class VueCaptchaSaisie(discord.ui.View):
+    """Boutons attaches au defi ephemere : saisir, ou demander un autre code."""
+
+    def __init__(self, role_id=""):
+        super().__init__(timeout=sc.CAPTCHA_TTL_MINUTES * 60)
+        self.role_id = str(role_id or "")
+
+    @discord.ui.button(label="Saisir le code", emoji="⌨️", style=discord.ButtonStyle.success)
+    async def saisir(self, interaction: discord.Interaction, _button):
+        await interaction.response.send_modal(ModalCaptcha(self.role_id))
+
+    @discord.ui.button(label="Nouveau code", emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def regenerer(self, interaction: discord.Interaction, _button):
+        embed, fichier = await _construire_defi(interaction, self.role_id)
+        try:
+            if fichier:
+                await interaction.response.edit_message(
+                    embed=embed, attachments=[fichier], view=VueCaptchaSaisie(self.role_id))
+            else:
+                await interaction.response.edit_message(
+                    embed=embed, attachments=[], view=VueCaptchaSaisie(self.role_id))
+        except Exception:
+            await safe_ephemeral(interaction, embed=embed)
+
+
+class VueCaptchaPanel(discord.ui.View):
+    """Panneau permanent poste dans le salon de verification."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Je ne suis pas un robot", emoji="✅",
+                       style=discord.ButtonStyle.success, custom_id="captcha_start")
+    async def verifier(self, interaction: discord.Interaction, _button):
+        if not interaction.guild:
+            return
+        reglages = captcha_cfg(interaction.guild.id)
+        role_id = reglages["role_id"]
+
+        if role_id and str(role_id).isdigit():
+            role = interaction.guild.get_role(int(role_id))
+            if role and role in interaction.user.roles:
+                await safe_ephemeral(interaction, embed=E(
+                    "✅ Deja verifie",
+                    "Tu as deja passe la verification, tout est en ordre.", 0x43B581))
+                return
+
+        embed, fichier = await _construire_defi(interaction, role_id)
+        vue = VueCaptchaSaisie(role_id)
+        try:
+            if fichier:
+                await interaction.response.send_message(
+                    embed=embed, file=fichier, view=vue, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, view=vue, ephemeral=True)
+        except Exception:
+            await safe_ephemeral(interaction, embed=embed)
+
+
+def build_captcha_panel_embed(guild, reglages):
+    """Embed du panneau permanent de verification."""
+    embed = E("🔐 Verification requise",
+              f"Bienvenue sur **{guild.name}** !\n\n"
+              "Ce serveur est protege contre les robots et les raids. "
+              "Clique sur le bouton ci-dessous pour prouver que tu es humain "
+              "et debloquer l'acces aux salons.", 0x5865F2)
+    if reglages.get("role_id") and str(reglages["role_id"]).isdigit():
+        role = guild.get_role(int(reglages["role_id"]))
+        if role:
+            embed.add_field(name="🎭 Role accorde", value=role.mention, inline=True)
+    embed.add_field(name="⏱️ Duree", value="`Moins d'une minute`", inline=True)
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    return embed
+
+
 class VueTicket(discord.ui.View):
     def __init__(self, uid="", gid=None):
         super().__init__(timeout=None)
@@ -2434,18 +2671,52 @@ class VueMassDMConfirm(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
+        total = len(self.cibles)
         sent = failed = 0
-        for m in self.cibles:
+        self.clear_items()
+
+        async def _progression():
+            """Retour visuel : sans lui, un envoi de plusieurs minutes semble fige."""
+            barre = E("📨 Envoi en cours…", couleur=0x5865F2)
+            traites = sent + failed
+            pourcent = int(traites * 100 / total) if total else 100
+            blocs = int(pourcent / 5)
+            barre.description = f"`{'█' * blocs}{'░' * (20 - blocs)}` **{pourcent}%**"
+            barre.add_field(name="Envoyes", value=f"`{sent}`", inline=True)
+            barre.add_field(name="Echecs", value=f"`{failed}`", inline=True)
+            barre.add_field(name="Restants", value=f"`{max(0, total - traites)}`", inline=True)
+            try:
+                await interaction.edit_original_response(embeds=[barre], view=None)
+            except Exception:
+                pass
+
+        for index, m in enumerate(self.cibles, start=1):
             try:
                 await m.send(embed=self.embed, allowed_mentions=discord.AllowedMentions.none())
                 sent += 1
                 await asyncio.sleep(0.4)
             except Exception:
+                # MP fermes ou membre parti : on continue, ce n'est pas une erreur bloquante
                 failed += 1
-        self.clear_items()
-        e = E("Envoi termine", couleur=0x43B581)
+            if index % 25 == 0 and index < total:
+                await _progression()
+
+        e = E("Envoi termine", couleur=0x43B581 if sent else 0xFAA61A)
         e.add_field(name="Envoyes", value=f"`{sent}`", inline=True)
         e.add_field(name="Echecs", value=f"`{failed}`", inline=True)
+        if failed:
+            e.add_field(name="ℹ️ Pourquoi des echecs ?",
+                        value="Ces membres ont ferme leurs messages prives, ou ont quitte le serveur.",
+                        inline=False)
+        try:
+            await log_event(
+                interaction.guild, "admin", "Message en masse envoye",
+                f"{interaction.user.mention} a envoye un message prive a `{total}` membre(s).",
+                fields=[("Titre", self.embed.title or "-"),
+                        ("Recus", f"{sent}"), ("Echecs", f"{failed}")],
+                severity="warning", target=interaction.user)
+        except Exception:
+            pass
         try:
             await interaction.edit_original_response(embeds=[e], view=None)
         except Exception:
@@ -2775,7 +3046,23 @@ def resolve_cors_origin(request):
         return origin
     return None
 
+# Routes ouvertes a toutes les origines : elles ne renvoient aucune donnee
+# nominative et n'acceptent aucune authentification, donc restreindre leur
+# CORS n'apporterait rien — et casserait l'affichage si le site change de
+# domaine sans que DASHBOARD_ALLOWED_ORIGINS soit mis a jour.
+CORS_PUBLIC_PATHS = ("/api/public/",)
+
+
 def apply_cors(response, request=None):
+    chemin = getattr(request, "path", "") or ""
+    if chemin.startswith(CORS_PUBLIC_PATHS):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
     origin = resolve_cors_origin(request)
     if origin:
         response.headers["Access-Control-Allow-Origin"] = origin
@@ -2923,6 +3210,12 @@ def safe_redirect_target(candidate, request=None):
     Empeche l'open redirect : le jeton de session est passe dans le fragment de
     l'URL de retour, donc une URL arbitraire permettrait de le voler.
     Seules les origines connues — plus celle du bot lui-meme — sont acceptees.
+
+    Le joker « * » est volontairement IGNORE ici. Il reste acceptable pour le
+    CORS (confort de developpement), mais l'accepter pour une redirection
+    reviendrait a laisser n'importe quel site recuperer un jeton de session.
+    Quand la liste vaut « * », on retombe donc sur les seules destinations
+    connues avec certitude : le site du dashboard et le bot lui-meme.
     """
     default = default_redirect_target(request)
     text = str(candidate or "").strip()
@@ -2935,11 +3228,19 @@ def safe_redirect_target(candidate, request=None):
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return default
     origin = f"{parsed.scheme}://{parsed.netloc}"
-    allowed = set(ALLOWED_ORIGINS)
+
+    allowed = {o for o in ALLOWED_ORIGINS if o and o != "*"}
     own = request_origin(request)
     if own:
         allowed.add(own)  # le bot peut toujours renvoyer vers lui-meme
-    if "*" in allowed or origin in allowed:
+    try:
+        site = urllib.parse.urlparse(DASHBOARD_SITE_URL)
+        if site.scheme in ("http", "https") and site.netloc:
+            allowed.add(f"{site.scheme}://{site.netloc}")
+    except Exception:
+        pass
+
+    if origin in allowed:
         return urllib.parse.urlunparse(parsed._replace(fragment=""))
     print(f"OAuth: redirection refusee vers une origine non autorisee: {origin}")
     return default
@@ -4208,6 +4509,16 @@ def serialize_security_config(guild):
             "custom_words": get_custom(gid),
         },
         "safe_mode_active": RAID.safe_mode_active(gid),
+        "captcha": {
+            **captcha_cfg(gid),
+            "pending": CAPTCHA_STORE.pending(gid),
+            "image": bool(PIL_AVAILABLE),
+        },
+        "alerts": {
+            "dm_admins": cfg.get("alertes_mp_admins") is not False,
+            "admins_reachable": len(administrateurs_du_serveur(guild)),
+            "active": len([a for a in ALERTES_ACTIVES.values() if a.get("guild_id") == guild.id]),
+        },
         "auto_backup": {
             "enabled": bool(cfg.get("auto_backup_enabled")),
             "interval_hours": int(cfg.get("auto_backup_interval_hours") or 24),
@@ -4283,6 +4594,21 @@ async def api_save_guild_security(request):
                 normalize_filtered_word(w) for w in filt["custom_words"][:500] if str(w).strip()
             ]
             sc.clear_pattern_cache()
+
+    captcha = payload.get("captcha")
+    if isinstance(captcha, dict):
+        if "enabled" in captcha:
+            cfg["captcha_enabled"] = bool(captcha.get("enabled"))
+        if "role_id" in captcha:
+            role_id = parse_int(captcha.get("role_id"))
+            cfg["captcha_role"] = str(role_id) if role_id else ""
+        if "channel_id" in captcha:
+            channel_id = parse_int(captcha.get("channel_id"))
+            cfg["captcha_channel"] = str(channel_id) if channel_id else ""
+
+    alerts = payload.get("alerts")
+    if isinstance(alerts, dict) and "dm_admins" in alerts:
+        cfg["alertes_mp_admins"] = bool(alerts.get("dm_admins"))
 
     logs_enabled = payload.get("logs_enabled")
     if isinstance(logs_enabled, dict):
@@ -4382,6 +4708,410 @@ async def api_guild_infractions(request):
         row["username"] = str(member) if member else f"Utilisateur {row['user_id']}"
         row["avatar"] = member.display_avatar.url if member else ""
     return api_json({"ok": True, "infractions": rows}, request=request)
+
+# ════════════════════════════════════════════════
+#  API — RECHERCHE ET ACTIONS DIRECTES
+# ════════════════════════════════════════════════
+
+def serialize_member(guild, member):
+    """Fiche membre destinee au panneau de recherche du dashboard."""
+    gid = str(guild.id)
+    roles = [serialize_role(r) for r in reversed(member.roles) if not r.is_default()]
+    timeout = getattr(member, "timed_out_until", None)
+    nuke = get_nuke_cfg(gid)
+    immunise = (str(member.id) in [str(x) for x in nuke.get("whitelist_users", [])]
+                or any(str(r.id) in [str(x) for x in nuke.get("whitelist_roles", [])]
+                       for r in member.roles))
+    return {
+        "id": str(member.id),
+        "username": member.name,
+        "display_name": member.display_name,
+        "tag": str(member),
+        "avatar": member.display_avatar.url,
+        "bot": bool(member.bot),
+        "owner": member.id == guild.owner_id,
+        "administrator": member.guild_permissions.administrator,
+        "joined_at": member.joined_at.isoformat() if member.joined_at else "",
+        "created_at": member.created_at.isoformat() if member.created_at else "",
+        "roles": roles[:12],
+        "top_role": serialize_role(member.top_role) if not member.top_role.is_default() else None,
+        "timed_out": bool(timeout and timeout > discord.utils.utcnow()),
+        "timed_out_until": timeout.isoformat() if timeout else "",
+        "immune": immunise,
+        "points": INFRACTIONS.points(gid, member.id),
+        "warns": len(INFRACTIONS.history(gid, member.id)),
+        "manageable": (member.id != guild.owner_id
+                       and member.top_role < guild.me.top_role),
+    }
+
+
+def serialize_role_detail(guild, role):
+    """Fiche role : effectif, immunite anti-nuke, permissions sensibles."""
+    nuke = get_nuke_cfg(str(guild.id))
+    blanches = [str(x) for x in nuke.get("whitelist_roles", [])]
+    perms = role.permissions
+    sensibles = [nom for nom, actif in (
+        ("Administrateur", perms.administrator),
+        ("Gerer le serveur", perms.manage_guild),
+        ("Gerer les roles", perms.manage_roles),
+        ("Gerer les salons", perms.manage_channels),
+        ("Bannir", perms.ban_members),
+        ("Expulser", perms.kick_members),
+        ("Mentionner @everyone", perms.mention_everyone),
+    ) if actif]
+    return {
+        **serialize_role(role),
+        "members": len(role.members),
+        "immune": str(role.id) in blanches,
+        "managed": bool(role.managed),
+        "hoist": bool(role.hoist),
+        "sensitive_permissions": sensibles,
+        "assignable": role < guild.me.top_role and not role.managed,
+    }
+
+
+def _score_recherche(terme, *champs):
+    """Classement simple : prefixe > debut de mot > sous-chaine."""
+    terme = terme.lower()
+    meilleur = 0
+    for champ in champs:
+        texte = str(champ or "").lower()
+        if not texte:
+            continue
+        if texte == terme:
+            meilleur = max(meilleur, 100)
+        elif texte.startswith(terme):
+            meilleur = max(meilleur, 80)
+        elif any(mot.startswith(terme) for mot in texte.split()):
+            meilleur = max(meilleur, 60)
+        elif terme in texte:
+            meilleur = max(meilleur, 40)
+    return meilleur
+
+
+async def api_search_members(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    terme = str(request.query.get("q") or "").strip()
+    limite = max(1, min(50, parse_int(request.query.get("limit")) or 25))
+
+    if not terme:
+        # Sans terme : les membres les plus sanctionnes, c'est ce qu'on cherche
+        # le plus souvent en ouvrant le panneau.
+        resumes = INFRACTIONS.guild_summary(guild.id, limit=limite)
+        membres = []
+        for ligne in resumes:
+            membre = guild.get_member(int(ligne["user_id"])) if ligne["user_id"].isdigit() else None
+            if membre:
+                membres.append(serialize_member(guild, membre))
+        return api_json({"ok": True, "members": membres, "query": "",
+                         "hint": "membres avec des infractions"}, request=request)
+
+    # Recherche par identifiant exact
+    if terme.isdigit():
+        membre = guild.get_member(int(terme))
+        if membre:
+            return api_json({"ok": True, "members": [serialize_member(guild, membre)],
+                             "query": terme}, request=request)
+
+    trouves = []
+    for membre in guild.members:
+        score = _score_recherche(terme, membre.name, membre.display_name,
+                                 getattr(membre, "global_name", ""))
+        if score:
+            trouves.append((score, membre))
+    trouves.sort(key=lambda item: (-item[0], item[1].display_name.lower()))
+    return api_json({
+        "ok": True,
+        "query": terme,
+        "total": len(trouves),
+        "members": [serialize_member(guild, m) for _, m in trouves[:limite]],
+    }, request=request)
+
+
+async def api_search_roles(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    terme = str(request.query.get("q") or "").strip()
+
+    roles = [r for r in guild.roles if not r.is_default()]
+    if terme:
+        if terme.isdigit():
+            roles = [r for r in roles if str(r.id) == terme]
+        else:
+            notes = [(_score_recherche(terme, r.name), r) for r in roles]
+            roles = [r for score, r in sorted(notes, key=lambda i: -i[0]) if score]
+    else:
+        roles = sorted(roles, key=lambda r: r.position, reverse=True)
+
+    return api_json({
+        "ok": True,
+        "query": terme,
+        "roles": [serialize_role_detail(guild, r) for r in roles[:50]],
+    }, request=request)
+
+
+async def api_member_detail(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    user_id = parse_int(request.match_info.get("user_id"))
+    membre = guild.get_member(user_id) if user_id else None
+    if not membre:
+        raise web.HTTPNotFound(text="Membre introuvable sur ce serveur.")
+    return api_json({
+        "ok": True,
+        "member": serialize_member(guild, membre),
+        "infractions": INFRACTIONS.history(guild.id, membre.id)[-25:],
+    }, request=request)
+
+
+# Actions applicables a un membre depuis le dashboard.
+ACTIONS_MEMBRE = {
+    "warn":     {"label": "Avertissement", "permission": "moderate_members"},
+    "timeout":  {"label": "Exclusion temporaire", "permission": "moderate_members"},
+    "untimeout": {"label": "Fin d'exclusion", "permission": "moderate_members"},
+    "kick":     {"label": "Expulsion", "permission": "kick_members"},
+    "ban":      {"label": "Bannissement", "permission": "ban_members"},
+    "reset":    {"label": "Reinitialisation des infractions", "permission": "moderate_members"},
+    "immunize": {"label": "Immunisation anti-nuke", "permission": "manage_guild"},
+    "unimmunize": {"label": "Retrait de l'immunite", "permission": "manage_guild"},
+}
+
+
+async def api_member_action(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="Corps de requete invalide.")
+
+    action = str(payload.get("action") or "").lower()
+    if action not in ACTIONS_MEMBRE:
+        raise web.HTTPBadRequest(text=f"Action inconnue : {action}")
+
+    user_id = parse_int(request.match_info.get("user_id"))
+    membre = guild.get_member(user_id) if user_id else None
+    if not membre:
+        raise web.HTTPNotFound(text="Membre introuvable sur ce serveur.")
+
+    gid = str(guild.id)
+    auteur = identity.get("username") or identity.get("user_id") or "Dashboard"
+    raison = clean_short_text(payload.get("reason"), "Action depuis le dashboard", 400)
+    motif = f"[ModBot Dashboard] {raison} — par {auteur}"
+
+    # Garde-fous : ModBot doit pouvoir agir, et on ne touche pas au proprietaire
+    besoin = ACTIONS_MEMBRE[action]["permission"]
+    if not getattr(guild.me.guild_permissions, besoin, False):
+        raise web.HTTPForbidden(
+            text=f"ModBot n'a pas la permission requise ({besoin}).")
+    if action in {"timeout", "kick", "ban"}:
+        if membre.id == guild.owner_id:
+            raise web.HTTPForbidden(text="Le proprietaire du serveur ne peut pas etre sanctionne.")
+        if membre.top_role >= guild.me.top_role:
+            raise web.HTTPForbidden(
+                text="Ce membre a un role superieur ou egal a celui de ModBot.")
+
+    resultat = ""
+    try:
+        if action == "warn":
+            points = max(1, min(10, parse_int(payload.get("points")) or 1))
+            total, _ = INFRACTIONS.add(gid, membre.id, raison, points=points, source="dashboard")
+            resultat = f"avertissement enregistre ({total} point(s) au total)"
+            try:
+                await membre.send(embed=EG(
+                    "⚠️ Avertissement",
+                    f"Tu as recu un avertissement sur **{guild.name}**.\n\n"
+                    f"**Raison :** {raison}", 0xF39C12, gid))
+            except Exception:
+                pass
+
+        elif action == "timeout":
+            minutes = max(1, min(40320, parse_int(payload.get("minutes")) or 60))
+            await membre.timeout(discord.utils.utcnow() + timedelta(minutes=minutes), reason=motif)
+            resultat = f"exclu pour {sc.human_duration(minutes)}"
+
+        elif action == "untimeout":
+            await membre.timeout(None, reason=motif)
+            resultat = "exclusion levee"
+
+        elif action == "kick":
+            await membre.kick(reason=motif)
+            resultat = "expulse"
+
+        elif action == "ban":
+            jours = max(0, min(7, parse_int(payload.get("delete_days")) or 0))
+            await guild.ban(membre, reason=motif, delete_message_days=jours)
+            resultat = "banni"
+
+        elif action == "reset":
+            INFRACTIONS.reset(gid, membre.id)
+            resultat = "infractions effacees"
+
+        elif action in {"immunize", "unimmunize"}:
+            nuke = get_nuke_cfg(gid)
+            liste = [str(x) for x in nuke.get("whitelist_users", [])]
+            if action == "immunize":
+                if str(membre.id) not in liste:
+                    liste.append(str(membre.id))
+                resultat = "immunise contre l'anti-nuke"
+            else:
+                liste = [x for x in liste if x != str(membre.id)]
+                resultat = "immunite retiree"
+            set_nuke_cfg(gid, whitelist_users=liste[:100])
+
+    except discord.Forbidden:
+        raise web.HTTPForbidden(text="Discord a refuse l'action : permissions insuffisantes.")
+    except discord.HTTPException as ex:
+        raise web.HTTPBadRequest(text=f"Discord a refuse l'action : {ex}")
+
+    libelle = ACTIONS_MEMBRE[action]["label"]
+    dashboard_log(f"member_{action}", guild, auteur, f"{membre} — {resultat}")
+    await log_event(
+        guild, "moderation", f"{libelle} (dashboard)",
+        f"{membre.mention} — {resultat}.",
+        fields=[("👤 Par", auteur), ("📋 Raison", raison)],
+        severity="warning", target=membre)
+
+    membre_maj = guild.get_member(membre.id)
+    return api_json({
+        "ok": True,
+        "action": action,
+        "result": resultat,
+        "member": serialize_member(guild, membre_maj) if membre_maj else None,
+    }, request=request)
+
+
+# Actions applicables a un role depuis le dashboard.
+ACTIONS_ROLE = {"immunize", "unimmunize"}
+
+
+async def api_role_action(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    action = str((payload or {}).get("action") or "").lower()
+    if action not in ACTIONS_ROLE:
+        raise web.HTTPBadRequest(text=f"Action inconnue : {action}")
+
+    role_id = parse_int(request.match_info.get("role_id"))
+    role = guild.get_role(role_id) if role_id else None
+    if not role:
+        raise web.HTTPNotFound(text="Role introuvable.")
+
+    gid = str(guild.id)
+    nuke = get_nuke_cfg(gid)
+    liste = [str(x) for x in nuke.get("whitelist_roles", [])]
+    if action == "immunize":
+        if str(role.id) not in liste:
+            liste.append(str(role.id))
+        resultat = "immunise contre l'anti-nuke"
+    else:
+        liste = [x for x in liste if x != str(role.id)]
+        resultat = "immunite retiree"
+    set_nuke_cfg(gid, whitelist_roles=liste[:100])
+
+    auteur = identity.get("username") or identity.get("user_id") or "Dashboard"
+    dashboard_log(f"role_{action}", guild, auteur, f"{role.name} — {resultat}")
+    await log_event(
+        guild, "admin", "Immunite anti-nuke modifiee",
+        f"Le role **{role.name}** est {resultat}.",
+        fields=[("👤 Par", auteur),
+                ("👥 Membres concernes", str(len(role.members)))],
+        severity="warning")
+
+    return api_json({"ok": True, "action": action, "result": resultat,
+                     "role": serialize_role_detail(guild, role)}, request=request)
+
+
+# ════════════════════════════════════════════════
+#  API — STATISTIQUES PUBLIQUES
+# ════════════════════════════════════════════════
+
+# Discord ne fournit PAS le pays d'un serveur : la region vocale a ete retiree
+# de l'API. La seule information geographique disponible est la langue
+# preferee du serveur (preferred_locale). La correspondance ci-dessous est
+# donc une approximation assumee, affichee comme telle sur le site.
+LOCALE_PAYS = {
+    "fr":    ("France", "🇫🇷"),
+    "en-US": ("Etats-Unis", "🇺🇸"),
+    "en-GB": ("Royaume-Uni", "🇬🇧"),
+    "de":    ("Allemagne", "🇩🇪"),
+    "es-ES": ("Espagne", "🇪🇸"),
+    "es-419": ("Amerique latine", "🌎"),
+    "it":    ("Italie", "🇮🇹"),
+    "pt-BR": ("Bresil", "🇧🇷"),
+    "nl":    ("Pays-Bas", "🇳🇱"),
+    "pl":    ("Pologne", "🇵🇱"),
+    "ru":    ("Russie", "🇷🇺"),
+    "tr":    ("Turquie", "🇹🇷"),
+    "sv-SE": ("Suede", "🇸🇪"),
+    "da":    ("Danemark", "🇩🇰"),
+    "fi":    ("Finlande", "🇫🇮"),
+    "no":    ("Norvege", "🇳🇴"),
+    "cs":    ("Tchequie", "🇨🇿"),
+    "el":    ("Grece", "🇬🇷"),
+    "hu":    ("Hongrie", "🇭🇺"),
+    "ro":    ("Roumanie", "🇷🇴"),
+    "uk":    ("Ukraine", "🇺🇦"),
+    "bg":    ("Bulgarie", "🇧🇬"),
+    "hr":    ("Croatie", "🇭🇷"),
+    "lt":    ("Lituanie", "🇱🇹"),
+    "vi":    ("Vietnam", "🇻🇳"),
+    "th":    ("Thailande", "🇹🇭"),
+    "id":    ("Indonesie", "🇮🇩"),
+    "ja":    ("Japon", "🇯🇵"),
+    "ko":    ("Coree du Sud", "🇰🇷"),
+    "zh-CN": ("Chine", "🇨🇳"),
+    "zh-TW": ("Taiwan", "🇹🇼"),
+    "hi":    ("Inde", "🇮🇳"),
+    "ar":    ("Monde arabe", "🌍"),
+    "he":    ("Israel", "🇮🇱"),
+}
+
+_STATS_PUBLIQUES = {"data": None, "expire": 0.0}
+STATS_PUBLIQUES_TTL = 300  # 5 minutes
+
+
+def build_public_stats():
+    """
+    Agrege les chiffres publics du reseau ModBot.
+
+    Aucune donnee nominative : ni identifiant, ni nom de serveur, ni membre.
+    Uniquement des totaux et une repartition par pays approximee.
+    """
+    pays = {}
+    membres = 0
+    serveurs = 0
+    for guild in bot.guilds:
+        serveurs += 1
+        membres += int(guild.member_count or 0)
+        locale = str(getattr(guild, "preferred_locale", "") or "")
+        nom, drapeau = LOCALE_PAYS.get(locale, LOCALE_PAYS.get(locale.split("-")[0], None) or
+                                       ("Autre", "🌐"))
+        entree = pays.setdefault(nom, {"country": nom, "flag": drapeau,
+                                       "servers": 0, "members": 0})
+        entree["servers"] += 1
+        entree["members"] += int(guild.member_count or 0)
+
+    classement = sorted(pays.values(), key=lambda p: -p["members"])
+    return {
+        "members_protected": membres,
+        "servers": serveurs,
+        "countries": len([p for p in classement if p["country"] != "Autre"]),
+        "top_countries": classement[:12],
+        "generated_at": now().isoformat(),
+        "country_source": "langue preferee du serveur Discord (approximation)",
+    }
+
+
+async def api_public_stats(request):
+    """Route PUBLIQUE : aucune authentification, donnees agregees uniquement."""
+    maintenant = time.time()
+    if not _STATS_PUBLIQUES["data"] or _STATS_PUBLIQUES["expire"] < maintenant:
+        _STATS_PUBLIQUES["data"] = build_public_stats()
+        _STATS_PUBLIQUES["expire"] = maintenant + STATS_PUBLIQUES_TTL
+    return api_json({"ok": True, "stats": _STATS_PUBLIQUES["data"]}, request=request)
+
 
 async def api_admin_stats(request):
     # Toujours exiger l'authentification : sans jeton API configure, l'ancienne
@@ -4616,6 +5346,8 @@ async def start_dashboard_api():
 
     # Authentification
     app.router.add_route("*", "/api/health", api_health)
+    # Route publique : chiffres agreges affiches sur la page d'accueil
+    app.router.add_get("/api/public/stats", api_public_stats)
     app.router.add_get("/api/auth/discord/login", api_login)
     app.router.add_get("/api/auth/discord/callback", api_oauth_callback)
     app.router.add_post("/api/auth/logout", api_logout)
@@ -4633,6 +5365,13 @@ async def start_dashboard_api():
     app.router.add_put("/api/guilds/{guild_id}/security", api_save_guild_security)
     app.router.add_get("/api/guilds/{guild_id}/logs", api_guild_logs)
     app.router.add_get("/api/guilds/{guild_id}/infractions", api_guild_infractions)
+
+    # Recherche et actions directes (panneau Recherche du dashboard)
+    app.router.add_get("/api/guilds/{guild_id}/search/members", api_search_members)
+    app.router.add_get("/api/guilds/{guild_id}/search/roles", api_search_roles)
+    app.router.add_get("/api/guilds/{guild_id}/members/{user_id}", api_member_detail)
+    app.router.add_post("/api/guilds/{guild_id}/members/{user_id}/action", api_member_action)
+    app.router.add_post("/api/guilds/{guild_id}/roles/{role_id}/action", api_role_action)
 
     # Sauvegardes
     app.router.add_get("/api/guilds/{guild_id}/backups", api_guild_backups)
@@ -6156,9 +6895,10 @@ class ModalMassDM(discord.ui.Modal, title="📨 Message en masse"):
     contenu  = discord.ui.TextInput(label="Contenu", style=discord.TextStyle.paragraph, max_length=2000)
     img      = discord.ui.TextInput(label="URL Image (optionnel)", required=False, max_length=300)
 
-    def __init__(self, cibles):
+    def __init__(self, cibles, libelle="destinataires"):
         super().__init__()
         self.cibles = cibles
+        self.libelle = libelle
 
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
@@ -6169,9 +6909,22 @@ class ModalMassDM(discord.ui.Modal, title="📨 Message en masse"):
                 e.set_image(url=self.img.value)
             except Exception:
                 pass
-        info = E("📨 Aperçu — Confirmer l'envoi ?",
-                  f"**{len(self.cibles)} destinataire(s)**\nVérifiez l'aperçu ci-dessous avant d'envoyer.")
-        await i.followup.send(embeds=[info, e], view=VueMassDMConfirm(self.cibles, e), ephemeral=True)
+
+        vue = VueMassDMConfirm(self.cibles, e)
+        nombre = len(vue.cibles)
+        # Discord limite la cadence des MP : ~0,4 s entre deux envois.
+        minutes = max(1, round(nombre * 0.4 / 60))
+        info = E("📨 Confirmer l'envoi ?",
+                 f"Le message ci-dessous va etre envoye en message prive a {self.libelle}.")
+        info.add_field(name="👥 Destinataires", value=f"`{nombre}`", inline=True)
+        info.add_field(name="⏱️ Duree estimee", value=f"`~{minutes} min`", inline=True)
+        if nombre > 200:
+            info.add_field(
+                name="⚠️ Envoi volumineux",
+                value="Discord peut fermer les MP de ModBot si trop de membres signalent "
+                      "le message. Verifie bien le contenu avant de confirmer.",
+                inline=False)
+        await i.followup.send(embeds=[info, e], view=vue, ephemeral=True)
 
 def render_member_template(template, member):
     text = str(template or "")
@@ -6373,20 +7126,25 @@ async def on_member_join(member):
 
     await send_dashboard_member_event(member, departure=False)
 
-    # Captcha
-    if cfg.get("captcha_enabled"):
-        role_id = cfg.get("captcha_role")
-        if role_id:
-            code = new_captcha(gid, member.id, role_id)
+    # Captcha : on oriente simplement vers le salon de verification.
+    # Aucun code n'est envoye en MP — le defi est genere au clic sur le
+    # bouton, dans une reponse ephemere. Un membre qui a ferme ses MP peut
+    # donc se verifier normalement.
+    reglages_captcha = captcha_cfg(gid)
+    if reglages_captcha["enabled"] and reglages_captcha["channel_id"]:
+        salon = member.guild.get_channel(int(reglages_captcha["channel_id"])) \
+            if reglages_captcha["channel_id"].isdigit() else None
+        if salon:
             try:
-                dm = E("🔐 Vérification requise — Captcha")
-                dm.description = (f"Bienvenue sur **{member.guild.name}** !\n\n"
-                                   f"Tape ce code dans le serveur pour accéder :")
-                dm.add_field(name="🔑 Code", value=f"```{code}```", inline=False)
-                dm.add_field(name="⏱️ Délai", value="`5 minutes`", inline=True)
+                dm = E("🔐 Une verification t'attend", couleur=0x5865F2)
+                dm.description = (
+                    f"Bienvenue sur **{member.guild.name}** !\n\n"
+                    f"Rends-toi dans {salon.mention} et clique sur "
+                    "**« Je ne suis pas un robot »** pour debloquer l'acces."
+                )
                 await member.send(embed=dm)
             except Exception:
-                pass
+                pass  # MP fermes : le panneau du salon suffit
 
     # Journalisation de l'arrivee
     account_age = (now() - member.created_at.replace(tzinfo=timezone.utc)).days
@@ -6872,6 +7630,248 @@ def set_raid_cfg(gid, **changes):
     return data
 
 # ════════════════════════════════════════════════
+#  ALERTE ATTAQUE — MP AUX ADMINISTRATEURS
+# ════════════════════════════════════════════════
+
+# Alertes en cours, par identifiant. Volontairement en memoire : une alerte
+# vit quelques minutes, et un redemarrage signifie de toute facon que la
+# protection deja appliquee reste en place (c'est le comportement sur).
+ALERTES_ACTIVES: dict = {}
+
+# Nombre maximum d'administrateurs contactes par alerte : au-dela, Discord
+# limite la cadence des MP et l'alerte mettrait plusieurs minutes a partir.
+MAX_ADMINS_ALERTES = 25
+
+
+def administrateurs_du_serveur(guild):
+    """Membres humains reellement administrateurs, proprietaire en premier."""
+    admins, vus = [], set()
+    proprietaire = guild.owner
+    if proprietaire and not proprietaire.bot:
+        admins.append(proprietaire)
+        vus.add(proprietaire.id)
+    for membre in guild.members:
+        if membre.bot or membre.id in vus:
+            continue
+        if membre.guild_permissions.administrator:
+            admins.append(membre)
+            vus.add(membre.id)
+    return admins[:MAX_ADMINS_ALERTES]
+
+
+class VueAlerteAttaque(discord.ui.View):
+    """
+    Boutons envoyes en MP a chaque administrateur.
+
+    Le premier qui repond tranche pour tout le monde : les autres messages
+    sont ensuite neutralises, pour eviter deux decisions contradictoires.
+    """
+
+    def __init__(self, alerte_id, guild_id):
+        super().__init__(timeout=1800)  # 30 min
+        self.alerte_id = alerte_id
+        self.guild_id = int(guild_id)
+
+    def _alerte(self):
+        return ALERTES_ACTIVES.get(self.alerte_id)
+
+    async def _deja_tranchee(self, interaction, alerte):
+        decideur = alerte.get("decide_par")
+        await safe_ephemeral(interaction, embed=E(
+            "Alerte deja traitee",
+            f"**{decideur}** a deja repondu a cette alerte "
+            f"(*{alerte.get('decision')}*). Aucune action supplementaire n'est necessaire.",
+            0x747F8D))
+
+    @discord.ui.button(label="Fausse alerte — tout annuler", emoji="✋",
+                       style=discord.ButtonStyle.success)
+    async def fausse_alerte(self, interaction: discord.Interaction, _button):
+        alerte = self._alerte()
+        if not alerte:
+            return await safe_ephemeral(interaction, embed=E(
+                "Alerte expiree", "Cette alerte n'est plus active.", 0x747F8D))
+        if alerte.get("decide_par"):
+            return await self._deja_tranchee(interaction, alerte)
+
+        alerte["decide_par"] = str(interaction.user)
+        alerte["decision"] = "fausse alerte"
+        await _safe_defer(interaction)
+
+        guild = bot.get_guild(self.guild_id)
+        if not guild:
+            return await interaction.followup.send(
+                embed=E("Serveur introuvable", "ModBot n'a plus acces a ce serveur.", 0xED4245),
+                ephemeral=True)
+
+        retablissements = []
+
+        # 1. Lever le mode securite s'il a ete declenche par cette alerte
+        if alerte.get("safe_mode_engage") and RAID.safe_mode_active(str(guild.id)):
+            await release_safe_mode(guild, automatic=False)
+            retablissements.append("mode securite leve")
+
+        # 2. Annuler la sanction appliquee a l'acteur
+        if alerte.get("acteur_id") and alerte.get("sanction"):
+            resultat = await annuler_sanction_nuke(guild, alerte["acteur_id"], alerte["sanction"])
+            retablissements.append(resultat)
+
+        # 3. Oublier les compteurs, sinon la protection se redeclenche aussitot
+        if alerte.get("acteur_id"):
+            NUKE.forget(str(guild.id), alerte["acteur_id"])
+        RAID.reset(str(guild.id))
+
+        embed = E("✅ Fausse alerte enregistree", couleur=0x43B581)
+        embed.description = (
+            f"L'alerte sur **{guild.name}** a ete annulee.\n"
+            "Les compteurs de protection sont remis a zero."
+        )
+        embed.add_field(name="🔧 Retabli",
+                        value="\n".join(f"• {r}" for r in retablissements) or "• rien a retablir",
+                        inline=False)
+        embed.add_field(name="👤 Decide par", value=str(interaction.user), inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await log_event(
+            guild, "security", "Alerte annulee — fausse alerte",
+            f"{interaction.user.mention} a declare l'alerte comme fausse.",
+            fields=[("📋 Alerte", alerte.get("titre", "-")),
+                    ("🔧 Retabli", ", ".join(retablissements) or "rien")],
+            severity="success", actor=interaction.user)
+        dashboard_log("alerte_annulee", guild, str(interaction.user), alerte.get("titre", ""))
+        await _cloturer_alerte(self.alerte_id)
+
+    @discord.ui.button(label="Confirmer l'attaque", emoji="🚨", style=discord.ButtonStyle.danger)
+    async def confirmer(self, interaction: discord.Interaction, _button):
+        alerte = self._alerte()
+        if not alerte:
+            return await safe_ephemeral(interaction, embed=E(
+                "Alerte expiree", "Cette alerte n'est plus active.", 0x747F8D))
+        if alerte.get("decide_par"):
+            return await self._deja_tranchee(interaction, alerte)
+
+        alerte["decide_par"] = str(interaction.user)
+        alerte["decision"] = "attaque confirmee"
+        await _safe_defer(interaction)
+
+        guild = bot.get_guild(self.guild_id)
+        if guild and not RAID.safe_mode_active(str(guild.id)):
+            await engage_safe_mode(guild, f"Attaque confirmee par {interaction.user}",
+                                   triggered_by=interaction.user)
+
+        embed = E("🚨 Attaque confirmee", couleur=0xED4245)
+        embed.description = (
+            "La protection reste en place et le mode securite est actif.\n"
+            "Pense a verifier les journaux et a lancer une sauvegarde une fois le calme revenu."
+        )
+        embed.add_field(name="🧰 Commandes utiles",
+                        value="`/securite status` — etat des protections\n"
+                              "`/backup create` — sauvegarder le serveur\n"
+                              "`/securite lockdown` — verrouiller manuellement",
+                        inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        if guild:
+            await log_event(
+                guild, "security", "Attaque confirmee par un administrateur",
+                f"{interaction.user.mention} a confirme que l'attaque est reelle.",
+                fields=[("📋 Alerte", alerte.get("titre", "-"))],
+                severity="critical", actor=interaction.user)
+        await _cloturer_alerte(self.alerte_id)
+
+
+async def _cloturer_alerte(alerte_id):
+    """Neutralise les MP des autres administrateurs et oublie l'alerte."""
+    alerte = ALERTES_ACTIVES.pop(alerte_id, None)
+    if not alerte:
+        return
+    resume = E("Alerte cloturee",
+               f"**{alerte.get('decide_par', 'Un administrateur')}** a repondu : "
+               f"*{alerte.get('decision', 'traitee')}*.",
+               0x747F8D)
+    for message in alerte.get("messages", []):
+        try:
+            await message.edit(embed=resume, view=None)
+        except Exception:
+            pass
+
+
+async def alerter_administrateurs(guild, titre, description, fields=None,
+                                  acteur=None, sanction=None, safe_mode_engage=False):
+    """
+    Previent tous les administrateurs en message prive.
+
+    La protection est DEJA appliquee quand cette fonction est appelee : une
+    attaque reelle detruit un serveur en quelques secondes, on ne peut pas
+    attendre une confirmation humaine avant d'agir. Les boutons servent donc
+    a *defaire* la protection si c'est une fausse alerte — c'est ce qui
+    permet au bot d'agir seul quand personne ne repond.
+    """
+    if not guild:
+        return None
+
+    cfg = get_cfg(guild.id)
+    if cfg.get("alertes_mp_admins") is False:
+        return None
+
+    alerte_id = f"{guild.id}-{int(time.time() * 1000)}"
+    ALERTES_ACTIVES[alerte_id] = {
+        "guild_id": guild.id,
+        "titre": titre,
+        "acteur_id": getattr(acteur, "id", None),
+        "sanction": sanction,
+        "safe_mode_engage": safe_mode_engage,
+        "messages": [],
+        "decide_par": None,
+        "decision": None,
+        "cree": now().isoformat(),
+    }
+
+    embed = E(f"🚨 {titre}", couleur=0xED4245)
+    embed.description = (
+        f"**Serveur : {guild.name}**\n\n{description}\n\n"
+        "**ModBot a deja agi pour proteger le serveur.**\n"
+        "Si c'est une fausse alerte, annule tout avec le bouton vert : "
+        "la protection sera levee et les sanctions annulees."
+    )
+    for nom, valeur in (fields or []):
+        embed.add_field(name=nom, value=str(valeur)[:1024], inline=False)
+    embed.add_field(
+        name="⏳ Sans reponse",
+        value="La protection reste en place. ModBot continue seul.",
+        inline=False)
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    admins = administrateurs_du_serveur(guild)
+    envoyes = 0
+    for admin in admins:
+        try:
+            message = await admin.send(embed=embed, view=VueAlerteAttaque(alerte_id, guild.id))
+            ALERTES_ACTIVES[alerte_id]["messages"].append(message)
+            envoyes += 1
+            await asyncio.sleep(0.3)
+        except Exception:
+            continue  # MP fermes : le salon d'alerte staff prend le relais
+
+    # Aucun administrateur joignable : on bascule sur le salon d'alerte staff
+    if envoyes == 0:
+        salon_id = cfg.get("salon_staff_alert")
+        salon = guild.get_channel(int(salon_id)) if salon_id and str(salon_id).isdigit() else None
+        if salon:
+            try:
+                message = await salon.send(
+                    content="@here", embed=embed, view=VueAlerteAttaque(alerte_id, guild.id),
+                    allowed_mentions=discord.AllowedMentions(everyone=True))
+                ALERTES_ACTIVES[alerte_id]["messages"].append(message)
+                envoyes = 1
+            except Exception:
+                pass
+
+    ALERTES_ACTIVES[alerte_id]["destinataires"] = envoyes
+    return alerte_id
+
+
+# ════════════════════════════════════════════════
 #  ANTI-RAID
 # ════════════════════════════════════════════════
 
@@ -6957,12 +7957,23 @@ async def handle_raid_join(member):
     risk = sc.account_risk(member.created_at, bool(member.avatar), cfg)
     burst = RAID.register_join(gid, cfg)
 
-    # 1. Vague d'arrivees -> mode securite
+    # 1. Vague d'arrivees -> mode securite + alerte aux administrateurs
     if burst["burst"]:
-        await engage_safe_mode(
-            guild,
-            f"{burst['count']} arrivees en {burst['window']}s (seuil : {burst['threshold']})",
-        )
+        motif = f"{burst['count']} arrivees en {burst['window']}s (seuil : {burst['threshold']})"
+        engage = await engage_safe_mode(guild, motif)
+        if engage:
+            await alerter_administrateurs(
+                guild,
+                "Raid detecte — vague d'arrivees",
+                f"`{burst['count']}` comptes ont rejoint **{guild.name}** "
+                f"en `{burst['window']}` secondes.",
+                fields=[
+                    ("📊 Seuil configure", f"`{burst['threshold']}` arrivees / `{burst['window']}s`"),
+                    ("🔒 Mesure appliquee", "Mode securite actif : niveau de verification eleve"),
+                    ("♻️ Levee automatique", f"dans {cfg.get('auto_release_minutes', 15)} minutes"),
+                ],
+                safe_mode_engage=True,
+            )
 
     handled = False
     safe_mode = RAID.safe_mode_active(gid)
@@ -7042,35 +8053,82 @@ async def fetch_audit_actor(guild, action, target_id=None, attempts=3):
     return None, None
 
 async def punish_nuker(guild, actor, action_label, detail):
-    """Applique la sanction anti-nuke configuree. Retourne le libelle applique."""
+    """
+    Applique la sanction anti-nuke configuree.
+
+    Retourne un dict {"label", "type", "roles"} : `type` et `roles` servent a
+    annuler la sanction si un administrateur declare une fausse alerte.
+    """
     cfg = get_nuke_cfg(guild.id)
     punishment = str(cfg.get("punishment") or "strip").lower()
     member = guild.get_member(getattr(actor, "id", 0)) if actor else None
     reason = f"[ModBot Anti-Nuke] {action_label} — {detail}"
+    aucune = {"label": "aucune", "type": "none", "roles": []}
 
     if not member:
-        return "aucune (acteur introuvable)"
+        return {**aucune, "label": "aucune (acteur introuvable)"}
     if member.id == guild.owner_id:
-        return "aucune (proprietaire du serveur)"
+        return {**aucune, "label": "aucune (proprietaire du serveur)"}
 
     try:
         if punishment == "ban":
             await guild.ban(member, reason=reason, delete_message_days=0)
-            return "banni"
+            return {"label": "banni", "type": "ban", "roles": []}
         if punishment == "kick":
             await member.kick(reason=reason)
-            return "expulse"
+            return {"label": "expulse", "type": "kick", "roles": []}
         # strip : retire tous les roles que le bot peut retirer
         keep = [r for r in member.roles
                 if r.is_default() or r.managed or r >= guild.me.top_role]
-        if len(keep) != len(member.roles):
+        retires = [r.id for r in member.roles if r not in keep]
+        if retires:
             await member.edit(roles=keep, reason=reason)
-            return "roles retires"
-        return "aucune (roles hors de portee du bot)"
+            return {"label": "roles retires", "type": "strip", "roles": retires}
+        return {**aucune, "label": "aucune (roles hors de portee du bot)"}
     except discord.Forbidden:
-        return "echec (permissions insuffisantes)"
+        return {**aucune, "label": "echec (permissions insuffisantes)"}
     except Exception as ex:
-        return f"echec ({type(ex).__name__})"
+        return {**aucune, "label": f"echec ({type(ex).__name__})"}
+
+
+async def annuler_sanction_nuke(guild, actor_id, sanction):
+    """
+    Defait une sanction anti-nuke declaree comme fausse alerte.
+
+    Retourne un texte decrivant ce qui a pu etre retabli.
+    """
+    stype = (sanction or {}).get("type")
+    if stype in (None, "none"):
+        return "aucune sanction a annuler"
+
+    if stype == "ban":
+        try:
+            await guild.unban(discord.Object(id=int(actor_id)),
+                              reason="[ModBot] Fausse alerte confirmee par un administrateur")
+            return "bannissement leve"
+        except discord.NotFound:
+            return "le bannissement avait deja ete leve"
+        except Exception:
+            return "echec de la levee du bannissement"
+
+    if stype == "kick":
+        return "le membre a ete expulse — il doit revenir avec une invitation"
+
+    if stype == "strip":
+        member = guild.get_member(int(actor_id))
+        if not member:
+            return "membre introuvable, roles non restaures"
+        roles = [guild.get_role(int(rid)) for rid in sanction.get("roles", [])]
+        roles = [r for r in roles if r and r < guild.me.top_role]
+        if not roles:
+            return "aucun role restaurable"
+        try:
+            await member.add_roles(*roles, reason="[ModBot] Fausse alerte confirmee")
+            return f"{len(roles)} role(s) restaure(s)"
+        except Exception:
+            return "echec de la restauration des roles"
+
+    return "type de sanction inconnu"
 
 async def restore_deleted_channel(guild, snapshot):
     """Recree un salon supprime a partir de son instantane."""
@@ -7167,16 +8225,32 @@ async def guard_sensitive_action(guild, actor, action_key, detail, restore=None)
             ("💥 Type d'attaque", result["label_fr"]),
             ("📊 Seuil", f"`{result['count']}` actions en `{result['window']}s` (limite : `{result['limit']}`)"),
             ("📋 Detail", detail),
-            ("⚡ Sanction appliquee", sanction),
+            ("⚡ Sanction appliquee", sanction["label"]),
             ("♻️ Restauration", restored_label),
         ],
         severity="critical", actor=actor,
         thumbnail=getattr(actor, "display_avatar", None) and actor.display_avatar.url,
     )
-    dashboard_log("antinuke_trigger", guild, str(actor), f"{result['label_fr']} -> {sanction}")
+    dashboard_log("antinuke_trigger", guild, str(actor), f"{result['label_fr']} -> {sanction['label']}")
 
     # Une attaque anti-nuke justifie aussi le mode securite
-    await engage_safe_mode(guild, f"Anti-nuke : {result['label_fr']}", triggered_by=actor)
+    safe_mode_engage = await engage_safe_mode(
+        guild, f"Anti-nuke : {result['label_fr']}", triggered_by=actor)
+
+    # Tous les administrateurs sont prevenus en MP et peuvent tout annuler
+    await alerter_administrateurs(
+        guild,
+        "Attaque detectee — anti-nuke declenche",
+        f"**{actor}** a effectue `{result['count']}` action(s) sensibles "
+        f"en `{result['window']}` secondes.",
+        fields=[
+            ("💥 Type d'attaque", result["label_fr"]),
+            ("📋 Detail", detail),
+            ("⚡ Sanction appliquee", sanction["label"]),
+            ("♻️ Restauration automatique", restored_label),
+        ],
+        acteur=actor, sanction=sanction, safe_mode_engage=bool(safe_mode_engage),
+    )
 
 # ════════════════════════════════════════════════
 #  EVENEMENTS SURVEILLES
@@ -8016,6 +9090,62 @@ async def security_lockdown(i: discord.Interaction, actif: bool):
     except Exception:
         await safe_ephemeral(i, embed=embed)
 
+@security_group.command(name="alertes",
+                        description="Alertes d'attaque en message prive aux administrateurs")
+@app_commands.describe(actif="Activer ou couper les MP d'alerte",
+                       test="Envoyer une alerte de test pour verifier la reception")
+async def security_alertes(i: discord.Interaction, actif: bool = None, test: bool = False):
+    await _safe_defer(i)
+    gid = str(i.guild.id)
+
+    if actif is not None:
+        update_cfg(gid, "alertes_mp_admins", bool(actif))
+
+    active = get_cfg(gid).get("alertes_mp_admins") is not False
+    admins = administrateurs_du_serveur(i.guild)
+
+    if test:
+        if not active:
+            return await i.followup.send(
+                embed=embed_warning("Alertes desactivees",
+                                    "Active-les d'abord avec `/securite alertes actif:true`.", gid),
+                ephemeral=True)
+        alerte_id = await alerter_administrateurs(
+            i.guild,
+            "Test d'alerte — ceci n'est pas une attaque",
+            "Cette alerte a ete envoyee volontairement pour verifier que les "
+            "administrateurs recoivent bien les notifications.",
+            fields=[("🧪 Nature", "Test manuel — aucune sanction n'a ete appliquee"),
+                    ("👤 Lance par", str(i.user))],
+        )
+        recus = ALERTES_ACTIVES.get(alerte_id, {}).get("destinataires", 0)
+        embed = embed_success("Alerte de test envoyee",
+                              f"`{recus}` administrateur(s) sur `{len(admins)}` ont recu le message.", gid)
+        if recus < len(admins):
+            embed.add_field(
+                name="⚠️ Non joignables",
+                value="Certains administrateurs ont ferme leurs messages prives. "
+                      "Configure un salon d'alerte staff comme solution de repli.",
+                inline=False)
+        return await i.followup.send(embed=embed, ephemeral=True)
+
+    embed = embed_base("Alertes d'attaque en MP",
+                       "Qui est prevenu quand une attaque est detectee.",
+                       Palette.PRIMARY if active else Palette.NEUTRAL, gid)
+    embed.add_field(name="Etat", value=f"`{'Actif' if active else 'Inactif'}`", inline=True)
+    embed.add_field(name="Administrateurs joignables", value=f"`{len(admins)}`", inline=True)
+    embed.add_field(
+        name="🛡️ Fonctionnement",
+        value="ModBot **protege d'abord**, puis previent. Une attaque reelle detruit "
+              "un serveur en quelques secondes : attendre une reponse humaine serait "
+              "trop lent.\nLes boutons du message prive permettent d'**annuler** la "
+              "protection si c'est une fausse alerte. Sans reponse, ModBot continue seul.",
+        inline=False)
+    embed.add_field(name="🧪 Verifier la reception",
+                    value="`/securite alertes test:true`", inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
 class SecurityPanelView(discord.ui.View):
     """Actions rapides depuis /securite status."""
 
@@ -8065,6 +9195,285 @@ class SecurityPanelView(discord.ui.View):
             embed=embed_success("Mode securite leve", "Le serveur revient a la normale.", gid), ephemeral=True)
 
 bot.tree.add_command(security_group)
+
+# ════════════════════════════════════════════════
+#  CAPTCHA — configuration
+# ════════════════════════════════════════════════
+
+captcha_group = app_commands.Group(
+    name="captcha",
+    description="Verification humaine a l'entree du serveur",
+    default_permissions=discord.Permissions(administrator=True),
+    guild_only=True,
+)
+
+
+async def _assurer_role_verifie(guild):
+    """Retourne le role de verification, en le creant au besoin."""
+    existant = discord.utils.get(guild.roles, name="Verifie")
+    if existant:
+        return existant, False
+    role = await guild.create_role(
+        name="Verifie", colour=discord.Colour(0x43B581),
+        reason="Captcha ModBot — role accorde apres verification")
+    return role, True
+
+
+async def _assurer_salon_verification(guild, role_verifie):
+    """Retourne le salon de verification, en le creant au besoin."""
+    existant = discord.utils.get(guild.text_channels, name="verification")
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=True, send_messages=False, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, embed_links=True, attach_files=True),
+    }
+    if role_verifie:
+        # Le salon disparait une fois la verification passee.
+        overwrites[role_verifie] = discord.PermissionOverwrite(view_channel=False)
+    if existant:
+        try:
+            await existant.edit(overwrites=overwrites, reason="Captcha ModBot")
+        except Exception:
+            pass
+        return existant, False
+    salon = await guild.create_text_channel(
+        "verification", overwrites=overwrites,
+        topic="Verification humaine — clique sur le bouton pour acceder au serveur",
+        reason="Captcha ModBot")
+    return salon, True
+
+
+class VueVerrouillageSalons(discord.ui.View):
+    """
+    Confirmation avant de masquer les salons aux membres non verifies.
+
+    C'est l'etape qui rend le captcha reellement bloquant : sans elle, un
+    robot qui ignore la verification voit quand meme tout le serveur.
+    """
+
+    def __init__(self, role_id, salon_id, auteur_id):
+        super().__init__(timeout=180)
+        self.role_id = int(role_id)
+        self.salon_id = int(salon_id)
+        self.auteur_id = int(auteur_id)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.auteur_id:
+            await safe_ephemeral(interaction, embed=E(
+                "Action reservee", "Seule la personne qui a lance la commande peut confirmer.", 0xED4245))
+            return False
+        return True
+
+    @discord.ui.button(label="Verrouiller les salons", emoji="🔒", style=discord.ButtonStyle.danger)
+    async def verrouiller(self, interaction: discord.Interaction, _button):
+        await _safe_defer(interaction)
+        guild = interaction.guild
+        role = guild.get_role(self.role_id)
+        gid = str(guild.id)
+        if not role:
+            return await interaction.followup.send(
+                embed=embed_error("Role introuvable", "Le role de verification a ete supprime.", gid),
+                ephemeral=True)
+
+        modifies, echecs = 0, 0
+        for salon in list(guild.channels):
+            if salon.id == self.salon_id:
+                continue
+            if isinstance(salon, discord.CategoryChannel) or salon.category is None:
+                try:
+                    await salon.set_permissions(guild.default_role, view_channel=False,
+                                                reason="Captcha ModBot — verrouillage")
+                    await salon.set_permissions(role, view_channel=True,
+                                                reason="Captcha ModBot — acces verifie")
+                    modifies += 1
+                except Exception:
+                    echecs += 1
+
+        embed = embed_success(
+            "Salons verrouilles",
+            f"`{modifies}` categorie(s) et salon(s) hors categorie sont desormais "
+            "invisibles pour les membres non verifies.", gid)
+        if echecs:
+            embed.add_field(name="⚠️ Non modifies", value=f"`{echecs}` (permissions insuffisantes)", inline=False)
+        embed.add_field(
+            name="ℹ️ Les salons dans une categorie",
+            value="Ils heritent automatiquement des permissions de leur categorie.",
+            inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        await log_event(guild, "admin", "Salons verrouilles par le captcha",
+                        f"{interaction.user.mention} a masque les salons aux non-verifies.",
+                        severity="warning", target=interaction.user)
+        self.stop()
+
+    @discord.ui.button(label="Non merci", emoji="✋", style=discord.ButtonStyle.secondary)
+    async def refuser(self, interaction: discord.Interaction, _button):
+        await safe_ephemeral(interaction, embed=E(
+            "Verrouillage annule",
+            "Le captcha reste actif, mais les salons restent visibles pour tout le monde. "
+            "Tu peux verrouiller plus tard avec `/captcha verrouiller`.", 0x5865F2))
+        self.stop()
+
+
+@captcha_group.command(name="activer", description="Activer la verification humaine (tout est cree automatiquement)")
+@app_commands.describe(
+    role="Role accorde apres verification (cree automatiquement si vide)",
+    salon="Salon du panneau de verification (cree automatiquement si vide)",
+)
+async def captcha_activer(interaction: discord.Interaction,
+                          role: discord.Role = None,
+                          salon: discord.TextChannel = None):
+    await _safe_defer(interaction)
+    guild = interaction.guild
+    gid = str(guild.id)
+
+    if not guild.me.guild_permissions.manage_roles:
+        return await interaction.followup.send(
+            embed=embed_error("Permission manquante",
+                              "ModBot a besoin de « Gerer les roles » pour attribuer le role de verification.", gid),
+            ephemeral=True)
+
+    cree = []
+    try:
+        if role is None:
+            role, nouveau = await _assurer_role_verifie(guild)
+            if nouveau:
+                cree.append(f"le role {role.mention}")
+        if salon is None:
+            salon, nouveau = await _assurer_salon_verification(guild, role)
+            if nouveau:
+                cree.append(f"le salon {salon.mention}")
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            embed=embed_error("Permission manquante",
+                              "ModBot ne peut pas creer le role ou le salon. "
+                              "Verifie « Gerer les roles » et « Gerer les salons ».", gid),
+            ephemeral=True)
+    except Exception as ex:
+        return await interaction.followup.send(
+            embed=embed_error("Configuration impossible", f"`{ex}`", gid), ephemeral=True)
+
+    if role >= guild.me.top_role:
+        return await interaction.followup.send(
+            embed=embed_error(
+                "Hierarchie a corriger",
+                f"Le role {role.mention} est au-dessus de ModBot. "
+                "Deplace le role de ModBot plus haut dans les parametres du serveur, "
+                "sinon il ne pourra pas l'attribuer.", gid),
+            ephemeral=True)
+
+    update_cfg(gid, "captcha_enabled", True)
+    update_cfg(gid, "captcha_role", str(role.id))
+    update_cfg(gid, "captcha_channel", str(salon.id))
+
+    reglages = captcha_cfg(gid)
+    try:
+        await salon.send(embed=build_captcha_panel_embed(guild, reglages), view=VueCaptchaPanel())
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            embed=embed_error("Panneau non publie",
+                              f"ModBot ne peut pas ecrire dans {salon.mention}.", gid),
+            ephemeral=True)
+
+    embed = embed_success("Captcha active", "La verification est en place.", gid)
+    embed.add_field(name="🎭 Role accorde", value=role.mention, inline=True)
+    embed.add_field(name="📍 Salon", value=salon.mention, inline=True)
+    if cree:
+        embed.add_field(name="✨ Cree automatiquement", value=" et ".join(cree), inline=False)
+    embed.add_field(
+        name="🔒 Derniere etape",
+        value="Pour que la verification serve vraiment, les salons doivent etre "
+              "masques aux membres non verifies. Je peux le faire maintenant.",
+        inline=False)
+    await interaction.followup.send(
+        embed=embed, view=VueVerrouillageSalons(role.id, salon.id, interaction.user.id), ephemeral=True)
+    await log_event(guild, "admin", "Captcha active",
+                    f"{interaction.user.mention} a active la verification humaine.",
+                    fields=[("Role", role.mention), ("Salon", salon.mention)],
+                    severity="success", target=interaction.user)
+
+
+@captcha_group.command(name="verrouiller", description="Masquer les salons aux membres non verifies")
+async def captcha_verrouiller(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    reglages = captcha_cfg(gid)
+    if not reglages["enabled"] or not reglages["role_id"]:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Captcha inactif", "Lance d'abord `/captcha activer`.", gid))
+    embed = embed_warning(
+        "Verrouiller les salons ?",
+        "Les membres **non verifies** ne verront plus aucun salon, sauf celui de verification.\n"
+        "Cette action modifie les permissions du serveur.", gid)
+    await interaction.response.send_message(
+        embed=embed,
+        view=VueVerrouillageSalons(reglages["role_id"], reglages["channel_id"], interaction.user.id),
+        ephemeral=True)
+
+
+@captcha_group.command(name="panneau", description="Republier le panneau de verification")
+async def captcha_panneau(interaction: discord.Interaction):
+    await _safe_defer(interaction)
+    gid = str(interaction.guild.id)
+    reglages = captcha_cfg(gid)
+    if not reglages["enabled"]:
+        return await interaction.followup.send(
+            embed=embed_error("Captcha inactif", "Lance d'abord `/captcha activer`.", gid), ephemeral=True)
+    salon = interaction.guild.get_channel(int(reglages["channel_id"])) \
+        if reglages["channel_id"].isdigit() else interaction.channel
+    salon = salon or interaction.channel
+    try:
+        await salon.send(embed=build_captcha_panel_embed(interaction.guild, reglages), view=VueCaptchaPanel())
+    except Exception as ex:
+        return await interaction.followup.send(
+            embed=embed_error("Publication impossible", f"`{ex}`", gid), ephemeral=True)
+    await interaction.followup.send(
+        embed=embed_success("Panneau publie", f"Le panneau est en ligne dans {salon.mention}.", gid),
+        ephemeral=True)
+
+
+@captcha_group.command(name="desactiver", description="Desactiver la verification humaine")
+async def captcha_desactiver(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    update_cfg(gid, "captcha_enabled", False)
+    CAPTCHA_STORE.clear(gid)
+    await safe_ephemeral(interaction, embed=embed_success(
+        "Captcha desactive",
+        "La verification est coupee. Le role et le salon sont conserves : "
+        "si tu as verrouille les salons, pense a les rouvrir.", gid))
+    await log_event(interaction.guild, "admin", "Captcha desactive",
+                    f"{interaction.user.mention} a coupe la verification humaine.",
+                    severity="warning", target=interaction.user)
+
+
+@captcha_group.command(name="statut", description="Voir l'etat de la verification")
+async def captcha_statut(interaction: discord.Interaction):
+    guild = interaction.guild
+    gid = str(guild.id)
+    reglages = captcha_cfg(gid)
+    role = guild.get_role(int(reglages["role_id"])) if reglages["role_id"].isdigit() else None
+    salon = guild.get_channel(int(reglages["channel_id"])) if reglages["channel_id"].isdigit() else None
+
+    embed = E("🔐 Etat du captcha", couleur=0x43B581 if reglages["enabled"] else 0x747F8D)
+    embed.add_field(name="Etat", value="`Actif`" if reglages["enabled"] else "`Inactif`", inline=True)
+    embed.add_field(name="Verifications en attente", value=f"`{CAPTCHA_STORE.pending(gid)}`", inline=True)
+    embed.add_field(name="Image", value="`Oui`" if PIL_AVAILABLE else "`Texte (Pillow absent)`", inline=True)
+    embed.add_field(name="🎭 Role", value=role.mention if role else "`Non configure`", inline=True)
+    embed.add_field(name="📍 Salon", value=salon.mention if salon else "`Non configure`", inline=True)
+
+    alertes = []
+    if not guild.me.guild_permissions.manage_roles:
+        alertes.append("ModBot n'a pas « Gerer les roles »")
+    if role and role >= guild.me.top_role:
+        alertes.append("Le role de verification est au-dessus de ModBot")
+    if reglages["enabled"] and not role:
+        alertes.append("Aucun role configure : la verification n'accorde rien")
+    if alertes:
+        embed.add_field(name="⚠️ A corriger", value="\n".join(f"• {a}" for a in alertes), inline=False)
+
+    await safe_ephemeral(interaction, embed=embed)
+
+
+bot.tree.add_command(captcha_group)
 
 # ════════════════════════════════════════════════
 #  HISTORIQUE DES INFRACTIONS
@@ -8281,6 +9690,7 @@ async def security_maintenance_loop():
                 guild = bot.get_guild(int(gid))
                 if guild:
                     await release_safe_mode(guild, automatic=True)
+            CAPTCHA_STORE.purge_expired()
             purge_tick += 1
             if purge_tick >= 120:  # toutes les heures environ
                 purge_tick = 0
@@ -8522,7 +9932,8 @@ async def on_ready():
     BOT_STATUS.update({"state": "connecte", "detail": ""})
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
-              VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher()]:
+              VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher(),
+              VueCaptchaPanel()]:
         try:
             bot.add_view(v)
         except Exception as err:
@@ -8577,24 +9988,9 @@ async def on_message(message):
         # Track message stats
         track_msg(uid, gid)
 
-        # Vérification captcha
-        if cfg.get("captcha_enabled"):
-            pending = _captcha.get(gid, {}).get(uid)
-            if pending:
-                role_id = verify_captcha(gid, uid, message.content)
-                if role_id:
-                    if not await claim_message_by_delete(message):
-                        return
-                    role = message.guild.get_role(int(role_id))
-                    if role:
-                        try:
-                            await message.author.add_roles(role)
-                            dm = E("✅ Vérification réussie !", couleur=0x43B581)
-                            dm.description = f"Tu as maintenant accès à **{message.guild.name}** !"
-                            await message.author.send(embed=dm)
-                        except Exception:
-                            pass
-                return  # Ne pas traiter le reste pour les messages captcha
+        # La verification captcha ne passe plus par le salon : elle se fait
+        # entierement dans une reponse ephemere (VueCaptchaPanel), donc aucun
+        # message a intercepter ici.
 
         # Anti-lien
         if anti_link_enabled(cfg) and contains_forbidden_link(message.content):
@@ -9061,16 +10457,34 @@ async def cmd_annonce(i: discord.Interaction):
     except Exception:
         pass
 
-@bot.tree.command(name="massdm", description="📨 Envoyer un DM en masse")
-@app_commands.describe(membre="Membre spécifique (vide = tous les membres)")
+@bot.tree.command(name="massdm", description="📨 Envoyer un message prive a un role ou a tout le serveur")
+@app_commands.describe(
+    role="Role cible. Laisse vide pour ecrire a tout le serveur.",
+    membre="Un seul membre, si tu veux tester le message avant l'envoi general.",
+)
 @app_commands.checks.has_permissions(administrator=True)
-async def cmd_massdm(i: discord.Interaction, membre: discord.Member = None):
+async def cmd_massdm(i: discord.Interaction,
+                     role: discord.Role = None,
+                     membre: discord.Member = None):
     if membre:
-        cibles = [membre]
+        cibles, libelle = [membre], f"{membre.mention} (test)"
+    elif role:
+        cibles = [m for m in role.members if not m.bot]
+        libelle = f"membres de {role.mention}"
     else:
         cibles = [m for m in i.guild.members if not m.bot]
-    try: await i.response.send_modal(ModalMassDM(cibles))
-    except Exception: pass
+        libelle = "**tous les membres** du serveur"
+
+    if not cibles:
+        return await safe_ephemeral(i, embed=embed_warning(
+            "Aucun destinataire",
+            f"Personne ne correspond a cette cible ({libelle})." if role else
+            "Aucun membre humain trouve.", str(i.guild.id)))
+
+    try:
+        await i.response.send_modal(ModalMassDM(cibles, libelle))
+    except Exception:
+        pass
 
 @bot.tree.command(name="translate", description="Traduire un message")
 @app_commands.describe(langue="Langue cible", message_id="ID ou lien du message a traduire (optionnel)", salon="Salon si tu utilises seulement l'ID")
