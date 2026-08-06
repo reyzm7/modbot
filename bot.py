@@ -527,6 +527,21 @@ def db_replace_premium_server_links(owner_key, servers, plan="free"):
     except Exception as ex:
         print(f"Erreur premium server database ModBot: {ex}")
 
+def db_premium_server_links(owner_key):
+    """Serveurs rattaches a un abonnement premium donne."""
+    try:
+        with db_connect() as conn:
+            rows = conn.execute(
+                "SELECT guild_id, guild_name, logo, plan, created_at "
+                "FROM premium_server_links WHERE lower(owner_key) = lower(?) "
+                "ORDER BY guild_name",
+                (str(owner_key),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+    except Exception as ex:
+        print(f"Lecture liens premium impossible: {ex}")
+        return []
+
 def db_recent_events(limit=80):
     try:
         with db_connect() as conn:
@@ -3146,12 +3161,21 @@ def sync_premium_json_to_database():
         if isinstance(item, dict):
             db_upsert_premium(member, item)
 
+PERM_ADMINISTRATOR = 0x8
+
 def user_can_manage_guild(user_guild):
+    """
+    Seuls le proprietaire et les administrateurs peuvent piloter ModBot.
+
+    La permission « Gerer le serveur » (0x20) ne suffit volontairement pas :
+    elle est souvent donnee a des roles de moderation qui n'ont pas vocation
+    a modifier les protections anti-raid ou a restaurer des sauvegardes.
+    """
     try:
         perms = int(user_guild.get("permissions", 0))
-    except Exception:
+    except (TypeError, ValueError):
         perms = 0
-    return bool(user_guild.get("owner") or (perms & 0x8) or (perms & 0x20))
+    return bool(user_guild.get("owner") or (perms & PERM_ADMINISTRATOR))
 
 def identity_can_manage_guild(identity, gid):
     gid = str(gid)
@@ -3692,33 +3716,47 @@ async def api_me(request):
     }, request=request)
 
 async def api_guilds(request):
+    """
+    Serveurs pilotables par l'utilisateur connecte.
+
+    Deux conditions cumulatives, aucune autre n'est renvoyee :
+      1. l'utilisateur y est proprietaire ou administrateur ;
+      2. ModBot y est effectivement installe.
+
+    Les serveurs sans le bot ne sont pas listes : ils ne seraient pas
+    configurables et encombreraient la selection.
+    """
     identity = await api_identity(request)
-    allowed = set(identity.get("guild_ids", []))
     live_guilds = {str(guild.id): serialize_guild(guild) for guild in bot.guilds}
+
     if identity.get("admin"):
         guilds = list(live_guilds.values())
     else:
-        seen = set()
         guilds = []
-        stored = identity.get("manageable_guilds") or []
-        if isinstance(stored, list):
-            for item in stored:
-                if not isinstance(item, dict):
-                    continue
-                gid = str(item.get("id") or "")
-                if not gid or gid in seen:
-                    continue
-                seen.add(gid)
-                if gid in live_guilds and identity_can_manage_guild(identity, gid):
-                    merged = {**item, **live_guilds[gid], "installed": True, "can_manage": True}
-                else:
-                    merged = {**item, "installed": False, "can_manage": True}
-                guilds.append(merged)
-        for gid in allowed:
-            if gid in live_guilds and gid not in seen:
-                guilds.append(live_guilds[gid])
-    print(f"Dashboard guilds: user={identity.get('user_id')} returned={len(guilds)} installed={len(bot.guilds)}")
-    return api_json({"ok": True, "guilds": guilds, "user": identity, "premium": premium_for_identity(identity)})
+        seen = set()
+        for gid in identity.get("guild_ids", []):
+            gid = str(gid)
+            if gid in seen or gid not in live_guilds:
+                continue
+            if not identity_can_manage_guild(identity, gid):
+                continue
+            seen.add(gid)
+            stored = next(
+                (item for item in (identity.get("manageable_guilds") or [])
+                 if isinstance(item, dict) and str(item.get("id") or "") == gid),
+                {},
+            )
+            guilds.append({**stored, **live_guilds[gid], "installed": True, "can_manage": True})
+
+    guilds.sort(key=lambda g: str(g.get("name") or "").lower())
+    print(f"Dashboard guilds: user={identity.get('user_id')} "
+          f"administrables={len(guilds)} bot_present_sur={len(bot.guilds)}")
+    return api_json({
+        "ok": True,
+        "guilds": guilds,
+        "user": identity,
+        "premium": premium_for_identity(identity),
+    }, request=request)
 
 async def api_guild_resources(request):
     identity = await api_identity(request)
@@ -4167,6 +4205,68 @@ async def api_admin_premium(request):
     return api_json({"ok": True, "premium": build_premium_state(entry, source="database")},
                     request=request)
 
+async def api_admin_premium_servers(request):
+    """
+    Consulte ou remplace la liste des serveurs rattaches a un abonnement.
+    L'association est volontairement reservee aux administrateurs ModBot :
+    elle n'est plus pilotable depuis le dashboard utilisateur.
+
+    GET  /api/admin/premium/servers?member=...
+    PUT  /api/admin/premium/servers   {"member": "...", "guild_ids": [...]}
+    """
+    identity = await api_identity(request, admin_required=True)
+
+    if request.method == "GET":
+        member = clean_short_text(request.query.get("member"), "", 80)
+        if not member:
+            raise web.HTTPBadRequest(text="Parametre 'member' manquant.")
+        return api_json({
+            "ok": True,
+            "member": member,
+            "premium": premium_for_identity({"user_id": member, "username": member}),
+            "linked": db_premium_server_links(member),
+            "available": [serialize_guild(g) for g in
+                          sorted(bot.guilds, key=lambda g: (g.name or "").lower())],
+        }, request=request)
+
+    payload = await request.json()
+    member = clean_short_text(payload.get("member"), "", 80)
+    if not member:
+        raise web.HTTPBadRequest(text="Membre manquant.")
+
+    demandes = payload.get("guild_ids")
+    if not isinstance(demandes, list):
+        raise web.HTTPBadRequest(text="'guild_ids' doit etre une liste d'identifiants.")
+
+    # Seuls des serveurs ou le bot est reellement present sont acceptes
+    connus = {str(g.id): g for g in bot.guilds}
+    serveurs, ignores = [], []
+    for brut in demandes[:200]:
+        gid = str(parse_int(brut) or "")
+        guild = connus.get(gid)
+        if not guild:
+            ignores.append(str(brut))
+            continue
+        serveurs.append({
+            "id": gid,
+            "name": guild.name,
+            "logo": oauth_guild_icon_url(guild.id, getattr(getattr(guild, "icon", None), "key", None)),
+            "initials": guild_initials(guild),
+        })
+
+    plan = normalize_premium_plan(
+        premium_for_identity({"user_id": member, "username": member}).get("plan")
+    )
+    db_replace_premium_server_links(member, serveurs, plan)
+    dashboard_log("premium_servers_update", None, identity.get("username"),
+                  f"{member} -> {len(serveurs)} serveur(s)")
+    return api_json({
+        "ok": True,
+        "member": member,
+        "linked": db_premium_server_links(member),
+        "ignored": ignores,
+    }, request=request)
+
 async def api_admin_blacklist(request):
     identity = await api_identity(request, admin_required=True)
     payload = await request.json()
@@ -4296,6 +4396,8 @@ async def start_dashboard_api():
     app.router.add_get("/api/admin/stats", api_admin_stats)
     app.router.add_get("/api/admin/database", api_admin_database)
     app.router.add_post("/api/admin/premium", api_admin_premium)
+    app.router.add_get("/api/admin/premium/servers", api_admin_premium_servers)
+    app.router.add_put("/api/admin/premium/servers", api_admin_premium_servers)
     app.router.add_post("/api/admin/blacklist", api_admin_blacklist)
 
     # ── Site web servi par le bot (optionnel mais recommande) ──────────
