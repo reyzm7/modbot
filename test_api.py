@@ -89,9 +89,16 @@ async def main():
             async with s.get(f"{BASE}{route}") as r:
                 verifier(f"{route} sans jeton -> 401", r.status == 401, f"recu {r.status}")
 
-        for route in ("/api/guilds/1/members/2/action", "/api/guilds/1/roles/2/action"):
+        for route in ("/api/guilds/1/members/2/action", "/api/guilds/1/roles/2/action",
+                      "/api/guilds/1/giveaways", "/api/guilds/1/assistant"):
             async with s.post(f"{BASE}{route}", json={"action": "warn"}) as r:
                 verifier(f"POST {route} sans jeton -> 401", r.status == 401, f"recu {r.status}")
+
+        # L'assistant IA relaie vers Anthropic : la clef ne doit jamais sortir
+        async with s.get(f"{BASE}/api/health") as r:
+            corps = await r.text()
+            verifier("la clef Anthropic n'est pas exposee par /api/health",
+                     "ANTHROPIC" not in corps.upper() and "sk-ant" not in corps)
 
         async with s.get(f"{BASE}/api/guilds", headers={"Authorization": "Bearer faux"}) as r:
             verifier("/api/guilds avec faux jeton -> 401", r.status == 401, f"recu {r.status}")
