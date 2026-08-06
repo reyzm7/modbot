@@ -2659,6 +2659,12 @@ _rate_buckets = {}
 
 # Duree de vie d'une session dashboard (en heures) et d'un state OAuth (minutes)
 SESSION_TTL_HOURS = int(os.environ.get("DASHBOARD_SESSION_TTL_HOURS", "168"))  # 7 jours
+
+# Version du format de session. A incrementer des que la regle de permission
+# change : les sessions plus anciennes sont alors refusees et l'utilisateur
+# se reconnecte avec des droits recalcules. Sans cela, un durcissement des
+# regles ne prendrait effet qu'a l'expiration naturelle des sessions.
+SESSION_VERSION = 2
 OAUTH_STATE_TTL_MINUTES = 10
 MAX_OAUTH_STATES = 500
 MAX_SESSIONS = 2000
@@ -2778,7 +2784,11 @@ async def api_cors_middleware(request, handler):
 
 # ── Sessions dashboard ────────────────────────────────────────────────────────
 def _session_expired(entry):
-    created = sc.parse_iso((entry or {}).get("created_at"))
+    entry = entry or {}
+    # Une session d'un format anterieur ne porte plus les bonnes permissions
+    if int(entry.get("version") or 1) != SESSION_VERSION:
+        return True
+    created = sc.parse_iso(entry.get("created_at"))
     if not created:
         return True
     return (now() - created) > timedelta(hours=SESSION_TTL_HOURS)
@@ -3125,6 +3135,46 @@ def premium_for_identity(identity):
                 return build_premium_state(item, source="json")
     return empty_premium_state()
 
+def guild_premium_state(guild_id):
+    """
+    Etat Premium D'UN SERVEUR. C'est desormais le serveur qui porte
+    l'abonnement, pas le membre : un administrateur ModBot l'attribue
+    directement au serveur concerne.
+    """
+    cfg = get_cfg(guild_id)
+    expires = sc.parse_iso(cfg.get("premium_until"))
+    active = bool(expires and expires > now())
+    return {
+        "plan": "premium" if active else "free",
+        "active": active,
+        "status": "active" if active else ("expired" if expires else "none"),
+        "price": PREMIUM_PRICE_EUR,
+        "price_label": PREMIUM_PRICE_LABEL,
+        "duration_months": PREMIUM_DURATION_MONTHS,
+        "duration": PREMIUM_DURATION_LABEL,
+        "started_at": cfg.get("premium_since") or None,
+        "expires_at": expires.isoformat() if expires else None,
+        "days_left": max(0, (expires - now()).days) if active else 0,
+        "granted_by": cfg.get("premium_granted_by") or "",
+        "servers_limit": UNLIMITED_PREMIUM_SERVERS,
+        "premium_unlimited": True,
+        "source": "guild",
+    }
+
+def set_guild_premium(guild_id, active, actor="", months=PREMIUM_DURATION_MONTHS):
+    """Active ou revoque le Premium d'un serveur. Retourne le nouvel etat."""
+    cfg = get_cfg(guild_id)
+    if active:
+        depart = now()
+        cfg["premium_since"] = depart.isoformat()
+        cfg["premium_until"] = (depart + timedelta(days=PREMIUM_DURATION_DAYS)).isoformat()
+        cfg["premium_granted_by"] = str(actor or "")
+    else:
+        for key in ("premium_since", "premium_until", "premium_granted_by"):
+            cfg.pop(key, None)
+    set_cfg(guild_id, cfg)
+    return guild_premium_state(guild_id)
+
 def premium_active_for_guild(guild_id):
     """Un serveur est premium si un abonnement actif le reference."""
     gid = str(guild_id)
@@ -3178,17 +3228,25 @@ def user_can_manage_guild(user_guild):
     return bool(user_guild.get("owner") or (perms & PERM_ADMINISTRATOR))
 
 def identity_can_manage_guild(identity, gid):
+    """
+    Verifie les droits a CHAQUE requete a partir des permissions Discord
+    brutes memorisees a la connexion.
+
+    L'ancienne version se contentait de chercher l'identifiant dans une liste
+    figee : un utilisateur ayant perdu ses droits — ou connecte avant un
+    durcissement des regles — gardait l'acces jusqu'a l'expiration de sa
+    session. On reevalue desormais la permission elle-meme.
+    """
     gid = str(gid)
     if identity.get("admin"):
         return True
-    if gid in {str(item) for item in identity.get("guild_ids", [])}:
-        return True
-    manageable = identity.get("manageable_guilds") or []
-    if not isinstance(manageable, list):
-        return False
-    for item in manageable:
-        if isinstance(item, dict) and str(item.get("id") or "") == gid and item.get("can_manage"):
-            return True
+    for item in identity.get("manageable_guilds") or []:
+        if not isinstance(item, dict) or str(item.get("id") or "") != gid:
+            continue
+        return user_can_manage_guild({
+            "owner": item.get("owner"),
+            "permissions": item.get("permissions", 0),
+        })
     return False
 
 def oauth_guild_icon_url(gid, icon_hash):
@@ -3275,6 +3333,7 @@ def make_session(user, user_guilds):
         data["sessions"].pop(old_token, None)
 
     data["sessions"][token] = {
+        "version": SESSION_VERSION,
         "user_id": user_id,
         "username": user.get("global_name") or user.get("username") or "Utilisateur Discord",
         "discriminator": str(user.get("discriminator") or "0"),
@@ -3732,21 +3791,24 @@ async def api_guilds(request):
     if identity.get("admin"):
         guilds = list(live_guilds.values())
     else:
+        # On part des serveurs Discord memorises a la connexion et on
+        # revalide la permission de chacun : jamais d'une liste d'ids figee.
         guilds = []
         seen = set()
-        for gid in identity.get("guild_ids", []):
-            gid = str(gid)
-            if gid in seen or gid not in live_guilds:
+        for item in identity.get("manageable_guilds") or []:
+            if not isinstance(item, dict):
+                continue
+            gid = str(item.get("id") or "")
+            if not gid or gid in seen or gid not in live_guilds:
                 continue
             if not identity_can_manage_guild(identity, gid):
                 continue
             seen.add(gid)
-            stored = next(
-                (item for item in (identity.get("manageable_guilds") or [])
-                 if isinstance(item, dict) and str(item.get("id") or "") == gid),
-                {},
-            )
-            guilds.append({**stored, **live_guilds[gid], "installed": True, "can_manage": True})
+            guilds.append({**item, **live_guilds[gid], "installed": True, "can_manage": True})
+
+    # Chaque serveur porte desormais son propre abonnement
+    for item in guilds:
+        item["premium"] = guild_premium_state(item["id"])
 
     guilds.sort(key=lambda g: str(g.get("name") or "").lower())
     print(f"Dashboard guilds: user={identity.get('user_id')} "
@@ -3755,7 +3817,6 @@ async def api_guilds(request):
         "ok": True,
         "guilds": guilds,
         "user": identity,
-        "premium": premium_for_identity(identity),
     }, request=request)
 
 async def api_guild_resources(request):
@@ -3777,7 +3838,11 @@ async def api_guild_resources(request):
 async def api_get_guild_config(request):
     identity = await api_identity(request)
     guild = await api_guild_from_request(request, identity)
-    return api_json({"ok": True, "config": serialize_dashboard_config(guild)})
+    return api_json({
+        "ok": True,
+        "config": serialize_dashboard_config(guild),
+        "premium": guild_premium_state(guild.id),
+    }, request=request)
 
 async def api_get_guild_sanctions(request):
     identity = await api_identity(request)
@@ -4205,67 +4270,49 @@ async def api_admin_premium(request):
     return api_json({"ok": True, "premium": build_premium_state(entry, source="database")},
                     request=request)
 
-async def api_admin_premium_servers(request):
-    """
-    Consulte ou remplace la liste des serveurs rattaches a un abonnement.
-    L'association est volontairement reservee aux administrateurs ModBot :
-    elle n'est plus pilotable depuis le dashboard utilisateur.
-
-    GET  /api/admin/premium/servers?member=...
-    PUT  /api/admin/premium/servers   {"member": "...", "guild_ids": [...]}
-    """
-    identity = await api_identity(request, admin_required=True)
-
-    if request.method == "GET":
-        member = clean_short_text(request.query.get("member"), "", 80)
-        if not member:
-            raise web.HTTPBadRequest(text="Parametre 'member' manquant.")
-        return api_json({
-            "ok": True,
-            "member": member,
-            "premium": premium_for_identity({"user_id": member, "username": member}),
-            "linked": db_premium_server_links(member),
-            "available": [serialize_guild(g) for g in
-                          sorted(bot.guilds, key=lambda g: (g.name or "").lower())],
-        }, request=request)
-
-    payload = await request.json()
-    member = clean_short_text(payload.get("member"), "", 80)
-    if not member:
-        raise web.HTTPBadRequest(text="Membre manquant.")
-
-    demandes = payload.get("guild_ids")
-    if not isinstance(demandes, list):
-        raise web.HTTPBadRequest(text="'guild_ids' doit etre une liste d'identifiants.")
-
-    # Seuls des serveurs ou le bot est reellement present sont acceptes
-    connus = {str(g.id): g for g in bot.guilds}
-    serveurs, ignores = [], []
-    for brut in demandes[:200]:
-        gid = str(parse_int(brut) or "")
-        guild = connus.get(gid)
-        if not guild:
-            ignores.append(str(brut))
-            continue
-        serveurs.append({
-            "id": gid,
-            "name": guild.name,
-            "logo": oauth_guild_icon_url(guild.id, getattr(getattr(guild, "icon", None), "key", None)),
-            "initials": guild_initials(guild),
-        })
-
-    plan = normalize_premium_plan(
-        premium_for_identity({"user_id": member, "username": member}).get("plan")
-    )
-    db_replace_premium_server_links(member, serveurs, plan)
-    dashboard_log("premium_servers_update", None, identity.get("username"),
-                  f"{member} -> {len(serveurs)} serveur(s)")
+async def api_admin_guilds(request):
+    """Tous les serveurs du bot, avec leur etat Premium — vue administrateur."""
+    await api_identity(request, admin_required=True)
+    serveurs = []
+    for guild in sorted(bot.guilds, key=lambda g: (g.name or "").lower()):
+        serveurs.append({**serialize_guild(guild), "premium": guild_premium_state(guild.id)})
     return api_json({
         "ok": True,
-        "member": member,
-        "linked": db_premium_server_links(member),
-        "ignored": ignores,
+        "guilds": serveurs,
+        "offer": {
+            "price": PREMIUM_PRICE_EUR,
+            "price_label": PREMIUM_PRICE_LABEL,
+            "duration_months": PREMIUM_DURATION_MONTHS,
+            "duration": PREMIUM_DURATION_LABEL,
+        },
     }, request=request)
+
+async def api_admin_guild_premium(request):
+    """
+    Attribue ou revoque le Premium d'un serveur.
+    POST /api/admin/guilds/{guild_id}/premium   {"active": true|false}
+    """
+    identity = await api_identity(request, admin_required=True)
+    gid = str(request.match_info.get("guild_id") or "")
+    if not gid.isdigit():
+        raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
+    guild = bot.get_guild(int(gid))
+    if not guild:
+        raise web.HTTPNotFound(text="ModBot n'est pas present sur ce serveur.")
+
+    payload = await request.json() if request.can_read_body else {}
+    actif = bool((payload or {}).get("active", True))
+    etat = set_guild_premium(gid, actif, identity.get("username") or identity.get("user_id"))
+
+    dashboard_log("premium_guild", guild, identity.get("username"),
+                  "active jusqu'au " + (etat["expires_at"] or "-") if actif else "revoque")
+    await log_event(guild, "admin",
+                    "Premium active" if actif else "Premium revoque",
+                    f"L'abonnement Premium du serveur a ete {'active' if actif else 'revoque'}.",
+                    fields=[("💎 Offre", f"{PREMIUM_PRICE_LABEL} / {PREMIUM_DURATION_LABEL}")]
+                           if actif else None,
+                    severity="success" if actif else "warning")
+    return api_json({"ok": True, "guild": serialize_guild(guild), "premium": etat}, request=request)
 
 async def api_admin_blacklist(request):
     identity = await api_identity(request, admin_required=True)
@@ -4396,8 +4443,8 @@ async def start_dashboard_api():
     app.router.add_get("/api/admin/stats", api_admin_stats)
     app.router.add_get("/api/admin/database", api_admin_database)
     app.router.add_post("/api/admin/premium", api_admin_premium)
-    app.router.add_get("/api/admin/premium/servers", api_admin_premium_servers)
-    app.router.add_put("/api/admin/premium/servers", api_admin_premium_servers)
+    app.router.add_get("/api/admin/guilds", api_admin_guilds)
+    app.router.add_post("/api/admin/guilds/{guild_id}/premium", api_admin_guild_premium)
     app.router.add_post("/api/admin/blacklist", api_admin_blacklist)
 
     # ── Site web servi par le bot (optionnel mais recommande) ──────────
