@@ -1004,7 +1004,8 @@ def build_ticket_panel_embed(guild):
     gid = str(guild.id)
     cfg = get_cfg(gid)
     lang = get_lang(gid)
-    logo = cfg.get("embed_logo") or (guild.icon.url if guild.icon else None)
+    # Logo choisi dans le dashboard, sinon celui du serveur Discord
+    logo = cfg.get("ticket_logo") or cfg.get("embed_logo") or (guild.icon.url if guild.icon else None)
     author = cfg.get("ticket_panel_author") or tr(gid, "ticket_panel_author", guild_name=guild.name)
     title = cfg.get("ticket_panel_title") or tr(gid, "ticket_panel_title")
     desc = cfg.get("ticket_panel_desc") or tr(gid, "ticket_panel_desc")
@@ -3441,11 +3442,9 @@ async def api_guild_from_request(request, identity=None):
         raise web.HTTPNotFound(
             text="ModBot n'est pas present sur ce serveur. Invite le bot puis reessaie.")
 
-    if identity.get("admin"):
-        return guild
-
     # Verification en direct aupres de Discord, sur CHAQUE requete touchant
     # a un serveur : lire ou ecrire une configuration exige les droits actuels.
+    # Le statut d'administrateur ModBot ne dispense PAS de cette verification.
     source = await fetch_user_guilds_live(identity)
     if source is not None:
         autorise = any(
@@ -3548,6 +3547,7 @@ def serialize_dashboard_config(guild):
             "description": cfg.get("ticket_panel_desc") or tr(gid, "ticket_panel_desc"),
             "emoji": cfg.get("ticket_panel_emoji") or "📩",
             "banner": cfg.get("ticket_banner") or cfg.get("embed_banner") or "",
+            "logo": cfg.get("ticket_logo") or cfg.get("embed_logo") or "",
             "support_role": str(cfg.get("ticket_support_role") or ""),
             "options": get_ticket_questions(gid),
         },
@@ -3632,10 +3632,23 @@ async def apply_dashboard_config(guild, payload):
         cfg["ticket_panel_title"] = clean_short_text(tickets.get("title"), tr(gid, "ticket_panel_title"), 80)
         cfg["ticket_panel_desc"] = clean_short_text(tickets.get("description"), tr(gid, "ticket_panel_desc"), 2000)
         cfg["ticket_panel_emoji"] = clean_short_text(tickets.get("emoji"), "📩", 8)
+        # Banniere et logo : une URL est conservee telle quelle, une image
+        # envoyee depuis l'appareil (data URI) est hebergee sur Discord.
         if tickets.get("banner"):
-            ticket_banner_url = await store_dashboard_asset(guild, cfg, tickets.get("banner"), "ticket_banner", "ticket-banner")
+            ticket_banner_url = await store_dashboard_asset(
+                guild, cfg, tickets.get("banner"), "ticket_banner", "ticket-banner")
             if ticket_banner_url:
                 cfg["ticket_banner"] = ticket_banner_url
+        elif "banner" in tickets:
+            cfg.pop("ticket_banner", None)
+
+        if tickets.get("logo"):
+            ticket_logo_url = await store_dashboard_asset(
+                guild, cfg, tickets.get("logo"), "ticket_logo", "ticket-logo")
+            if ticket_logo_url:
+                cfg["ticket_logo"] = ticket_logo_url
+        elif "logo" in tickets:
+            cfg.pop("ticket_logo", None)
         role_id = parse_role_reference(guild, tickets.get("support_role"))
         if role_id:
             cfg["ticket_support_role"] = role_id
@@ -3857,39 +3870,37 @@ async def api_guilds(request):
     identity = await api_identity(request)
     live_guilds = {str(guild.id): serialize_guild(guild) for guild in bot.guilds}
 
-    if identity.get("admin"):
-        guilds = list(live_guilds.values())
+    # Le statut d'administrateur ModBot ouvre l'espace d'administration
+    # (statistiques, blacklist) mais ne donne AUCUN droit sur les serveurs
+    # Discord des autres : la liste reste filtree par les vraies permissions.
+    source = await fetch_user_guilds_live(identity)
+    if source is None:
+        source = identity.get("manageable_guilds") or []
+        origine = "session"
     else:
-        # Source de verite : Discord lui-meme. On retombe sur les donnees de
-        # session uniquement si l'appel echoue (jeton expire, panne Discord).
-        source = await fetch_user_guilds_live(identity)
-        if source is None:
-            source = identity.get("manageable_guilds") or []
-            origine = "session"
-        else:
-            origine = "discord"
+        origine = "discord"
 
-        guilds = []
-        seen = set()
-        for item in source:
-            if not isinstance(item, dict):
-                continue
-            gid = str(item.get("id") or "")
-            # Trois conditions cumulatives, sans exception
-            if not gid or gid in seen:
-                continue
-            if gid not in live_guilds:          # ModBot n'y est pas
-                continue
-            if not user_can_manage_guild(item):  # pas administrateur
-                continue
-            seen.add(gid)
-            guilds.append({
-                **serialize_oauth_guild(item, installed=True),
-                **live_guilds[gid],
-                "installed": True,
-                "can_manage": True,
-            })
-        print(f"Dashboard guilds: source={origine} retenus={len(guilds)}/{len(source)}")
+    guilds = []
+    seen = set()
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        gid = str(item.get("id") or "")
+        # Trois conditions cumulatives, sans exception
+        if not gid or gid in seen:
+            continue
+        if gid not in live_guilds:          # ModBot n'y est pas
+            continue
+        if not user_can_manage_guild(item):  # pas administrateur du serveur
+            continue
+        seen.add(gid)
+        guilds.append({
+            **serialize_oauth_guild(item, installed=True),
+            **live_guilds[gid],
+            "installed": True,
+            "can_manage": True,
+        })
+    print(f"Dashboard guilds: source={origine} retenus={len(guilds)}/{len(source)}")
 
     guilds.sort(key=lambda g: str(g.get("name") or "").lower())
     print(f"Dashboard guilds: user={identity.get('user_id')} "
