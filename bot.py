@@ -1446,13 +1446,15 @@ def load_tickets():
 def save_tickets(d):
     jsave(F_TICKETS, d)
 
-def add_rating(gid, user_id, note):
+def add_rating(gid, user_id, note, commentaire="", pseudo=""):
     d = jload(F_RATINGS)
     g = str(gid)
     d.setdefault(g, [])
     d[g].append({
         "user_id": str(user_id),
+        "pseudo": str(pseudo or ""),
         "note": int(note),
+        "comment": str(commentaire or "")[:500],
         "date": now().strftime("%Y-%m-%d %H:%M:%S"),
     })
     jsave(F_RATINGS, d)
@@ -1942,6 +1944,79 @@ def ticket_action_key(interaction, action):
     cid = getattr(interaction.channel, "id", "no-channel")
     return f"{gid}-{cid}-{action}"
 
+# Libelle associe a chaque note, repris dans le message de remerciement
+RATING_LABELS = {
+    1: ("Tres decu", "😞"),
+    2: ("Peu satisfait", "🙁"),
+    3: ("Correct", "🙂"),
+    4: ("Tres bien", "😃"),
+    5: ("Excellent", "🤩"),
+}
+
+def rating_stars(note):
+    """★★★★☆ pour une note sur 5."""
+    note = max(0, min(5, int(note or 0)))
+    return "★" * note + "☆" * (5 - note)
+
+class ModalCommentaireNotation(discord.ui.Modal):
+    """Commentaire facultatif demande juste apres le choix des etoiles."""
+
+    commentaire = discord.ui.TextInput(
+        label="Ton avis (facultatif)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Ex : Super ! Reponse rapide et staff a l'ecoute.",
+        required=False,
+        max_length=500,
+    )
+
+    def __init__(self, gid, note):
+        libelle = RATING_LABELS.get(note, ("", ""))[0]
+        super().__init__(title=f"{rating_stars(note)} — {libelle}")
+        self.gid = gid
+        self.note = note
+
+    async def on_submit(self, interaction: discord.Interaction):
+        texte = (self.commentaire.value or "").strip()
+        if self.gid:
+            add_rating(self.gid, interaction.user.id, self.note, texte, str(interaction.user))
+
+        libelle, emoji = RATING_LABELS.get(self.note, ("Merci", "⭐"))
+        e = EG(f"{emoji} Merci pour ton avis !",
+               f"Ta note **{rating_stars(self.note)} {self.note}/5** — *{libelle}* a bien ete enregistree.",
+               0xFFD700, self.gid)
+        if texte:
+            e.add_field(name="💬 Ton commentaire", value=texte[:1024], inline=False)
+        try:
+            await interaction.response.edit_message(embed=e, view=None)
+        except (discord.InteractionResponded, discord.NotFound):
+            await safe_ephemeral(interaction, embed=e)
+        except Exception:
+            pass
+
+        # Publication dans le salon des avis, s'il est configure
+        if not self.gid:
+            return
+        guild = bot.get_guild(int(self.gid))
+        if not guild:
+            return
+        annonce = EG(f"{emoji} Nouvel avis — {rating_stars(self.note)} {self.note}/5",
+                     f"**{interaction.user}** a note le support : *{libelle}*.", 0xFFD700, self.gid)
+        annonce.set_thumbnail(url=interaction.user.display_avatar.url)
+        if texte:
+            annonce.add_field(name="💬 Commentaire", value=texte[:1024], inline=False)
+        await log_event(guild, "tickets", "Avis recu",
+                        f"**{interaction.user}** a laisse une note de {self.note}/5.",
+                        fields=[("⭐ Note", f"{rating_stars(self.note)} {self.note}/5"),
+                                ("💬 Commentaire", texte or "_aucun_")],
+                        severity="success")
+        channel_id = parse_int(get_cfg(self.gid).get("salon_ratings"))
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if channel:
+            try:
+                await channel.send(embed=annonce, allowed_mentions=discord.AllowedMentions.none())
+            except Exception:
+                pass
+
 class VueNotation(discord.ui.View):
     def __init__(self, gid=None):
         super().__init__(timeout=None)
@@ -1949,30 +2024,18 @@ class VueNotation(discord.ui.View):
 
     async def _noter(self, interaction: discord.Interaction, note: int):
         gid = self.gid or (str(interaction.guild.id) if interaction.guild else None)
-        if gid:
-            add_rating(gid, interaction.user.id, note)
-        self.clear_items()
-        etoiles = "*" * note
-        e = EG("Notation enregistree", f"Merci, ta note **{etoiles} {note}/5** a ete enregistree.", 0xFFD700, gid)
-        try:
-            await interaction.response.edit_message(embed=e, view=None)
-        except discord.InteractionResponded:
-            try:
-                await interaction.message.edit(embed=e, view=None)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        # Le modal recueille le commentaire, puis enregistre la note
+        await interaction.response.send_modal(ModalCommentaireNotation(gid, note))
 
-    @discord.ui.button(label="1", style=discord.ButtonStyle.secondary, custom_id="nt1")
+    @discord.ui.button(label="1", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="nt1")
     async def n1(self, i, b): await self._noter(i, 1)
-    @discord.ui.button(label="2", style=discord.ButtonStyle.secondary, custom_id="nt2")
+    @discord.ui.button(label="2", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="nt2")
     async def n2(self, i, b): await self._noter(i, 2)
-    @discord.ui.button(label="3", style=discord.ButtonStyle.secondary, custom_id="nt3")
+    @discord.ui.button(label="3", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="nt3")
     async def n3(self, i, b): await self._noter(i, 3)
-    @discord.ui.button(label="4", style=discord.ButtonStyle.primary, custom_id="nt4")
+    @discord.ui.button(label="4", emoji="⭐", style=discord.ButtonStyle.primary, custom_id="nt4")
     async def n4(self, i, b): await self._noter(i, 4)
-    @discord.ui.button(label="5", style=discord.ButtonStyle.success, custom_id="nt5")
+    @discord.ui.button(label="5", emoji="⭐", style=discord.ButtonStyle.success, custom_id="nt5")
     async def n5(self, i, b): await self._noter(i, 5)
 
 class VueTicket(discord.ui.View):
@@ -2181,6 +2244,14 @@ class VueTicket(discord.ui.View):
             e.add_field(name="Ticket", value=f"`{interaction.channel.name}`", inline=True)
             e.add_field(name=tr(gid, "creator"), value=tdata.get("pseudo", "?"), inline=True)
             await interaction.followup.send(embed=e)
+
+            await log_event(
+                interaction.guild, "tickets", "Ticket ferme",
+                f"Le ticket `{tdata.get('nom', interaction.channel.name)}` a ete ferme.",
+                fields=[("🗂️ Categorie", tdata.get("categorie", "-")),
+                        ("👤 Ouvert par", tdata.get("pseudo", "?"))],
+                severity="info", actor=interaction.user,
+            )
             if uid:
                 try:
                     u = await bot.fetch_user(int(uid))
@@ -3460,23 +3531,52 @@ async def api_guild_from_request(request, identity=None):
         raise web.HTTPForbidden(text="Tu n'as pas les permissions pour gerer ce serveur.")
     return guild
 
-def dashboard_asset_channel(guild, cfg):
-    candidate_ids = [
-        cfg.get("salon_logs"),
-        cfg.get("salon_tickets"),
-        DEFAULT_LOGS,
-        DEFAULT_TICKETS,
-    ]
-    for channel_id in candidate_ids:
-        channel = guild.get_channel(int(channel_id)) if channel_id else None
-        if not channel:
-            continue
-        perms = channel.permissions_for(guild.me)
-        if perms.send_messages and perms.attach_files:
+ASSET_CHANNEL_NAME = "modbot-assets"
+
+async def ensure_asset_channel(guild, cfg):
+    """
+    Salon technique ou sont stockees les images du dashboard.
+
+    Il est cree masque pour @everyone : les bannieres et logos envoyes
+    depuis le dashboard ne doivent jamais apparaitre dans un salon public
+    comme #ticket. On ne retombe sur un salon existant qu'en dernier
+    recours, si la creation est impossible.
+    """
+    stored = parse_int(cfg.get("asset_channel_id"))
+    if stored:
+        channel = guild.get_channel(stored)
+        if channel and channel.permissions_for(guild.me).attach_files:
             return channel
+
+    existant = discord.utils.get(getattr(guild, "text_channels", []), name=ASSET_CHANNEL_NAME)
+    if existant and existant.permissions_for(guild.me).attach_files:
+        cfg["asset_channel_id"] = existant.id
+        return existant
+
+    if guild.me.guild_permissions.manage_channels:
+        try:
+            channel = await guild.create_text_channel(
+                ASSET_CHANNEL_NAME,
+                overwrites={
+                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    guild.me: discord.PermissionOverwrite(view_channel=True,
+                                                          send_messages=True,
+                                                          attach_files=True),
+                },
+                topic="Stockage technique des images du dashboard ModBot — ne pas supprimer.",
+                reason="[ModBot] Salon technique pour les images du dashboard",
+            )
+            cfg["asset_channel_id"] = channel.id
+            return channel
+        except Exception as ex:
+            print(f"Creation du salon d'assets impossible: {ex}")
+
+    # Dernier recours : un salon deja invisible pour les membres
     for channel in getattr(guild, "text_channels", []):
-        perms = channel.permissions_for(guild.me)
-        if perms.send_messages and perms.attach_files:
+        perms_bot = channel.permissions_for(guild.me)
+        perms_tous = channel.permissions_for(guild.default_role)
+        if perms_bot.send_messages and perms_bot.attach_files and not perms_tous.view_channel:
+            cfg["asset_channel_id"] = channel.id
             return channel
     return None
 
@@ -3504,13 +3604,12 @@ async def store_dashboard_asset(guild, cfg, value, key, filename_base):
         "image/gif": "gif",
         "image/webp": "webp",
     }.get(mime, "png")
-    channel = dashboard_asset_channel(guild, cfg)
+    channel = await ensure_asset_channel(guild, cfg)
     if not channel:
         return None
     filename = f"modbot-{filename_base}-{guild.id}.{ext}"
     try:
         msg = await channel.send(
-            content="🖼️ Asset dashboard ModBot",
             file=discord.File(io.BytesIO(raw), filename=filename),
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -3518,6 +3617,18 @@ async def store_dashboard_asset(guild, cfg, value, key, filename_base):
         return None
     if not msg.attachments:
         return None
+
+    # L'ancienne image du meme emplacement n'a plus d'utilite
+    ancien_salon = parse_int(cfg.get(f"{key}_asset_channel_id"))
+    ancien_message = parse_int(cfg.get(f"{key}_asset_message_id"))
+    if ancien_message and ancien_salon:
+        try:
+            vieux = guild.get_channel(ancien_salon)
+            if vieux:
+                await (await vieux.fetch_message(ancien_message)).delete()
+        except Exception:
+            pass  # message deja supprime ou inaccessible
+
     cfg[f"{key}_asset_channel_id"] = channel.id
     cfg[f"{key}_asset_message_id"] = msg.id
     return msg.attachments[0].url
@@ -4071,7 +4182,7 @@ async def api_guild_logs(request):
                 "id": key,
                 "label": spec["fr"],
                 "emoji": spec["emoji"],
-                "enabled": bool(toggles.get(key, True)),
+                "enabled": log_category_enabled(guild.id, key),
                 "channel_id": str(cfg.get(spec["key"]) or ""),
             }
             for key, spec in LOG_CATEGORIES.items()
@@ -4175,7 +4286,10 @@ async def api_save_guild_security(request):
 
     logs_enabled = payload.get("logs_enabled")
     if isinstance(logs_enabled, dict):
-        cfg["logs_enabled"] = {key: bool(logs_enabled.get(key, True)) for key in LOG_CATEGORIES}
+        cfg["logs_enabled"] = {
+            key: bool(logs_enabled.get(key, spec.get("defaut", True)))
+            for key, spec in LOG_CATEGORIES.items()
+        }
 
     log_channels = payload.get("log_channels")
     if isinstance(log_channels, dict):
@@ -5901,6 +6015,14 @@ class ModalMotifTicket(discord.ui.Modal, title="🎫 Ouvrir un ticket"):
         )
         await i.followup.send(embed=EG(tr(gid, "ticket_created_title"), tr(gid, "ticket_created_desc", channel=channel.mention), 0x43B581, gid), ephemeral=True)
 
+        await log_event(
+            i.guild, "tickets", "Ticket ouvert",
+            f"{i.user.mention} a ouvert un ticket : {channel.mention}",
+            fields=[("🗂️ Categorie", f"{emoji} {label}"),
+                    ("📝 Motif", self.motif.value or "-")],
+            severity="success", target=i.user,
+        )
+
 class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
     raison = discord.ui.TextInput(label="Raison", placeholder="Ex : Comportement inapproprié...", max_length=200)
 
@@ -6547,23 +6669,30 @@ async def ask_confirmation(interaction: discord.Interaction, title, description,
 #  SYSTEME DE LOGS
 # ════════════════════════════════════════════════
 
+# Categories de logs. "defaut" indique si la categorie est publiee sur
+# Discord sans reglage explicite. Les categories bavardes (chaque message
+# supprime, chaque permission modifiee) sont desactivees par defaut : elles
+# noyaient l'essentiel sous des dizaines de messages par heure.
+# Tout reste consultable dans le dashboard, meme desactive ici.
 LOG_CATEGORIES = {
-    "messages":    {"key": "log_channel_messages",    "fr": "Messages",           "en": "Messages",           "emoji": "💬"},
-    "members":     {"key": "log_channel_members",     "fr": "Membres",            "en": "Members",            "emoji": "👥"},
-    "moderation":  {"key": "log_channel_moderation",  "fr": "Moderation",         "en": "Moderation",         "emoji": "⚒️"},
-    "roles":       {"key": "log_channel_roles",       "fr": "Roles",              "en": "Roles",              "emoji": "🎭"},
-    "channels":    {"key": "log_channel_channels",    "fr": "Salons",             "en": "Channels",           "emoji": "📁"},
-    "permissions": {"key": "log_channel_permissions", "fr": "Permissions",        "en": "Permissions",        "emoji": "🔑"},
-    "admin":       {"key": "log_channel_admin",       "fr": "Actions admin",      "en": "Admin actions",      "emoji": "🛠️"},
-    "security":    {"key": "log_channel_security",    "fr": "Alertes securite",   "en": "Security alerts",    "emoji": "🚨"},
+    "tickets":     {"key": "log_channel_tickets",     "fr": "Tickets",          "en": "Tickets",         "emoji": "🎫", "defaut": True},
+    "moderation":  {"key": "log_channel_moderation",  "fr": "Moderation",       "en": "Moderation",      "emoji": "⚒️", "defaut": True},
+    "security":    {"key": "log_channel_security",    "fr": "Alertes securite", "en": "Security alerts", "emoji": "🚨", "defaut": True},
+    "members":     {"key": "log_channel_members",     "fr": "Arrivees/departs", "en": "Members",         "emoji": "👥", "defaut": True},
+    "admin":       {"key": "log_channel_admin",       "fr": "Actions admin",    "en": "Admin actions",   "emoji": "🛠️", "defaut": True},
+    "messages":    {"key": "log_channel_messages",    "fr": "Messages",         "en": "Messages",        "emoji": "💬", "defaut": False},
+    "roles":       {"key": "log_channel_roles",       "fr": "Roles",            "en": "Roles",           "emoji": "🎭", "defaut": False},
+    "channels":    {"key": "log_channel_channels",    "fr": "Salons",           "en": "Channels",        "emoji": "📁", "defaut": False},
+    "permissions": {"key": "log_channel_permissions", "fr": "Permissions",      "en": "Permissions",     "emoji": "🔑", "defaut": False},
 }
 
 def log_category_enabled(gid, category):
-    cfg = get_cfg(gid)
-    toggles = cfg.get("logs_enabled")
-    if not isinstance(toggles, dict):
-        return True  # tout est actif par defaut
-    return bool(toggles.get(category, True))
+    spec = LOG_CATEGORIES.get(category) or {}
+    defaut = bool(spec.get("defaut", True))
+    toggles = get_cfg(gid).get("logs_enabled")
+    if not isinstance(toggles, dict) or category not in toggles:
+        return defaut
+    return bool(toggles[category])
 
 def log_channel_for(guild, category):
     """Salon dedie a la categorie, sinon salon de logs global, sinon defaut."""
