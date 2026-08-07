@@ -10,6 +10,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -33,8 +34,11 @@ def scenario(nom, token, attendu):
     print(f"\n{'=' * 64}\nSCENARIO : {nom}\n{'=' * 64}")
     env = dict(os.environ)
     env["PORT"] = PORT                      # Railway injecte PORT
-    env["MODBOT_DATABASE"] = os.path.join(os.environ["TEMP"], "rail_test.db")
-    env["MODBOT_BACKUP_DIR"] = os.path.join(os.environ["TEMP"], "rail_backups")
+    # tempfile.gettempdir() plutot que %TEMP% : cette variable n'existe que
+    # sous Windows, et le test doit aussi tourner sur Linux (Railway, CI).
+    temporaire = tempfile.gettempdir()
+    env["MODBOT_DATABASE"] = os.path.join(temporaire, "rail_test.db")
+    env["MODBOT_BACKUP_DIR"] = os.path.join(temporaire, "rail_backups")
     env["MODBOT_SITE_DIR"] = ""
     env.pop("TOKEN", None)
     if token is not None:
@@ -82,6 +86,17 @@ def scenario(nom, token, attendu):
         ok_port = False
 
     ok_message = attendu in sortie
+    # Un reseau qui bloque discord.com (CI, bac a sable) fait echouer la
+    # connexion AVANT que Discord ait pu juger le jeton : le bot affiche alors
+    # "Connexion Discord impossible". Ce n'est pas une regression, et le
+    # signaler comme un echec enverrait la prochaine session sur une fausse
+    # piste. Le scenario est declare non concluant.
+    if ok_port and not ok_message and "Connexion Discord impossible" in sortie:
+        print(f"    IGNORE Discord injoignable depuis cette machine : {attendu!r} "
+              "n'a pas pu etre verifie.")
+        print("           Le port est reste ouvert, ce qui est l'essentiel du test.")
+        return None
+
     print(f"    {'OK  ' if ok_message else 'ECHEC'} message attendu present : {attendu!r}")
     return ok_port and ok_message
 
@@ -90,7 +105,11 @@ resultats = []
 resultats.append(scenario("TOKEN absent", None, "TOKEN manquant"))
 resultats.append(scenario("TOKEN invalide", "faux.token.invalide", "Jeton Discord refuse"))
 
+concluants = [r for r in resultats if r is not None]
+ignores = len(resultats) - len(concluants)
+
 print(f"\n{'=' * 64}")
-print(f"RESULTAT : {sum(resultats)}/{len(resultats)} scenarios passes")
-print("Dans les deux cas le port reste ouvert : plus de 502 opaque.")
-sys.exit(0 if all(resultats) else 1)
+print(f"RESULTAT : {sum(concluants)}/{len(concluants)} scenarios passes"
+      + (f", {ignores} non concluant(s) faute d'acces a discord.com" if ignores else ""))
+print("Dans tous les cas le port reste ouvert : plus de 502 opaque.")
+sys.exit(0 if all(concluants) else 1)

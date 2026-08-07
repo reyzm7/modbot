@@ -331,30 +331,15 @@ serveur, et exportables en CSV depuis le dashboard.
 
 ---
 
-## 8. Offres
+## 8. Ce que coûte ModBot
 
-| | Gratuit | Premium — 29,99 € / 5 mois |
-|---|:---:|:---:|
-| Anti-raid et anti-nuke | ✅ | ✅ |
-| Filtre de langage et sanctions | ✅ | ✅ |
-| Logs complets | ✅ | ✅ |
-| Sauvegardes et restauration | ✅ | ✅ |
-| Modération et salons | ✅ | ✅ |
-| Tickets et évaluations | — | ✅ |
-| Arrivées / départs personnalisés | — | ✅ |
-| Rôles réactions, messages récurrents | — | ✅ |
-| Réseaux sociaux, tournois | — | ✅ |
-| Personnalisation des embeds | — | ✅ |
+**Rien.** Tout est gratuit et sans limite de durée : anti-raid, anti-nuke,
+filtre de langage, sanctions, logs, sauvegardes, tickets, évaluations,
+bienvenue, giveaways, captcha, IA.
 
-**Toute la protection est gratuite et sans limite de durée.** Premium
-ajoute les modules communautaires et d'automatisation.
-
-Dans le dashboard, les modules Premium restent visibles : un voile
-explique ce qu'ils apportent au lieu de les masquer sans raison.
-
-L'activation Premium se fait depuis `admin.html` (endpoint
-`/api/admin/premium`) ; la date d'expiration est calculée
-automatiquement à partir de la date d'activation.
+Il n'y a pas d'offre payante, pas de module verrouillé, pas de compte à
+créer. Le projet est financé par des dons libres sur
+[paypal.me/hazkes](https://paypal.me/hazkes).
 
 ---
 

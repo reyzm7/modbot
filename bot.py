@@ -251,21 +251,11 @@ F_STATS   = "stats.json"
 F_MODS    = "mod_stats.json"
 F_RATINGS = "ratings.json"
 F_DASHBOARD_SESSIONS = "dashboard_sessions.json"
-F_PREMIUM = "premium.json"
 F_BLACKLIST = "blacklist.json"
 F_DASHBOARD_LOGS = "dashboard_logs.json"
 F_CAPTCHA = "captcha_pending.json"
 F_GIVEAWAYS = "giveaways.json"
 F_DATABASE = os.environ.get("MODBOT_DATABASE", os.path.join(BASE_DIR, "modbot_dashboard.db"))
-UNLIMITED_PREMIUM_SERVERS = 999999
-
-# ── Offre Premium unique ──────────────────────────────────────────────────────
-# Une seule offre commerciale : 29,99 € pour 5 mois d'acces complet.
-PREMIUM_PRICE_EUR       = 29.99
-PREMIUM_PRICE_LABEL     = "29,99 €"
-PREMIUM_DURATION_MONTHS = 5
-PREMIUM_DURATION_DAYS   = 150          # 5 mois
-PREMIUM_DURATION_LABEL  = "5 mois"
 LINK_RE = re.compile(
     r'(?:https?://[^\s<>()]+|www\.[^\s<>()]+|(?:canary\.|ptb\.)?discord(?:app)?\.com/invite/[A-Za-z0-9-]+|discord\.gg/[A-Za-z0-9-]+|discord\.me/[A-Za-z0-9-]+|dsc\.gg/[A-Za-z0-9-]+|invite\.gg/[A-Za-z0-9-]+)',
     re.I
@@ -301,7 +291,7 @@ def jload(f):
             return {}
 
 # ════════════════════════════════════════════════
-#  BASE DE DONNEES DASHBOARD / PREMIUM
+#  BASE DE DONNEES DASHBOARD
 # ════════════════════════════════════════════════
 
 def db_connect():
@@ -319,34 +309,6 @@ def init_database():
     try:
         with db_connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS premium_subscriptions (
-                    member TEXT PRIMARY KEY,
-                    discord_id TEXT,
-                    username TEXT,
-                    plan TEXT NOT NULL DEFAULT 'free',
-                    duration TEXT,
-                    servers_limit INTEGER NOT NULL DEFAULT 999999,
-                    payment TEXT,
-                    status TEXT NOT NULL DEFAULT 'active',
-                    created_by TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    raw_json TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS premium_server_links (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    owner_key TEXT,
-                    guild_id TEXT,
-                    guild_name TEXT,
-                    logo TEXT,
-                    plan TEXT,
-                    created_at TEXT NOT NULL,
-                    raw_json TEXT
-                )
-            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS dashboard_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -375,23 +337,8 @@ def init_database():
                     raw_json TEXT
                 )
             """)
-            # Migration : colonnes de duree d'abonnement ajoutees en v2
-            for column, ddl in (
-                ("started_at", "ALTER TABLE premium_subscriptions ADD COLUMN started_at TEXT"),
-                ("expires_at", "ALTER TABLE premium_subscriptions ADD COLUMN expires_at TEXT"),
-                ("price", "ALTER TABLE premium_subscriptions ADD COLUMN price REAL"),
-            ):
-                try:
-                    conn.execute(ddl)
-                except sqlite3.OperationalError:
-                    pass  # la colonne existe deja
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_guild_date ON dashboard_events(guild_id, date)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sanctions_guild_date ON moderation_sanctions(guild_id, date)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_plan ON premium_subscriptions(plan, status)")
-            conn.execute(
-                "UPDATE premium_subscriptions SET servers_limit = ? WHERE servers_limit < ?",
-                (UNLIMITED_PREMIUM_SERVERS, UNLIMITED_PREMIUM_SERVERS),
-            )
     except Exception as ex:
         print(f"Erreur init database ModBot: {ex}")
 
@@ -415,62 +362,6 @@ def db_log_event(action, guild=None, actor=None, detail="", payload=None):
             )
     except Exception as ex:
         print(f"Erreur log database ModBot: {ex}")
-
-def db_upsert_premium(member, item):
-    if not member:
-        return
-    data = item if isinstance(item, dict) else {}
-    timestamp = now().isoformat()
-    plan = normalize_premium_plan(data.get("plan") or data.get("premium_tier"))
-    # L'offre unique dure 5 mois : la date de fin est calculee une fois pour toutes.
-    started_at = str(data.get("started_at") or data.get("created_at") or timestamp)
-    expires_at = data.get("expires_at")
-    if plan == "premium" and not expires_at:
-        expires_at = premium_expiry_from(started_at).isoformat()
-    try:
-        with db_connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO premium_subscriptions(
-                    member, discord_id, username, plan, duration, servers_limit, payment, status,
-                    created_by, created_at, updated_at, raw_json, started_at, expires_at, price
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(member) DO UPDATE SET
-                    discord_id=excluded.discord_id,
-                    username=excluded.username,
-                    plan=excluded.plan,
-                    duration=excluded.duration,
-                    servers_limit=excluded.servers_limit,
-                    payment=excluded.payment,
-                    status=excluded.status,
-                    created_by=excluded.created_by,
-                    updated_at=excluded.updated_at,
-                    raw_json=excluded.raw_json,
-                    started_at=excluded.started_at,
-                    expires_at=excluded.expires_at,
-                    price=excluded.price
-                """,
-                (
-                    str(member),
-                    str(data.get("discord_id") or data.get("user_id") or ""),
-                    str(data.get("username") or data.get("member") or member),
-                    plan,
-                    str(data.get("duration") or (PREMIUM_DURATION_LABEL if plan == "premium" else "")),
-                    int(premium_limit_for_plan(plan)),
-                    str(data.get("payment") or ""),
-                    str(data.get("status") or "active"),
-                    str(data.get("created_by") or ""),
-                    str(data.get("created_at") or timestamp),
-                    timestamp,
-                    db_json(data),
-                    str(started_at),
-                    str(expires_at) if expires_at else "",
-                    float(data.get("price") or (PREMIUM_PRICE_EUR if plan == "premium" else 0)),
-                ),
-            )
-    except Exception as ex:
-        print(f"Erreur premium database ModBot: {ex}")
 
 def db_insert_sanction(entry, guild=None):
     if not isinstance(entry, dict):
@@ -502,48 +393,6 @@ def db_insert_sanction(entry, guild=None):
     except Exception as ex:
         print(f"Erreur sanction database ModBot: {ex}")
 
-def db_replace_premium_server_links(owner_key, servers, plan="free"):
-    if not owner_key or not isinstance(servers, list):
-        return
-    try:
-        with db_connect() as conn:
-            conn.execute("DELETE FROM premium_server_links WHERE owner_key = ?", (str(owner_key),))
-            for server in servers:
-                if not isinstance(server, dict):
-                    continue
-                conn.execute(
-                    """
-                    INSERT INTO premium_server_links(owner_key, guild_id, guild_name, logo, plan, created_at, raw_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(owner_key),
-                        str(server.get("id") or ""),
-                        str(server.get("name") or ""),
-                        str(server.get("logo") or ""),
-                        str(plan or "free"),
-                        now().isoformat(),
-                        db_json(server),
-                    ),
-                )
-    except Exception as ex:
-        print(f"Erreur premium server database ModBot: {ex}")
-
-def db_premium_server_links(owner_key):
-    """Serveurs rattaches a un abonnement premium donne."""
-    try:
-        with db_connect() as conn:
-            rows = conn.execute(
-                "SELECT guild_id, guild_name, logo, plan, created_at "
-                "FROM premium_server_links WHERE lower(owner_key) = lower(?) "
-                "ORDER BY guild_name",
-                (str(owner_key),),
-            ).fetchall()
-        return [dict(row) for row in rows]
-    except Exception as ex:
-        print(f"Lecture liens premium impossible: {ex}")
-        return []
-
 def db_recent_events(limit=80):
     try:
         with db_connect() as conn:
@@ -554,14 +403,6 @@ def db_recent_events(limit=80):
         return [dict(row) for row in rows]
     except Exception:
         return []
-
-def db_all_premium():
-    try:
-        with db_connect() as conn:
-            rows = conn.execute("SELECT * FROM premium_subscriptions ORDER BY updated_at DESC").fetchall()
-        return {row["member"]: dict(row) for row in rows}
-    except Exception:
-        return {}
 
 def db_recent_sanctions(limit=80):
     try:
@@ -3999,73 +3840,6 @@ def dashboard_guild_logs(guild_id, limit=40):
         return []
     return [entry for entry in logs if str(entry.get("guild_id") or "") == gid][:limit]
 
-def premium_limit_for_plan(plan):
-    return UNLIMITED_PREMIUM_SERVERS
-
-def normalize_premium_plan(value):
-    """
-    Offre unique : soit 'premium', soit 'free' (aucun abonnement).
-    Les anciens plans (ultra, partner...) sont convertis en 'premium'.
-    """
-    text = str(value or "free").strip().lower()
-    if text in {"free", "gratuit", "", "none", "aucun"}:
-        return "free"
-    return "premium"
-
-def premium_expiry_from(start, duration_days=PREMIUM_DURATION_DAYS):
-    started = sc.parse_iso(start) or now()
-    return started + timedelta(days=duration_days)
-
-def build_premium_state(item, source="database"):
-    """
-    Etat premium normalise a partir d'une ligne d'abonnement.
-    Retourne toujours les memes clefs, que l'abonnement existe ou non.
-    """
-    item = item if isinstance(item, dict) else {}
-    plan = normalize_premium_plan(item.get("plan") or item.get("premium_tier"))
-    started_at = item.get("started_at") or item.get("created_at")
-    expires_at = sc.parse_iso(item.get("expires_at")) or (
-        premium_expiry_from(started_at) if plan == "premium" else None
-    )
-    active = bool(plan == "premium" and expires_at and expires_at > now())
-    days_left = max(0, (expires_at - now()).days) if (expires_at and active) else 0
-    status = str(item.get("status") or "active").lower()
-    if plan == "premium" and not active:
-        status = "expired"
-
-    return {
-        "plan": "premium" if active else "free",
-        "active": active,
-        "status": status,
-        "price": PREMIUM_PRICE_EUR,
-        "price_label": PREMIUM_PRICE_LABEL,
-        "duration_months": PREMIUM_DURATION_MONTHS,
-        "duration": PREMIUM_DURATION_LABEL,
-        "started_at": (sc.parse_iso(started_at) or now()).isoformat() if plan == "premium" else None,
-        "expires_at": expires_at.isoformat() if expires_at else None,
-        "days_left": days_left,
-        "servers_limit": premium_limit_for_plan(plan),
-        "premium_unlimited": True,
-        "source": source,
-    }
-
-def empty_premium_state():
-    return {
-        "plan": "free",
-        "active": False,
-        "status": "none",
-        "price": PREMIUM_PRICE_EUR,
-        "price_label": PREMIUM_PRICE_LABEL,
-        "duration_months": PREMIUM_DURATION_MONTHS,
-        "duration": PREMIUM_DURATION_LABEL,
-        "started_at": None,
-        "expires_at": None,
-        "days_left": 0,
-        "servers_limit": premium_limit_for_plan("free"),
-        "premium_unlimited": True,
-        "source": "none",
-    }
-
 def parse_role_reference(guild, value):
     rid = parse_int(value)
     if rid and guild.get_role(rid):
@@ -4091,127 +3865,6 @@ def normalize_reaction_role(guild, item):
         "role": str(role_id),
         "label": clean_short_text(item.get("label"), role.name if role else "Role", 80),
     }
-
-def premium_for_identity(identity):
-    """
-    Etat premium d'un utilisateur connecte. La base fait foi ; le fichier JSON
-    sert de secours pour les abonnements crees avant la migration.
-    """
-    if not isinstance(identity, dict):
-        return empty_premium_state()
-    candidates = [
-        str(identity.get("user_id") or "").lower(),
-        str(identity.get("username") or "").lower(),
-    ]
-    candidates = [c for c in candidates if c]
-    if not candidates:
-        return empty_premium_state()
-    # La requete attend deux valeurs par colonne
-    if len(candidates) == 1:
-        candidates = candidates * 2
-
-    try:
-        with db_connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM premium_subscriptions
-                WHERE lower(member) IN (?, ?) OR lower(discord_id) IN (?, ?) OR lower(username) IN (?, ?)
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                tuple(candidates + candidates + candidates),
-            ).fetchone()
-        if row:
-            return build_premium_state(dict(row), source="database")
-    except Exception as ex:
-        print(f"Lecture premium (base) impossible: {ex}")
-
-    data = jload(F_PREMIUM)
-    if isinstance(data, dict):
-        for key, item in data.items():
-            if not isinstance(item, dict):
-                continue
-            keys = {str(key).lower(), str(item.get("member") or "").lower(),
-                    str(item.get("discord_id") or "").lower()}
-            if keys & set(candidates):
-                return build_premium_state(item, source="json")
-    return empty_premium_state()
-
-def guild_premium_state(guild_id):
-    """
-    Etat Premium D'UN SERVEUR. C'est desormais le serveur qui porte
-    l'abonnement, pas le membre : un administrateur ModBot l'attribue
-    directement au serveur concerne.
-    """
-    cfg = get_cfg(guild_id)
-    expires = sc.parse_iso(cfg.get("premium_until"))
-    active = bool(expires and expires > now())
-    return {
-        "plan": "premium" if active else "free",
-        "active": active,
-        "status": "active" if active else ("expired" if expires else "none"),
-        "price": PREMIUM_PRICE_EUR,
-        "price_label": PREMIUM_PRICE_LABEL,
-        "duration_months": PREMIUM_DURATION_MONTHS,
-        "duration": PREMIUM_DURATION_LABEL,
-        "started_at": cfg.get("premium_since") or None,
-        "expires_at": expires.isoformat() if expires else None,
-        "days_left": max(0, (expires - now()).days) if active else 0,
-        "granted_by": cfg.get("premium_granted_by") or "",
-        "servers_limit": UNLIMITED_PREMIUM_SERVERS,
-        "premium_unlimited": True,
-        "source": "guild",
-    }
-
-def set_guild_premium(guild_id, active, actor="", months=PREMIUM_DURATION_MONTHS):
-    """Active ou revoque le Premium d'un serveur. Retourne le nouvel etat."""
-    cfg = get_cfg(guild_id)
-    if active:
-        depart = now()
-        cfg["premium_since"] = depart.isoformat()
-        cfg["premium_until"] = (depart + timedelta(days=PREMIUM_DURATION_DAYS)).isoformat()
-        cfg["premium_granted_by"] = str(actor or "")
-    else:
-        for key in ("premium_since", "premium_until", "premium_granted_by"):
-            cfg.pop(key, None)
-    set_cfg(guild_id, cfg)
-    return guild_premium_state(guild_id)
-
-def premium_active_for_guild(guild_id):
-    """Un serveur est premium si un abonnement actif le reference."""
-    gid = str(guild_id)
-    try:
-        with db_connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT l.owner_key, p.plan, p.status, p.created_at, p.raw_json
-                FROM premium_server_links l
-                LEFT JOIN premium_subscriptions p ON lower(p.member) = lower(l.owner_key)
-                WHERE l.guild_id = ?
-                """,
-                (gid,),
-            ).fetchall()
-        for row in rows:
-            item = dict(row)
-            try:
-                raw = json.loads(item.get("raw_json") or "{}")
-                if isinstance(raw, dict):
-                    item = {**raw, **{k: v for k, v in item.items() if v is not None}}
-            except (json.JSONDecodeError, TypeError):
-                pass
-            if build_premium_state(item)["active"]:
-                return True
-    except Exception:
-        pass
-    return bool(get_cfg(gid).get("premium_active"))
-
-def sync_premium_json_to_database():
-    data = jload(F_PREMIUM)
-    if not isinstance(data, dict):
-        return
-    for member, item in data.items():
-        if isinstance(item, dict):
-            db_upsert_premium(member, item)
 
 PERM_ADMINISTRATOR = 0x8
 
@@ -4569,7 +4222,6 @@ def serialize_dashboard_config(guild):
     rating_stats = get_rating_stats(gid)
     tickets_data = load_tickets().get("tickets", {})
     guild_ticket_count = sum(1 for channel_id in tickets_data if guild.get_channel(parse_int(channel_id) or 0))
-    premium_plan = normalize_premium_plan(cfg.get("premium_tier") or cfg.get("premium_plan"))
     custom_words = get_custom(gid)
     filtered_words = dashboard_filtered_words(gid)
     sanctions = dashboard_sanctions(guild)
@@ -4624,10 +4276,6 @@ def serialize_dashboard_config(guild):
         "reaction_roles_mode": cfg.get("reaction_roles_mode") or "Plusieurs rôles possibles",
         "recurring_messages": cfg.get("recurring_messages", []),
         "social_relays": cfg.get("social_relays", []),
-        "premium_tier": premium_plan,
-        "premium_limit": premium_limit_for_plan(premium_plan),
-        "premium_unlimited": True,
-        "premium_servers": cfg.get("premium_servers", []),
         "ratings": {
             "average": round(float(rating_stats.get("avg", 0)), 2),
             "count": int(rating_stats.get("count", 0)),
@@ -4741,26 +4389,6 @@ async def apply_dashboard_config(guild, payload):
     for key in ("recurring_messages", "social_relays", "tournament"):
         if key in payload:
             cfg[key] = payload[key]
-
-    if "premium_tier" in payload or "premium_plan" in payload:
-        cfg["premium_tier"] = normalize_premium_plan(payload.get("premium_tier") or payload.get("premium_plan"))
-        cfg["premium_limit"] = premium_limit_for_plan(cfg["premium_tier"])
-        cfg["premium_unlimited"] = True
-
-    premium_servers = payload.get("premium_servers")
-    if isinstance(premium_servers, list):
-        cleaned_servers = []
-        for server in premium_servers:
-            if not isinstance(server, dict):
-                continue
-            cleaned_servers.append({
-                "id": clean_short_text(server.get("id"), "", 32),
-                "name": clean_short_text(server.get("name"), "Serveur ModBot", 80),
-                "logo": clean_short_text(server.get("logo"), "", 300),
-                "initials": clean_short_text(server.get("initials"), "MB", 8),
-            })
-        cfg["premium_servers"] = cleaned_servers
-        db_replace_premium_server_links(payload.get("actor") or gid, cleaned_servers, cfg.get("premium_tier") or "free")
 
     set_cfg(gid, cfg)
     dashboard_log("config_update", guild, payload.get("actor", "dashboard"), "Configuration sauvegardee depuis le dashboard")
@@ -4886,7 +4514,6 @@ async def api_me(request):
     return api_json({
         "ok": True,
         "user": identity,
-        "premium": premium_for_identity(identity),
     }, request=request)
 
 async def api_guilds(request):
@@ -4966,7 +4593,6 @@ async def api_get_guild_config(request):
     return api_json({
         "ok": True,
         "config": serialize_dashboard_config(guild),
-        "premium": guild_premium_state(guild.id),
     }, request=request)
 
 async def api_get_guild_sanctions(request):
@@ -5983,48 +5609,89 @@ async def api_assistant(request):
 # ════════════════════════════════════════════════
 
 # Discord ne fournit PAS le pays d'un serveur : la region vocale a ete retiree
-# de l'API. La seule information geographique disponible est la langue
-# preferee du serveur (preferred_locale). La correspondance ci-dessous est
-# donc une approximation assumee, affichee comme telle sur le site.
-LOCALE_PAYS = {
-    "fr":    ("France", "🇫🇷"),
-    "en-US": ("Etats-Unis", "🇺🇸"),
-    "en-GB": ("Royaume-Uni", "🇬🇧"),
-    "de":    ("Allemagne", "🇩🇪"),
-    "es-ES": ("Espagne", "🇪🇸"),
-    "es-419": ("Amerique latine", "🌎"),
-    "it":    ("Italie", "🇮🇹"),
-    "pt-BR": ("Bresil", "🇧🇷"),
-    "nl":    ("Pays-Bas", "🇳🇱"),
-    "pl":    ("Pologne", "🇵🇱"),
-    "ru":    ("Russie", "🇷🇺"),
-    "tr":    ("Turquie", "🇹🇷"),
-    "sv-SE": ("Suede", "🇸🇪"),
-    "da":    ("Danemark", "🇩🇰"),
-    "fi":    ("Finlande", "🇫🇮"),
-    "no":    ("Norvege", "🇳🇴"),
-    "cs":    ("Tchequie", "🇨🇿"),
-    "el":    ("Grece", "🇬🇷"),
-    "hu":    ("Hongrie", "🇭🇺"),
-    "ro":    ("Roumanie", "🇷🇴"),
-    "uk":    ("Ukraine", "🇺🇦"),
-    "bg":    ("Bulgarie", "🇧🇬"),
-    "hr":    ("Croatie", "🇭🇷"),
-    "lt":    ("Lituanie", "🇱🇹"),
-    "vi":    ("Vietnam", "🇻🇳"),
-    "th":    ("Thailande", "🇹🇭"),
-    "id":    ("Indonesie", "🇮🇩"),
-    "ja":    ("Japon", "🇯🇵"),
-    "ko":    ("Coree du Sud", "🇰🇷"),
-    "zh-CN": ("Chine", "🇨🇳"),
-    "zh-TW": ("Taiwan", "🇹🇼"),
-    "hi":    ("Inde", "🇮🇳"),
-    "ar":    ("Monde arabe", "🌍"),
-    "he":    ("Israel", "🇮🇱"),
+# de l'API et rien ne l'a remplacee. La repartition publiee porte donc sur la
+# LANGUE, pas sur le pays.
+#
+# Piege a connaitre : `preferred_locale` ne veut dire quelque chose que sur un
+# serveur Communautaire. Partout ailleurs Discord impose "en-US" quelle que
+# soit la langue reelle des membres. L'ancienne carte des pays comptait de ce
+# fait des serveurs francophones sous "Etats-Unis" — d'ou son abandon.
+#
+# On ne retient donc qu'un signal DELIBERE, dans cet ordre :
+#   1. la langue choisie pour ModBot (dashboard ou /langue) — un humain l'a reglee
+#   2. `preferred_locale` si et seulement si le serveur est Communautaire
+#   3. sinon : "Non renseigne", affiche tel quel plutot qu'invente
+#
+# en-GB/en-US, es-ES/es-419 et zh-CN/zh-TW sont fusionnes : ce sont des
+# variantes regionales d'une meme langue, et c'est bien la langue qu'on compte.
+LOCALE_LANGUES = {
+    "fr":     ("Français", "🇫🇷"),
+    "en":     ("Anglais", "🇬🇧"),
+    "en-US":  ("Anglais", "🇬🇧"),
+    "en-GB":  ("Anglais", "🇬🇧"),
+    "de":     ("Allemand", "🇩🇪"),
+    "es":     ("Espagnol", "🇪🇸"),
+    "es-ES":  ("Espagnol", "🇪🇸"),
+    "es-419": ("Espagnol", "🇪🇸"),
+    "it":     ("Italien", "🇮🇹"),
+    "pt":     ("Portugais", "🇵🇹"),
+    "pt-BR":  ("Portugais", "🇵🇹"),
+    "nl":     ("Néerlandais", "🇳🇱"),
+    "pl":     ("Polonais", "🇵🇱"),
+    "ru":     ("Russe", "🇷🇺"),
+    "tr":     ("Turc", "🇹🇷"),
+    "sv":     ("Suédois", "🇸🇪"),
+    "sv-SE":  ("Suédois", "🇸🇪"),
+    "da":     ("Danois", "🇩🇰"),
+    "fi":     ("Finnois", "🇫🇮"),
+    "no":     ("Norvégien", "🇳🇴"),
+    "cs":     ("Tchèque", "🇨🇿"),
+    "el":     ("Grec", "🇬🇷"),
+    "hu":     ("Hongrois", "🇭🇺"),
+    "ro":     ("Roumain", "🇷🇴"),
+    "uk":     ("Ukrainien", "🇺🇦"),
+    "bg":     ("Bulgare", "🇧🇬"),
+    "hr":     ("Croate", "🇭🇷"),
+    "lt":     ("Lituanien", "🇱🇹"),
+    "vi":     ("Vietnamien", "🇻🇳"),
+    "th":     ("Thaï", "🇹🇭"),
+    "id":     ("Indonésien", "🇮🇩"),
+    "ja":     ("Japonais", "🇯🇵"),
+    "ko":     ("Coréen", "🇰🇷"),
+    "zh":     ("Chinois", "🇨🇳"),
+    "zh-CN":  ("Chinois", "🇨🇳"),
+    "zh-TW":  ("Chinois", "🇨🇳"),
+    "hi":     ("Hindi", "🇮🇳"),
+    "ar":     ("Arabe", "🇸🇦"),
+    "he":     ("Hébreu", "🇮🇱"),
 }
+LANGUE_INCONNUE = ("Non renseigné", "🌐")
 
 _STATS_PUBLIQUES = {"data": None, "expire": 0.0}
 STATS_PUBLIQUES_TTL = 300  # 5 minutes
+
+
+def langue_du_serveur(guild, config=None):
+    """
+    Langue d'un serveur, uniquement quand quelqu'un l'a reellement choisie.
+
+    `config` est le contenu de config.json passe une seule fois par l'appelant :
+    `get_cfg()` relit le fichier a chaque appel, ce qui couterait une lecture
+    disque par serveur.
+
+    Retourne (nom, drapeau) ou None quand aucun signal fiable n'existe.
+    """
+    cfg = (config or {}).get(str(guild.id)) or {}
+    langue = str(cfg.get("langue") or "").strip().lower()
+    if langue in BOT_LANGUAGES and langue in LOCALE_LANGUES:
+        return LOCALE_LANGUES[langue]
+
+    features = {str(f).upper() for f in (getattr(guild, "features", None) or [])}
+    if "COMMUNITY" not in features:
+        return None  # Discord a impose en-US : la valeur ne veut rien dire
+
+    locale = str(getattr(guild, "preferred_locale", "") or "").strip()
+    return LOCALE_LANGUES.get(locale) or LOCALE_LANGUES.get(locale.split("-")[0])
 
 
 def build_public_stats():
@@ -6032,30 +5699,45 @@ def build_public_stats():
     Agrege les chiffres publics du reseau ModBot.
 
     Aucune donnee nominative : ni identifiant, ni nom de serveur, ni membre.
-    Uniquement des totaux et une repartition par pays approximee.
+    Uniquement des totaux et une repartition par langue.
     """
-    pays = {}
+    config = jload(F_CONFIG)
+    langues = {}
+    inconnus = {"language": LANGUE_INCONNUE[0], "flag": LANGUE_INCONNUE[1],
+                "servers": 0, "members": 0, "unknown": True}
     membres = 0
     serveurs = 0
-    for guild in bot.guilds:
-        serveurs += 1
-        membres += int(guild.member_count or 0)
-        locale = str(getattr(guild, "preferred_locale", "") or "")
-        nom, drapeau = LOCALE_PAYS.get(locale, LOCALE_PAYS.get(locale.split("-")[0], None) or
-                                       ("Autre", "🌐"))
-        entree = pays.setdefault(nom, {"country": nom, "flag": drapeau,
-                                       "servers": 0, "members": 0})
-        entree["servers"] += 1
-        entree["members"] += int(guild.member_count or 0)
 
-    classement = sorted(pays.values(), key=lambda p: -p["members"])
+    for guild in bot.guilds:
+        compte = int(guild.member_count or 0)
+        serveurs += 1
+        membres += compte
+
+        identifiee = langue_du_serveur(guild, config)
+        if identifiee is None:
+            entree = inconnus
+        else:
+            nom, drapeau = identifiee
+            entree = langues.setdefault(nom, {"language": nom, "flag": drapeau,
+                                              "servers": 0, "members": 0})
+        entree["servers"] += 1
+        entree["members"] += compte
+
+    classement = sorted(langues.values(), key=lambda l: -l["members"])[:12]
+    # "Non renseigne" ferme toujours la liste : les totaux affiches restent
+    # coherents avec le nombre de serveurs, sans gonfler une vraie langue.
+    if inconnus["servers"]:
+        classement.append(inconnus)
+
     return {
         "members_protected": membres,
         "servers": serveurs,
-        "countries": len([p for p in classement if p["country"] != "Autre"]),
-        "top_countries": classement[:12],
+        "languages": len(langues),
+        "top_languages": classement,
+        "unspecified": {"servers": inconnus["servers"], "members": inconnus["members"]},
         "generated_at": now().isoformat(),
-        "country_source": "langue preferee du serveur Discord (approximation)",
+        "language_source": "langue configurée dans ModBot, ou langue du serveur "
+                           "Discord quand elle a été définie",
     }
 
 
@@ -6072,21 +5754,12 @@ async def api_admin_stats(request):
     # Toujours exiger l'authentification : sans jeton API configure, l'ancienne
     # version renvoyait ces donnees a n'importe qui.
     await api_identity(request, admin_required=True)
-    premium = db_all_premium()
     return api_json({
         "ok": True,
         "installs": len(bot.guilds),
         "servers": len(bot.guilds),
         "members": sum(g.member_count or 0 for g in bot.guilds),
         "guilds": [serialize_guild(g) for g in bot.guilds],
-        "premium": premium or jload(F_PREMIUM),
-        "premium_database": premium,
-        "premium_offer": {
-            "price": PREMIUM_PRICE_EUR,
-            "price_label": PREMIUM_PRICE_LABEL,
-            "duration_months": PREMIUM_DURATION_MONTHS,
-            "duration": PREMIUM_DURATION_LABEL,
-        },
         "blacklist": jload(F_BLACKLIST),
         "logs": db_recent_events(80) or jload(F_DASHBOARD_LOGS)[:80],
         "events_database": db_recent_events(80),
@@ -6098,112 +5771,9 @@ async def api_admin_database(request):
     return api_json({
         "ok": True,
         "database": F_DATABASE,
-        "premium": db_all_premium(),
         "events": db_recent_events(120),
         "sanctions": db_recent_sanctions(120),
     })
-
-async def api_admin_premium(request):
-    """
-    Accorde ou revoque l'offre Premium unique (29,99 € / 5 mois).
-    Le champ `plan` n'accepte plus que 'premium' ou 'free'.
-    """
-    identity = await api_identity(request, admin_required=True)
-    payload = await request.json()
-    member = clean_short_text(payload.get("member"), "", 80)
-    if not member:
-        raise web.HTTPBadRequest(text="Identifiant ou pseudo du membre manquant.")
-
-    plan = normalize_premium_plan(payload.get("plan") or payload.get("premium_tier") or "premium")
-    data = jload(F_PREMIUM)
-    if not isinstance(data, dict):
-        data = {}
-
-    if plan == "free":
-        data.pop(member, None)
-        jsave(F_PREMIUM, data)
-        try:
-            with db_connect() as conn:
-                conn.execute(
-                    "UPDATE premium_subscriptions SET plan='free', status='revoked', updated_at=? "
-                    "WHERE lower(member) = lower(?)",
-                    (now().isoformat(), member),
-                )
-        except Exception as ex:
-            print(f"Revocation premium impossible: {ex}")
-        dashboard_log("premium_revoke", None, identity.get("username"), member)
-        return api_json({"ok": True, "premium": empty_premium_state()}, request=request)
-
-    started = now()
-    expires = started + timedelta(days=PREMIUM_DURATION_DAYS)
-    entry = {
-        "member": member,
-        "discord_id": clean_short_text(payload.get("discord_id") or payload.get("user_id"), "", 32),
-        "plan": "premium",
-        "duration": PREMIUM_DURATION_LABEL,
-        "duration_months": PREMIUM_DURATION_MONTHS,
-        "price": PREMIUM_PRICE_EUR,
-        "servers_limit": premium_limit_for_plan("premium"),
-        "premium_unlimited": True,
-        "started_at": started.isoformat(),
-        "created_at": started.isoformat(),
-        "expires_at": expires.isoformat(),
-        "status": "active",
-        "created_by": identity.get("user_id"),
-        "payment": clean_short_text(payload.get("payment"), "manuel", 40),
-    }
-    data[member] = entry
-    jsave(F_PREMIUM, data)
-    db_upsert_premium(member, entry)
-    dashboard_log("premium_grant", None, identity.get("username"),
-                  f"{member} -> Premium {PREMIUM_PRICE_LABEL} / {PREMIUM_DURATION_LABEL} "
-                  f"(fin {expires.strftime('%d/%m/%Y')})")
-    return api_json({"ok": True, "premium": build_premium_state(entry, source="database")},
-                    request=request)
-
-async def api_admin_guilds(request):
-    """Tous les serveurs du bot, avec leur etat Premium — vue administrateur."""
-    await api_identity(request, admin_required=True)
-    serveurs = []
-    for guild in sorted(bot.guilds, key=lambda g: (g.name or "").lower()):
-        serveurs.append({**serialize_guild(guild), "premium": guild_premium_state(guild.id)})
-    return api_json({
-        "ok": True,
-        "guilds": serveurs,
-        "offer": {
-            "price": PREMIUM_PRICE_EUR,
-            "price_label": PREMIUM_PRICE_LABEL,
-            "duration_months": PREMIUM_DURATION_MONTHS,
-            "duration": PREMIUM_DURATION_LABEL,
-        },
-    }, request=request)
-
-async def api_admin_guild_premium(request):
-    """
-    Attribue ou revoque le Premium d'un serveur.
-    POST /api/admin/guilds/{guild_id}/premium   {"active": true|false}
-    """
-    identity = await api_identity(request, admin_required=True)
-    gid = str(request.match_info.get("guild_id") or "")
-    if not gid.isdigit():
-        raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
-    guild = bot.get_guild(int(gid))
-    if not guild:
-        raise web.HTTPNotFound(text="ModBot n'est pas present sur ce serveur.")
-
-    payload = await request.json() if request.can_read_body else {}
-    actif = bool((payload or {}).get("active", True))
-    etat = set_guild_premium(gid, actif, identity.get("username") or identity.get("user_id"))
-
-    dashboard_log("premium_guild", guild, identity.get("username"),
-                  "active jusqu'au " + (etat["expires_at"] or "-") if actif else "revoque")
-    await log_event(guild, "admin",
-                    "Premium active" if actif else "Premium revoque",
-                    f"L'abonnement Premium du serveur a ete {'active' if actif else 'revoque'}.",
-                    fields=[("💎 Offre", f"{PREMIUM_PRICE_LABEL} / {PREMIUM_DURATION_LABEL}")]
-                           if actif else None,
-                    severity="success" if actif else "warning")
-    return api_json({"ok": True, "guild": serialize_guild(guild), "premium": etat}, request=request)
 
 async def api_admin_blacklist(request):
     identity = await api_identity(request, admin_required=True)
@@ -6296,7 +5866,6 @@ async def start_dashboard_api():
     global _dashboard_api_runner
     if _dashboard_api_runner:
         return
-    sync_premium_json_to_database()
     app = web.Application(middlewares=[api_cors_middleware], client_max_size=2 * 1024 * 1024)
 
     # Authentification
@@ -6352,9 +5921,6 @@ async def start_dashboard_api():
     # Administration
     app.router.add_get("/api/admin/stats", api_admin_stats)
     app.router.add_get("/api/admin/database", api_admin_database)
-    app.router.add_post("/api/admin/premium", api_admin_premium)
-    app.router.add_get("/api/admin/guilds", api_admin_guilds)
-    app.router.add_post("/api/admin/guilds/{guild_id}/premium", api_admin_guild_premium)
     app.router.add_post("/api/admin/blacklist", api_admin_blacklist)
 
     # ── Site web servi par le bot (optionnel mais recommande) ──────────
@@ -8400,7 +7966,7 @@ ICONS = {
     "security": "🛡️", "raid": "🚨", "nuke": "💥", "backup": "💾",
     "logs": "🧾", "ban": "🔨", "kick": "👢", "mute": "🔇",
     "warn": "⚠️", "channel": "📁", "role": "🎭", "member": "👤",
-    "message": "💬", "permission": "🔑", "admin": "🛠️", "premium": "💎",
+    "message": "💬", "permission": "🔑", "admin": "🛠️",
 }
 
 def embed_base(title, description="", color=Palette.PRIMARY, gid=None, icon=""):

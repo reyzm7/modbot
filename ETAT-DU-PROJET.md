@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **7 août 2026**.
+> Dernière mise à jour : **7 août 2026** (voir §14 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -25,20 +25,20 @@ Attention, **Vercel suit `main`** : pousser une branche de travail ne déploie r
 Railway → Variables, pour que les deux IA fonctionnent. Tout le reste marche
 sans elle.
 
-### Chiffres au 7 août 2026
+### Chiffres au 7 août 2026 (après le lot §14)
 
 | | |
 |---|---:|
-| `bot.py` | 10 975 lignes |
-| `security_core.py` | 931 lignes |
-| `script.js` | 4 287 lignes |
-| `style.css` | 7 018 lignes |
-| `dashboard.html` | 1 048 lignes |
-| `translations.js` | 362 lignes |
-| Routes API | 42 |
+| `bot.py` | 11 787 lignes |
+| `security_core.py` | 1 090 lignes |
+| `script.js` | 4 726 lignes |
+| `style.css` | 7 683 lignes |
+| `dashboard.html` | 1 141 lignes |
+| `translations.js` | 363 lignes |
+| Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 59 + 36 + 2, tous au vert |
+| Tests | 59 + 47 + 2, tous au vert |
 
 ---
 
@@ -77,13 +77,12 @@ délibéré (voir §6).
 
 | Fichier | Lignes | Rôle |
 |---|---:|---|
-| `bot.py` | 10975 | Tout le câblage Discord + serveur aiohttp + API REST |
-| `security_core.py` | 931 | Logique pure de sécurité, **aucune dépendance discord.py** |
+| `bot.py` | 11787 | Tout le câblage Discord + serveur aiohttp + API REST |
+| `security_core.py` | 1090 | Logique pure de sécurité, **aucune dépendance discord.py** |
 | `test_security.py` | 360 | 59 tests unitaires — passent tous |
-| `test_api.py` | 140 | 36 vérifications contre le vrai serveur aiohttp — passent |
-| `test_demarrage.py` | 80 | 2 scénarios de résilience au démarrage — passent |
-| `test_premium_servers.py` | 76 | **OBSOLÈTE** — le premium a été supprimé du projet |
-| `README.md` | 268 | Installation, configuration, déploiement |
+| `test_api.py` | 200 | 47 vérifications contre le vrai serveur aiohttp — passent |
+| `test_demarrage.py` | 105 | 2 scénarios de résilience au démarrage — passent |
+| `README.md` | 250 | Installation, configuration, déploiement |
 | `.env.example` | 50 | Modèle de configuration |
 | `requirements.txt` | 3 | Dépendances |
 
@@ -123,7 +122,7 @@ attendre un redéploiement.
 
 **Bot**
 - `security_core.py` — module entier
-- `test_security.py`, `test_api.py`, `test_demarrage.py`, `test_premium_servers.py`
+- `test_security.py`, `test_api.py`, `test_demarrage.py`
 - `README.md`, `.env.example`, `.gitignore`
 
 **Site**
@@ -156,9 +155,9 @@ attendre un redéploiement.
 - Sélecteur de serveur animé, sélecteurs d'image, aperçu Discord en direct
 - Suppression de tout le code premium
 
-**`style.css`** — environ 6141 lignes, construites en couches empilées :
+**`style.css`** — 7683 lignes, construites en couches empilées :
 design v2 → thème professionnel (jetons CSS) → sélecteur → polissage →
-premium (désormais inutilisé) → sélecteur d'image.
+sélecteur d'image. La couche premium a été retirée (§14).
 
 **`dashboard.html`**, **`index.html`**, **`admin.html`**, **`wiki.html`** —
 refonte visuelle, balise `modbot-api-url`, suppression du premium, dons PayPal.
@@ -290,12 +289,12 @@ aucune donnée nominative ni identifiant de serveur.
 |---|---|---|
 | Anciens messages dans `#ticket` | Cosmétique | Les images « Asset dashboard ModBot » déjà publiées avant le correctif doivent être supprimées **à la main** — le bot ne peut pas les identifier |
 | Permission « Gérer les salons » | À vérifier | Sans elle, le bot ne peut pas créer `#modbot-assets` et refuse alors d'envoyer l'image plutôt que de la publier en public. `/securite status` le signale |
-| Code premium mort dans `bot.py` | Aucune | `guild_premium_state`, `api_admin_premium`, `api_admin_guild_premium`, `api_admin_guilds` — inutilisés depuis la suppression du premium. Sans effet, mais à nettoyer un jour |
-| `test_premium_servers.py` | Aucune | Fichier de test devenu obsolète |
-| Couche CSS premium | Aucune | `style.css` contient encore les styles du premium, inutilisés |
+| Code premium mort | ~~À nettoyer~~ | **Fait** — voir §14. Le mot n'apparaît plus dans `bot.py` |
+| Traces du module « tournois » | Aucune | Même nature que le premium : `tournament` dans `bot.py`, `.tournament-command-grid` dans `style.css`. Sans effet |
+| Débordement à 375 px | Cosmétique | Le tiroir `.nav-links` fermé dépasse à droite. Préexistant, mesuré à l'identique avant modification |
 | Session à renouveler | Utilisateur | Une session créée avant le correctif de permissions n'a pas de jeton OAuth stocké — il faut se reconnecter une fois |
 
-**Aucun bug fonctionnel connu et non traité.** Les tests passent : 43/43, 21/21, 2/2.
+**Aucun bug fonctionnel connu et non traité.** Les tests passent : 59/59, 47/47, 2/2.
 
 ---
 
@@ -533,8 +532,7 @@ En dernier : c'est le point qui demande un arbitrage.
 - Affichage animé sur `index.html`
 
 ### Nettoyage, quand le reste est fait
-Supprimer le code premium mort de `bot.py`, `test_premium_servers.py`, et la
-couche CSS premium.
+~~Supprimer le code premium mort~~ — **fait**, voir §14.
 
 ---
 
@@ -550,16 +548,14 @@ couche CSS premium.
 - Modules retirés à sa demande, à ne pas recréer : arrivées/départs,
   rôles-réactions, messages récurrents, tournois, identité visuelle.
 
-### État git au moment de la rédaction
+### État git
 
-| Dépôt | Branche | Dernier commit | État |
-|---|---|---|---|
-| `modbot` | `main` | `0f07f3d` | Propre, poussé, déployé |
-| `modbot-site` | `claude/discord-bot-dashboard-upgrade-7cbcc1` | `9a29c97` | Propre, 0 en avance sur `origin/main` |
-| `modbot-site` | `main` | `1d34dec` | Contient tout, déployé sur Vercel |
+La méthode reste la même à chaque lot : travailler sur une branche
+`claude/…`, la pousser, puis la fusionner dans `main` — **c'est `main` qui
+déclenche Railway et Vercel**. Une branche poussée seule ne déploie rien.
 
-La branche de travail est **entièrement fusionnée** dans `main` : 7 commits de
-retard, 0 d'avance. Rien n'est en attente de déploiement.
+Au terme du lot §14, les deux dépôts sont propres et `main` contient tout.
+Branche de travail utilisée : `claude/modbot-dev-setup-crxpgq` (les deux dépôts).
 
 ---
 
@@ -621,6 +617,11 @@ serveur. La table `LOCALE_PAYS` fait correspondre `preferred_locale` à un pays.
 C'est une **approximation assumée**, affichée comme telle sous le graphique.
 Ne pas la présenter comme une donnée exacte.
 
+> ⚠️ **Périmé.** Cette approximation s'est révélée franchement fausse et a été
+> remplacée par une répartition **par langue** dans le lot §14. `LOCALE_PAYS`
+> n'existe plus. Discord ne donne toujours pas le pays d'un serveur : ce point
+> est définitivement clos, ne pas le rouvrir.
+
 ### Correction de sécurité trouvée en chemin
 
 `safe_redirect_target()` acceptait le joker `*`. Comme
@@ -647,7 +648,7 @@ responsive 375 px sans débordement.
 
 ### Reste à faire
 
-- Nettoyer le code premium mort (`bot.py`, `test_premium_servers.py`, CSS).
+- ~~Nettoyer le code premium mort~~ — **fait**, voir §14.
 - Le bot a besoin de **Gérer les rôles** et **Gérer les salons** pour
   `/captcha activer`.
 
@@ -725,8 +726,117 @@ aucun débordement).
 
 ### Reste à faire
 
-- `syncWelcomePreview()` dans `script.js` est du code mort (ses cibles ont été
-  supprimées avec l'ancien panneau). Sans effet, à nettoyer.
-- Code premium mort dans `bot.py`, `test_premium_servers.py`, couche CSS premium.
-- La répartition par pays des statistiques publiques reste une approximation
-  visiblement fausse (locale `en-US` par défaut sur des serveurs francophones).
+*Ces trois points ont été traités dans le lot §14 ci-dessous.*
+
+- ~~`syncWelcomePreview()` dans `script.js` est du code mort~~
+- ~~Code premium mort dans `bot.py`, `test_premium_servers.py`, couche CSS premium~~
+- ~~La répartition par pays des statistiques publiques est une approximation
+  visiblement fausse (locale `en-US` par défaut sur des serveurs francophones)~~
+
+---
+
+## 14. Livré le 7 août 2026 — statistiques honnêtes et nettoyage
+
+Ce lot solde la liste « reste à faire » du §13. Aucune fonctionnalité ajoutée :
+une correction de fond sur les statistiques publiques, et la suppression de
+tout le code mort qui traînait depuis la fin du premium.
+
+### Répartition par langue à la place de la carte des pays
+
+**Le problème.** `preferred_locale` ne veut rien dire sur un serveur qui n'est
+pas *Communautaire* : Discord y impose `en-US`, quelle que soit la langue réelle
+des membres. La table `LOCALE_PAYS` traduisait donc mécaniquement des serveurs
+francophones en « États-Unis ». Le chiffre « pays représentés » était faux, et
+visiblement faux.
+
+**La correction.** Discord ne donne pas le pays d'un serveur — cette question est
+définitivement tranchée, il ne faut pas la rouvrir. Le site n'affiche plus une
+répartition par pays mais **par langue**, et seulement quand quelqu'un l'a
+réellement choisie. `langue_du_serveur()` (`bot.py`) retient, dans cet ordre :
+
+1. la langue réglée pour ModBot (dashboard ou commande) — un humain l'a posée ;
+2. `preferred_locale`, **uniquement** si le serveur est Communautaire ;
+3. sinon rien : le serveur tombe dans « Non renseigné ».
+
+`en-GB`/`en-US`, `es-ES`/`es-419` et `zh-CN`/`zh-TW` sont fusionnés : ce sont des
+variantes régionales d'une même langue, et c'est bien la langue qui est comptée.
+
+« Non renseigné » ferme toujours la liste, avec un style en retrait (bordure
+pointillée, opacité réduite) : les totaux affichés couvrent ainsi tous les
+serveurs sans gonfler une vraie langue.
+
+**Le payload a changé.** `countries` / `top_countries` / `country_source` sont
+remplacés par `languages` / `top_languages` / `language_source`, plus
+`unspecified: {servers, members}`. Chaque entrée porte `language` (et non
+`country`) et, pour la dernière, `unknown: true`. Côté site :
+`data-stat-languages` et `data-stat-language-list` remplacent leurs équivalents
+`country`, la clef i18n `stats.countries` devient `stats.languages` (fr/en/ar).
+
+### Code premium supprimé
+
+Le premium avait disparu de l'interface mais pas du code. Tout est parti de
+`bot.py` : constantes de prix, tables SQLite `premium_subscriptions` et
+`premium_server_links`, `db_upsert_premium`, `db_all_premium`,
+`db_replace_premium_server_links`, `db_premium_server_links`,
+`build_premium_state`, `empty_premium_state`, `premium_for_identity`,
+`guild_premium_state`, `set_guild_premium`, `premium_active_for_guild`,
+`sync_premium_json_to_database`, et les trois routes `/api/admin/premium`,
+`/api/admin/guilds`, `/api/admin/guilds/{id}/premium`. Le mot n'apparaît plus
+nulle part dans `bot.py`.
+
+Deux effets de bord assumés :
+- `/api/me` ne renvoie plus de champ `premium`, et `/api/guilds/{id}/config` non
+  plus. Le site ne les lisait pas — vérifié avant suppression.
+- Les tables SQLite déjà créées sur Railway restent en place, simplement plus
+  personne ne les lit. Rien à migrer.
+
+`test_premium_servers.py` est supprimé. `style.css` perd 76 règles mortes et
+24 sélecteurs morts dans des règles partagées ; `.price-card.premium`,
+`.premium-ribbon` et `.is-premium` sont **conservés** : la carte de dons et le
+lien « Soutenir » les utilisent encore.
+
+### `syncWelcomePreview()` supprimé
+
+Cette fonction visait `data-welcome-card`, `data-departure-card`,
+`data-welcome-live-message`… tous supprimés avec l'ancien panneau Bienvenue.
+Elle s'exécutait à chaque frappe et n'écrivait nulle part. L'aperçu vit
+maintenant dans `applyWelcomeState()`. Deux lignes mortes du même acabit ont
+disparu de `applyDashboardConfig()`.
+
+### `test_demarrage.py` réparé
+
+Il lisait `os.environ["TEMP"]`, une variable qui n'existe que sous Windows : le
+test plantait avant même de démarrer ailleurs. Il utilise `tempfile.gettempdir()`.
+
+Il distingue aussi un vrai échec d'un réseau qui bloque `discord.com` : quand le
+bot n'a pas pu joindre Discord, le scénario est déclaré **non concluant** au
+lieu d'être compté en échec. Sur une machine sans accès à Discord (CI, bac à
+sable), on lit donc « 1/1 passé, 1 non concluant » — c'est normal, pas une
+régression.
+
+### Tests
+
+| Suite | Résultat |
+|---|---|
+| `test_security.py` | **59/59** |
+| `test_api.py` | **47/47** (11 nouvelles vérifications sur la répartition par langue) |
+| `test_demarrage.py` | **1/1**, 1 non concluant sans accès à `discord.com` |
+
+Les nouvelles vérifications de `test_api.py` verrouillent précisément le piège
+corrigé : `en-US` sur un serveur non communautaire ne doit **jamais** être
+compté, la langue ModBot doit primer sur la locale Discord, et la somme de la
+liste affichée doit couvrir tous les serveurs.
+
+Vérifié aussi dans Chromium contre l'API réelle alimentée de serveurs fictifs :
+`index.html` en français, anglais et arabe, en 1280 px et 375 px, plus un
+chargement sans erreur JS des quatre pages du site.
+
+### Reste à faire
+
+- Le débordement horizontal à 375 px vient du tiroir de menu `.nav-links`
+  positionné hors écran. **Il préexiste**, il a été mesuré à l'identique sur
+  `main` avant modification. À regarder un jour, sans urgence.
+- Le module « tournois » a été retiré de l'interface mais `bot.py` et
+  `style.css` gardent quelques traces (`tournament`, `.tournament-command-grid`).
+  Même nature que le premium, à nettoyer de la même façon.
+- `ANTHROPIC_API_KEY` reste à définir dans Railway pour les deux IA.

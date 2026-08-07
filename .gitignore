@@ -16,16 +16,19 @@ tickets.json
 stats.json
 mod_stats.json
 ratings.json
-premium.json
 blacklist.json
 infractions.json
 dashboard_sessions.json
 dashboard_logs.json
+captcha_pending.json
+giveaways.json
+
+# Le premium a été supprimé du projet. Le bot n'écrit plus ce fichier ;
+# la ligne reste pour qu'un ancien premium.json local ne soit pas committé.
+premium.json
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
-captcha_pending.json
-giveaways.json

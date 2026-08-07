@@ -39,7 +39,68 @@ def verifier(nom, condition, detail=""):
     print(f"  {etat} {nom}" + (f"  [{detail}]" if detail else ""))
 
 
+class FauxGuild:
+    """Serveur minimal : seuls les champs lus par la repartition par langue."""
+
+    def __init__(self, gid, features=(), locale="", membres=10):
+        self.id = gid
+        self.features = list(features)
+        self.preferred_locale = locale
+        self.member_count = membres
+
+
+class FauxBot:
+    def __init__(self, guilds):
+        self.guilds = guilds
+
+
+def verifier_repartition_langues():
+    """
+    Le piege que cette section verrouille : Discord force `preferred_locale`
+    a "en-US" sur tout serveur non Communautaire. L'ancienne repartition par
+    pays comptait donc des serveurs francophones sous "Etats-Unis".
+    """
+    print("\n--- Repartition par langue (signal delibere seulement) ---")
+    langue = bot_mod.langue_du_serveur
+
+    verifier("langue reglee dans ModBot prioritaire sur la locale Discord",
+             langue(FauxGuild(1, locale="en-US"), {"1": {"langue": "fr"}}) == ("Français", "🇫🇷"))
+    verifier("en-US d'un serveur non communautaire n'est pas compte",
+             langue(FauxGuild(2, locale="en-US"), {}) is None)
+    verifier("locale d'un serveur communautaire acceptee",
+             langue(FauxGuild(3, ("COMMUNITY",), "de"), {}) == ("Allemand", "🇩🇪"))
+    verifier("en-GB et en-US comptent pour une seule langue",
+             langue(FauxGuild(4, ("COMMUNITY",), "en-GB"), {})
+             == langue(FauxGuild(5, ("COMMUNITY",), "en-US"), {}))
+    verifier("locale hors table ignoree plutot qu'inventee",
+             langue(FauxGuild(6, ("COMMUNITY",), "xx-YY"), {}) is None)
+
+    original = bot_mod.bot
+    bot_mod.bot = FauxBot([
+        FauxGuild(10, ("COMMUNITY",), "fr", 100),
+        FauxGuild(11, ("COMMUNITY",), "de", 50),
+        FauxGuild(12, locale="en-US", membres=30),      # defaut impose
+        FauxGuild(13, locale="en-US", membres=20),      # defaut impose
+    ])
+    try:
+        stats = bot_mod.build_public_stats()
+    finally:
+        bot_mod.bot = original
+
+    verifier("total des membres inchange", stats["members_protected"] == 200)
+    verifier("deux langues identifiees", stats["languages"] == 2,
+             f"recu {stats['languages']}")
+    verifier("serveurs sans langue regroupes",
+             stats["unspecified"] == {"servers": 2, "members": 50},
+             str(stats["unspecified"]))
+    verifier("la somme de la liste couvre tous les serveurs",
+             sum(e["servers"] for e in stats["top_languages"]) == stats["servers"])
+    verifier("'Non renseigne' ferme la liste",
+             stats["top_languages"][-1].get("unknown") is True)
+
+
 async def main():
+    verifier_repartition_langues()
     await bot_mod.start_dashboard_api()
     await asyncio.sleep(0.4)
 
@@ -59,7 +120,9 @@ async def main():
             stats = data.get("stats") or {}
             verifier("/api/public/stats accessible sans jeton", r.status == 200, f"recu {r.status}")
             verifier("expose members_protected", "members_protected" in stats)
-            verifier("expose la repartition par pays", isinstance(stats.get("top_countries"), list))
+            verifier("expose la repartition par langue", isinstance(stats.get("top_languages"), list))
+            verifier("ne pretend plus connaitre le pays",
+                     "top_countries" not in stats and "countries" not in stats)
             texte = str(data)
             verifier("aucun identifiant de serveur expose",
                      "guild_id" not in texte and "\"id\"" not in texte)
