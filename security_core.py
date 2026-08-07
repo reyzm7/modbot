@@ -655,6 +655,15 @@ DEFAULT_NUKE_CONFIG = {
     "whitelist_users": [],
     "whitelist_roles": [],
     "trust_owner": True,
+    # DELIBEREMENT False. Nuker un serveur exige des permissions elevees :
+    # supprimer des salons, bannir en masse, changer des permissions. La
+    # population capable de nuker est donc, a peu de chose pres, celle qui a
+    # Administrateur — compte admin compromis, admin devenu hostile, ou bot
+    # malveillant a qui on a donne les pleins pouvoirs. Faire confiance a tous
+    # les administrateurs revient a eteindre l'anti-nuke pour exactement les
+    # trois scenarios qu'il existe pour couvrir. Reglage laisse a l'utilisateur,
+    # mais jamais actif par defaut.
+    "trust_admins": False,
     "auto_restore": True,
 }
 
@@ -729,13 +738,22 @@ class NukeGuard:
             self._triggered.pop(key, None)
 
 
-def is_whitelisted(user_id, role_ids, guild_owner_id, bot_id, config=None):
+def is_whitelisted(user_id, role_ids, guild_owner_id, bot_id, config=None,
+                   is_admin=False, is_bot=False):
     """
     Un acteur est de confiance si :
       * c'est le bot lui-meme
       * c'est le proprietaire du serveur (si trust_owner)
       * son id figure dans whitelist_users
       * un de ses roles figure dans whitelist_roles
+      * il est administrateur ET trust_admins est active (desactive par defaut)
+
+    `is_admin` est calcule par l'appelant : ce module ne connait pas discord.py.
+
+    Les bots administrateurs ne beneficient jamais de `trust_admins`, meme
+    active. Un bot malveillant a qui on vient de donner les pleins pouvoirs
+    est un vecteur de nuke classique — c'est meme une action surveillee
+    (`bot_add`). L'exempter automatiquement viderait la protection de son sens.
     """
     cfg = dict(DEFAULT_NUKE_CONFIG)
     cfg.update(config or {})
@@ -748,6 +766,8 @@ def is_whitelisted(user_id, role_ids, guild_owner_id, bot_id, config=None):
         return True
     whitelisted_roles = {str(x) for x in (cfg.get("whitelist_roles") or [])}
     if whitelisted_roles and any(str(rid) in whitelisted_roles for rid in (role_ids or [])):
+        return True
+    if is_admin and not is_bot and cfg.get("trust_admins", False):
         return True
     return False
 

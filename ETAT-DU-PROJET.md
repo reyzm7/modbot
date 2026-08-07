@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **7 août 2026** (voir §16 pour le dernier lot livré).
+> Dernière mise à jour : **7 août 2026** (voir §17 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -25,7 +25,7 @@ Attention, **Vercel suit `main`** : pousser une branche de travail ne déploie r
 Railway → Variables, pour que les deux IA fonctionnent. Tout le reste marche
 sans elle.
 
-### Chiffres au 7 août 2026 (après le lot §16)
+### Chiffres au 7 août 2026 (après le lot §17)
 
 | | |
 |---|---:|
@@ -38,7 +38,7 @@ sans elle.
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 59 + 90 + 2, tous au vert |
+| Tests | 63 + 98 + 2, tous au vert |
 
 ---
 
@@ -79,8 +79,8 @@ délibéré (voir §6).
 |---|---:|---|
 | `bot.py` | 12012 | Tout le câblage Discord + serveur aiohttp + API REST |
 | `security_core.py` | 1090 | Logique pure de sécurité, **aucune dépendance discord.py** |
-| `test_security.py` | 360 | 59 tests unitaires — passent tous |
-| `test_api.py` | 434 | 90 vérifications contre le vrai serveur aiohttp — passent |
+| `test_security.py` | 392 | 63 tests unitaires — passent tous |
+| `test_api.py` | 490 | 98 vérifications contre le vrai serveur aiohttp — passent |
 | `test_demarrage.py` | 105 | 2 scénarios de résilience au démarrage — passent |
 | `README.md` | 250 | Installation, configuration, déploiement |
 | `.env.example` | 50 | Modèle de configuration |
@@ -1093,3 +1093,72 @@ Le bloc de connaissances est volontairement court. S'il faut aller plus loin
 (expliquer le fonctionnement d'un module en détail), le bon endroit est
 `ai_connaissances_modbot()` — et non la personnalité du serveur, qui est
 prévue pour le ton, pas pour la documentation.
+
+---
+
+## 17. Livré le 7 août 2026 — immunité des administrateurs
+
+Demande : « les rôles administrateur ou nommés dans le dashboard sont
+protégés contre l'anti-nuke, les avertissements, etc. »
+
+### Ce qui existait déjà
+
+La partie « nommés dans le dashboard » **fonctionnait déjà**. Le panneau
+Recherche expose, pour chaque rôle, deux actions distinctes :
+
+| Action | Écrit dans | Effet |
+|---|---|---|
+| Immuniser | `roles_immunises` | exempt des sanctions **automatiques** |
+| Confiance | `antinuke_config.whitelist_roles` | non surveillé par l'anti-nuke |
+
+Ce sont deux listes séparées, et elles doivent le rester : les confondre est
+le contresens déjà commis et corrigé au §13.
+
+### Ce qui a été ajouté
+
+**`immuniser_admins`** (config serveur, **actif par défaut**) — un membre avec
+la permission Administrateur est exempt du filtre de langage, de l'anti-spam
+et de l'anti-lien. Faire taire un administrateur parce qu'il a écrit un gros
+mot n'a aucun intérêt. Réglage dans le dashboard (`filter.immunize_admins`)
+et visible dans `/securite status`.
+
+Les sanctions **manuelles** d'un modérateur (`/warn`, `/ban`) restent
+possibles sur un administrateur : c'est une décision humaine, le bot n'a pas
+à la bloquer.
+
+**`trust_admins`** (config anti-nuke, **inactif par défaut**) — les
+administrateurs échappent à l'anti-nuke. Réglable par
+`/securite antinuke confiance_admins:Oui`.
+
+### Pourquoi ce second réglage est désactivé par défaut
+
+C'est le point à ne pas défaire. Nuker un serveur exige des permissions
+élevées : supprimer des salons, bannir en masse, changer des permissions. La
+population capable de nuker est donc, à peu de chose près, **celle qui a
+Administrateur**. Les trois scénarios réels sont :
+
+1. un compte administrateur compromis (jeton volé, hameçonnage) ;
+2. un administrateur devenu hostile ;
+3. un bot malveillant à qui on a donné les pleins pouvoirs.
+
+Faire confiance à tous les administrateurs revient à éteindre l'anti-nuke
+pour exactement les trois cas qu'il existe pour couvrir. Le réglage est offert
+parce que c'est le serveur de l'utilisateur, mais il s'accompagne d'un
+avertissement explicite dans la réponse de la commande.
+
+**Les bots administrateurs ne bénéficient jamais de `trust_admins`**, même
+activé : « Ajout de bot » est une action que l'anti-nuke surveille
+spécifiquement, l'exempter automatiquement viderait la surveillance de son sens.
+
+### Tests
+
+| Suite | Résultat |
+|---|---|
+| `test_security.py` | **63/63** (4 nouveaux) |
+| `test_api.py` | **98/98** (8 nouvelles) |
+| `test_demarrage.py` | **1/1**, 1 non concluant sans accès à `discord.com` |
+
+`test_admins_surveilles_par_defaut` est le test à ne jamais laisser tomber :
+s'il passe au vert alors que `trust_admins` a disparu de la configuration,
+l'anti-nuke ne protège plus contre rien. Un test vérifie aussi que la
+signature de `is_whitelisted()` reste rétrocompatible.

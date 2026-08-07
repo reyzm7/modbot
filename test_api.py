@@ -292,12 +292,67 @@ def verifier_connaissances_ia():
              bot_mod.MISTRAL_API_KEY not in prompt_admin or not bot_mod.MISTRAL_API_KEY)
 
 
+def verifier_immunite_admins():
+    """
+    Deux notions voisines qu'il ne faut jamais refondre en une seule :
+      - immunise      -> exempte des sanctions AUTOMATIQUES (filtre, spam, liens)
+      - de confiance  -> non surveille par l'anti-nuke
+
+    Un administrateur est immunise par defaut, ce qui est sans risque. Il
+    reste surveille par l'anti-nuke, ce qui est indispensable.
+    """
+    print("\n--- Immunite des administrateurs ---")
+
+    class Role:
+        def __init__(self, rid): self.id = rid
+
+    class Membre:
+        def __init__(self, mid, admin, roles=()):
+            self.id = mid
+            self.roles = [Role(r) for r in roles]
+            self.guild_permissions = type("P", (), {"administrator": admin})()
+
+    original = bot_mod.get_cfg
+    try:
+        bot_mod.get_cfg = lambda gid: {}
+        verifier("administrateur immunise par defaut",
+                 bot_mod.est_immunise(Membre(1, True), "1"))
+        verifier("membre ordinaire non immunise",
+                 not bot_mod.est_immunise(Membre(2, False), "1"))
+
+        bot_mod.get_cfg = lambda gid: {"immuniser_admins": False}
+        verifier("le reglage peut retirer l'immunite des admins",
+                 not bot_mod.est_immunise(Membre(1, True), "1"))
+
+        bot_mod.get_cfg = lambda gid: {"roles_immunises": ["42"],
+                                       "immuniser_admins": False}
+        verifier("role immunise depuis le dashboard : toujours pris en compte",
+                 bot_mod.est_immunise(Membre(3, False, roles=[42]), "1"))
+        verifier("un autre role ne donne rien",
+                 not bot_mod.est_immunise(Membre(4, False, roles=[99]), "1"))
+
+        bot_mod.get_cfg = lambda gid: {"membres_immunises": ["7"]}
+        verifier("membre immunise depuis le dashboard",
+                 bot_mod.est_immunise(Membre(7, False), "1"))
+    finally:
+        bot_mod.get_cfg = original
+
+    # La confiance anti-nuke est une AUTRE liste : immuniser ne doit jamais
+    # desarmer l'anti-nuke au passage. C'est le contresens deja commis une fois.
+    verifier("immuniser un role ne le rend pas de confiance anti-nuke",
+             not bot_mod.sc.is_whitelisted("3", ["42"], None, None,
+                                           {"whitelist_roles": []}))
+    verifier("l'anti-nuke surveille les administrateurs par defaut",
+             not bot_mod.sc.is_whitelisted("1", [], None, None, {}, is_admin=True))
+
+
 async def main():
     verifier_repartition_langues()
     verifier_diagnostic_ia()
     verifier_erreurs_ia()
     verifier_extraction_detail()
     verifier_connaissances_ia()
+    verifier_immunite_admins()
     await bot_mod.start_dashboard_api()
     await asyncio.sleep(0.4)
 

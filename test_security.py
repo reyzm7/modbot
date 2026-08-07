@@ -286,6 +286,37 @@ class TestAntiNuke(unittest.TestCase):
         self.assertTrue(sc.is_whitelisted("600", [], None, "600", {}))
         self.assertFalse(sc.is_whitelisted("500", [], "500", None, {"trust_owner": False}))
 
+    def test_admins_surveilles_par_defaut(self):
+        """
+        Le test le plus important du fichier. Un nuke vient presque toujours
+        d'un compte administrateur : compte pirate, admin devenu hostile, bot
+        a qui on a donne les pleins pouvoirs. Si un jour ce test passe au
+        vert avec trust_admins absent de la config, l'anti-nuke ne protege
+        plus contre rien.
+        """
+        self.assertFalse(sc.DEFAULT_NUKE_CONFIG["trust_admins"])
+        self.assertFalse(sc.is_whitelisted("777", [], None, None, {}, is_admin=True))
+
+    def test_confiance_admins_explicite(self):
+        cfg = {"trust_admins": True}
+        self.assertTrue(sc.is_whitelisted("777", [], None, None, cfg, is_admin=True))
+        # Un non-administrateur ne gagne rien au passage.
+        self.assertFalse(sc.is_whitelisted("778", [], None, None, cfg, is_admin=False))
+
+    def test_bot_administrateur_jamais_de_confiance(self):
+        """
+        « Ajout de bot » est une action surveillee par l'anti-nuke : exempter
+        automatiquement un bot administrateur viderait la surveillance de son
+        sens, meme quand l'utilisateur a active la confiance aux admins.
+        """
+        cfg = {"trust_admins": True}
+        self.assertFalse(
+            sc.is_whitelisted("900", [], None, None, cfg, is_admin=True, is_bot=True))
+
+    def test_signature_retrocompatible(self):
+        """Les appels existants, sans les nouveaux arguments, doivent tenir."""
+        self.assertTrue(sc.is_whitelisted("123", [], None, None, {"whitelist_users": ["123"]}))
+
 
 class TestSauvegardes(unittest.TestCase):
 

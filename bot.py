@@ -1118,11 +1118,31 @@ def del_member_imm(gid, uid):
 # (voir detect_message_content) : normalisation unicode, leet speak,
 # separateurs et protection contre les faux positifs.
 
+def immuniser_admins(gid):
+    """
+    Les administrateurs echappent-ils aux sanctions automatiques ?
+
+    Actif par defaut : faire taire un administrateur parce qu'il a ecrit un
+    gros mot n'a aucun interet, et c'est la premiere chose qu'on desactive a
+    la main sinon. Sans rapport avec l'anti-nuke, qui lui reste actif contre
+    les administrateurs (voir `trust_admins` dans security_core).
+    """
+    return bool(get_cfg(gid).get("immuniser_admins", True))
+
+
 def est_immunise(member, gid):
+    """
+    Exempt des sanctions AUTOMATIQUES : filtre de langage, anti-spam,
+    anti-lien. Ne dit rien de l'anti-nuke, ni des sanctions manuelles d'un
+    moderateur (`/warn`, `/ban`), qui restent volontairement possibles.
+    """
     if str(member.id) in {str(mid) for mid in get_members_imm(gid)}:
         return True
     immune_roles = {str(rid) for rid in get_roles_imm(gid)}
-    return any(str(r.id) in immune_roles for r in getattr(member, "roles", []))
+    if any(str(r.id) in immune_roles for r in getattr(member, "roles", [])):
+        return True
+    perms = getattr(member, "guild_permissions", None)
+    return bool(perms and perms.administrator and immuniser_admins(gid))
 
 # ════════════════════════════════════════════════
 #  AVERTISSEMENTS & SANCTIONS PROGRESSIVES
@@ -5017,6 +5037,7 @@ def serialize_security_config(guild):
             "ladder": filt["ladder"],
             "allowlist": filt["allowlist"],
             "custom_words": get_custom(gid),
+            "immunize_admins": immuniser_admins(gid),
         },
         "safe_mode_active": RAID.safe_mode_active(gid),
         "captcha": {
@@ -5085,6 +5106,7 @@ async def api_save_guild_security(request):
             current["punishment"] = str(nuke["punishment"]).lower()
         current["auto_restore"] = bool(nuke.get("auto_restore", current.get("auto_restore")))
         current["trust_owner"] = bool(nuke.get("trust_owner", current.get("trust_owner")))
+        current["trust_admins"] = bool(nuke.get("trust_admins", current.get("trust_admins", False)))
         for field in ("whitelist_users", "whitelist_roles"):
             if isinstance(nuke.get(field), list):
                 current[field] = [str(parse_int(x)) for x in nuke[field] if parse_int(x)][:100]
@@ -5094,6 +5116,8 @@ async def api_save_guild_security(request):
     if isinstance(filt, dict):
         cfg["insultes_enabled"] = bool(filt.get("enabled", cfg.get("insultes_enabled", True)))
         cfg["insultes_tolerant"] = bool(filt.get("tolerant", cfg.get("insultes_tolerant", True)))
+        cfg["immuniser_admins"] = bool(
+            filt.get("immunize_admins", cfg.get("immuniser_admins", True)))
         if isinstance(filt.get("ladder"), list):
             cfg["sanction_ladder"] = sc.normalize_ladder(filt["ladder"])
         if isinstance(filt.get("allowlist"), list):
@@ -9148,7 +9172,11 @@ async def guard_sensitive_action(guild, actor, action_key, detail, restore=None)
 
     member = guild.get_member(getattr(actor, "id", 0))
     role_ids = [r.id for r in getattr(member, "roles", [])] if member else []
-    if sc.is_whitelisted(actor.id, role_ids, guild.owner_id, getattr(bot.user, "id", None), cfg):
+    perms = getattr(member, "guild_permissions", None)
+    if sc.is_whitelisted(actor.id, role_ids, guild.owner_id,
+                         getattr(bot.user, "id", None), cfg,
+                         is_admin=bool(perms and perms.administrator),
+                         is_bot=bool(getattr(actor, "bot", False))):
         return
 
     result = NUKE.register(gid, actor.id, action_key, cfg.get("limits"))
@@ -9823,14 +9851,16 @@ def build_security_status_embed(guild):
                f"Sanction : `{nuke.get('punishment')}`\n"
                f"Restauration auto : {'🟢 oui' if nuke.get('auto_restore') else '🔴 non'}\n"
                f"Whitelist : `{len(nuke.get('whitelist_users') or [])}` membres · "
-               f"`{len(nuke.get('whitelist_roles') or [])}` roles"),
+               f"`{len(nuke.get('whitelist_roles') or [])}` roles\n"
+               f"Admins surveilles : {'🔴 non' if nuke.get('trust_admins') else '🟢 oui'}"),
         inline=True,
     )
     embed.add_field(
         name="🚫 Filtre de langage",
         value=(f"{status_badge(filt['enabled'], gid)}\n"
                f"Detection avancee : {'🟢 oui' if filt['tolerant'] else '🔴 non'}\n"
-               f"Paliers : `{len(filt['ladder'])}`"),
+               f"Paliers : `{len(filt['ladder'])}`\n"
+               f"Admins immunises : {'🟢 oui' if immuniser_admins(gid) else '🔴 non'}"),
         inline=True,
     )
 
@@ -9899,7 +9929,8 @@ async def security_antiraid(i: discord.Interaction, actif: bool, seuil: int = No
 
 @security_group.command(name="antinuke", description="Configurer la protection anti-nuke")
 @app_commands.describe(actif="Activer la protection", sanction="Sanction appliquee a l'attaquant",
-                       restauration_auto="Recreer automatiquement ce qui est supprime")
+                       restauration_auto="Recreer automatiquement ce qui est supprime",
+                       confiance_admins="DECONSEILLE : ne plus surveiller les administrateurs")
 @app_commands.choices(sanction=[
     app_commands.Choice(name="Retirer tous les roles", value="strip"),
     app_commands.Choice(name="Expulser", value="kick"),
@@ -9907,19 +9938,31 @@ async def security_antiraid(i: discord.Interaction, actif: bool, seuil: int = No
 ])
 async def security_antinuke(i: discord.Interaction, actif: bool,
                             sanction: app_commands.Choice[str] = None,
-                            restauration_auto: bool = None):
+                            restauration_auto: bool = None,
+                            confiance_admins: bool = None):
     await _safe_defer(i)
     changes = {"enabled": actif}
     if sanction is not None:
         changes["punishment"] = sanction.value
     if restauration_auto is not None:
         changes["auto_restore"] = restauration_auto
+    if confiance_admins is not None:
+        changes["trust_admins"] = confiance_admins
     cfg = set_nuke_cfg(str(i.guild.id), **changes)
 
     embed = embed_success("Anti-nuke mis a jour", "", str(i.guild.id))
     embed.add_field(name="💥 Etat", value=status_badge(cfg["enabled"], str(i.guild.id)), inline=True)
     embed.add_field(name="⚡ Sanction", value=f"`{cfg['punishment']}`", inline=True)
     embed.add_field(name="♻️ Restauration", value="🟢 oui" if cfg["auto_restore"] else "🔴 non", inline=True)
+    if cfg.get("trust_admins"):
+        embed.add_field(
+            name="🔓 Administrateurs non surveilles",
+            value="Les administrateurs echappent desormais a l'anti-nuke.\n"
+                  "**Un nuke vient presque toujours d'un compte administrateur** — "
+                  "compte pirate, administrateur devenu hostile. Cette protection "
+                  "ne couvre plus ces cas. A remettre a `Non` des que possible.",
+            inline=False,
+        )
     if not i.guild.me.guild_permissions.view_audit_log:
         embed.add_field(
             name="⚠️ Attention",
