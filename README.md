@@ -4,6 +4,11 @@ Bot de modération Discord avec dashboard web : protection anti-raid et
 anti-nuke, filtre de langage anti-contournement, système de logs complet,
 sauvegardes de serveur et tickets.
 
+> **Tu reprends le projet ?** Lis d'abord **[ETAT-DU-PROJET.md](ETAT-DU-PROJET.md)** :
+> architecture, décisions techniques et leurs raisons, variables
+> d'environnement, bugs connus, prochaines étapes.
+> Le site vit dans un dépôt séparé : https://github.com/reyzm7/modbot-site
+
 ---
 
 ## 1. Installation
