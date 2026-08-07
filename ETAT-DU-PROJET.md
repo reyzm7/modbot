@@ -80,7 +80,7 @@ délibéré (voir §6).
 | `bot.py` | 11787 | Tout le câblage Discord + serveur aiohttp + API REST |
 | `security_core.py` | 1090 | Logique pure de sécurité, **aucune dépendance discord.py** |
 | `test_security.py` | 360 | 59 tests unitaires — passent tous |
-| `test_api.py` | 200 | 47 vérifications contre le vrai serveur aiohttp — passent |
+| `test_api.py` | 260 | 59 vérifications contre le vrai serveur aiohttp — passent |
 | `test_demarrage.py` | 105 | 2 scénarios de résilience au démarrage — passent |
 | `README.md` | 250 | Installation, configuration, déploiement |
 | `.env.example` | 50 | Modèle de configuration |
@@ -711,7 +711,7 @@ fermé — il n'est plus atteignable au clavier.
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | *(vide)* | **Requise pour les deux IA.** Sans elle, tout le reste fonctionne et les commandes IA expliquent ce qui manque |
+| `ANTHROPIC_API_KEY` | *(vide)* | **Requise pour les deux IA.** Lue **au démarrage uniquement** : après l'avoir ajoutée, il faut redéployer. `/ia statut` dit ce que le processus voit réellement |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` | Modèle utilisé |
 
 ### Fichiers à ne pas versionner (ajoutés)
@@ -830,6 +830,45 @@ liste affichée doit couvrir tous les serveurs.
 Vérifié aussi dans Chromium contre l'API réelle alimentée de serveurs fictifs :
 `index.html` en français, anglais et arabe, en 1280 px et 375 px, plus un
 chargement sans erreur JS des quatre pages du site.
+
+### Diagnostic de la configuration IA (ajouté après coup)
+
+`/ia activer` répondait « IA non configurée » alors que `ANTHROPIC_API_KEY`
+était bien posée sur Railway. Le message était le même dans trois situations
+qui ne se corrigent pas de la même façon, et ne donnait aucun moyen de les
+distinguer.
+
+**La cause de fond :** `ANTHROPIC_API_KEY` est lue **une seule fois**, à
+l'import de `bot.py`. Une variable ajoutée pendant que le service tourne
+n'entre jamais dans le processus en cours — il faut redéployer. C'est la
+cause la plus fréquente, et elle était invisible.
+
+`ai_diagnostic()` rapporte ce que le processus voit vraiment : variable
+définie ou non, vide ou non, longueur et 8 premiers caractères de la clef,
+et **les noms de variables voisins présents dans l'environnement**
+(`CLAUDE_API_KEY`, `ANTROPIC_API_KEY`…). `ai_conseil_configuration()` en tire
+une consigne unique et actionnable, au lieu de répéter « définis
+ANTHROPIC_API_KEY » à quelqu'un qui vient de le faire.
+
+- **Au démarrage** : l'état de l'IA est imprimé dans les logs de l'hébergeur,
+  à côté du diagnostic OAuth existant.
+- **`/ia statut`** affiche la date de démarrage du bot (`format_dt` relatif) —
+  c'est ce qui permet de comparer avec l'heure du réglage — et la cause exacte.
+- **`/ia statut verifier:Oui`** fait un vrai appel minimal à l'API : une clef
+  présente mais révoquée, ou un `ANTHROPIC_MODEL` auquel le compte n'a pas
+  droit, ne se voient pas autrement.
+- **`/api/health`** expose `ai_configured` et `started_at` — booléen et date
+  seulement, **jamais de fragment de clef** : cette route est publique. Un
+  test le verrouille.
+
+`ask_claude()` distingue désormais 401/403 (clef refusée) de 404 (modèle
+inaccessible pour cette clef) au lieu d'un « réessaie plus tard » générique,
+et accepte `detailler=True` pour remonter le message brut de l'API — réservé
+au diagnostic administrateur.
+
+Neuf vérifications dans `test_api.py` couvrent les cinq cas : absente, vide,
+nom voisin, clef valide, préfixe inattendu — plus le fait que la clef n'est
+jamais exposée en entier.
 
 ### Reste à faire
 

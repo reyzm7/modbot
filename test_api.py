@@ -99,8 +99,64 @@ def verifier_repartition_langues():
              stats["top_languages"][-1].get("unknown") is True)
 
 
+def verifier_diagnostic_ia():
+    """
+    « IA non configuree » doit dire POURQUOI. Trois causes se ressemblent de
+    l'exterieur et se corrigent differemment ; ces verifications s'assurent
+    que le bot ne renvoie pas la meme consigne inutile dans les trois cas.
+    """
+    print("\n--- Diagnostic de la configuration IA ---")
+    cle = "ANTHROPIC_API_KEY"
+    sauvegarde = dict(os.environ)
+    clef_module = bot_mod.ANTHROPIC_API_KEY
+
+    def poser(valeur, autres=()):
+        os.environ.pop(cle, None)
+        for parasite in ("CLAUDE_API_KEY", "ANTHROPIC_KEY"):
+            os.environ.pop(parasite, None)
+        for nom, val in autres:
+            os.environ[nom] = val
+        if valeur is not None:
+            os.environ[cle] = valeur
+        bot_mod.ANTHROPIC_API_KEY = (valeur or "").strip()
+        return bot_mod.ai_diagnostic()
+
+    try:
+        d = poser(None)
+        verifier("variable absente : signalee comme non definie",
+                 not d["configured"] and not d["defined"] and not d["similar_names"])
+        titre, _ = bot_mod.ai_conseil_configuration(d)
+        verifier("consigne : redemarrer / verifier le service", "absente" in titre.lower())
+
+        d = poser("   ")
+        verifier("variable vide : distinguee d'une variable absente",
+                 not d["configured"] and d["defined"] and d["empty"])
+        titre, _ = bot_mod.ai_conseil_configuration(d)
+        verifier("consigne : variable vide", "vide" in titre.lower())
+
+        d = poser(None, autres=[("CLAUDE_API_KEY", "sk-ant-api03-zzz")])
+        verifier("nom voisin repere", d["similar_names"] == ["CLAUDE_API_KEY"],
+                 str(d["similar_names"]))
+        titre, corps = bot_mod.ai_conseil_configuration(d)
+        verifier("consigne : renommer la variable",
+                 "nom" in titre.lower() and "CLAUDE_API_KEY" in corps)
+
+        d = poser("sk-ant-api03-" + "x" * 80)
+        verifier("clef valide reconnue", d["configured"] and d["expected_prefix"])
+        verifier("la clef n'est jamais exposee en entier",
+                 len(d["prefix"]) <= 8 and "x" * 20 not in str(d))
+
+        d = poser("AKIAIOSFODNN7EXAMPLE")
+        verifier("prefixe inattendu signale", d["configured"] and not d["expected_prefix"])
+    finally:
+        os.environ.clear()
+        os.environ.update(sauvegarde)
+        bot_mod.ANTHROPIC_API_KEY = clef_module
+
+
 async def main():
     verifier_repartition_langues()
+    verifier_diagnostic_ia()
     await bot_mod.start_dashboard_api()
     await asyncio.sleep(0.4)
 
@@ -113,6 +169,12 @@ async def main():
             verifier("expose oauth_configured", "oauth_configured" in data,
                      f"valeur={data.get('oauth_configured')}")
             verifier("expose client_id", bool(data.get("client_id")))
+            # Permet de verifier l'IA et un redemarrage depuis un navigateur,
+            # sans passer par Discord.
+            verifier("expose ai_configured", "ai_configured" in data)
+            verifier("expose started_at", bool(data.get("started_at")))
+            verifier("aucun fragment de clef sur cette route publique",
+                     "sk-ant" not in str(data) and "ANTHROPIC_API_KEY" not in str(data))
 
         print("\n--- Statistiques publiques (sans authentification) ---")
         async with s.get(f"{BASE}/api/public/stats") as r:

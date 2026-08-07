@@ -1363,6 +1363,22 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5").strip()
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
+# Les variables d'environnement sont lues UNE FOIS, au demarrage du processus.
+# Une variable ajoutee sur l'hebergeur pendant que le bot tourne n'entre donc
+# pas dedans : il faut redemarrer. C'est la cause n°1 de « IA non configuree »
+# alors que la variable est bien posee, et sans cette date personne ne peut
+# le voir. On la garde pour pouvoir la comparer a l'heure du reglage.
+PROCESS_STARTED_AT = now()
+
+# Noms deja vus a la place de ANTHROPIC_API_KEY. Sert a dire « tu as pose
+# CLAUDE_API_KEY, le bot attend ANTHROPIC_API_KEY » au lieu de « absente ».
+AI_KEY_VARIANTES = {
+    "ANTHROPIC_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_API", "ANTHROPIC_TOKEN",
+    "ANTHROPIC_SECRET", "ANTHROPIC_SECRET_KEY", "ANTROPIC_API_KEY",
+    "ANTHROPHIC_API_KEY", "CLAUDE_API_KEY", "CLAUDE_KEY", "CLAUDE_TOKEN",
+    "API_KEY_ANTHROPIC", "AI_API_KEY",
+}
+
 AI_MAX_TOKENS = 700
 AI_TIMEOUT_SECONDS = 30
 AI_HISTORY_TURNS = 8          # nombre d'echanges gardes par salon
@@ -1380,16 +1396,73 @@ def ai_available():
     return bool(ANTHROPIC_API_KEY)
 
 
+def ai_diagnostic():
+    """
+    Ce que le processus voit REELLEMENT de sa configuration IA.
+
+    « IA non configuree » a trois causes qui se ressemblent de l'exterieur et
+    se corrigent differemment :
+      1. la variable n'existe pas dans ce processus — mauvais service, mauvais
+         environnement, ou ajoutee sans redemarrage ;
+      2. elle existe mais elle est vide ;
+      3. elle a ete posee sous un autre nom (CLAUDE_API_KEY, faute de frappe...).
+
+    La clef elle-meme n'est jamais renvoyee : seulement sa longueur et ses
+    premiers caracteres, de quoi verifier qu'on a colle la bonne chose.
+    """
+    brute = os.environ.get("ANTHROPIC_API_KEY")
+    similaires = sorted(
+        nom for nom in os.environ
+        if nom != "ANTHROPIC_API_KEY"
+        and (nom.strip().upper() in AI_KEY_VARIANTES
+             or nom.strip().upper() == "ANTHROPIC_API_KEY"
+             or ("ANTHROPIC" in nom.upper() and "KEY" in nom.upper()))
+    )
+    return {
+        "configured": ai_available(),
+        "defined": brute is not None,
+        "empty": brute is not None and not brute.strip(),
+        "length": len(ANTHROPIC_API_KEY),
+        "prefix": ANTHROPIC_API_KEY[:8] if ANTHROPIC_API_KEY else "",
+        "expected_prefix": ANTHROPIC_API_KEY.startswith("sk-ant-"),
+        "similar_names": similaires,
+        "model": ANTHROPIC_MODEL,
+        "started_at": PROCESS_STARTED_AT.isoformat(),
+    }
+
+
+async def ai_verifier_clef():
+    """
+    Plus petit appel possible a l'API Anthropic, pour separer « clef presente »
+    de « clef qui marche » : une clef revoquee, expiree, ou un modele auquel le
+    compte n'a pas droit donnent tous les trois une clef *presente*.
+
+    Retourne (ok, message deja formule en francais).
+    """
+    if not ai_available():
+        return False, "Aucune clef n'est chargée dans ce processus."
+    try:
+        await ask_claude([{"role": "user", "content": "ping"}],
+                         "Réponds exactement : pong", max_tokens=8, detailler=True)
+        return True, f"Clef acceptée, modèle `{ANTHROPIC_MODEL}` joignable."
+    except AIError as ex:
+        return False, str(ex)
+
+
 class AIError(Exception):
     """Erreur remontee a l'utilisateur, deja formulee en francais."""
 
 
-async def ask_claude(messages, system_prompt, max_tokens=AI_MAX_TOKENS):
+async def ask_claude(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=False):
     """
     Appelle l'API Anthropic et retourne le texte de la reponse.
 
     Leve AIError avec un message lisible : l'appelant l'affiche tel quel,
     sans jamais exposer la clef ni la reponse brute de l'API.
+
+    `detailler` reprend le message d'erreur brut de l'API. Reserve au
+    diagnostic administrateur (`/ia statut verifier:`) : un membre ordinaire
+    n'a rien a faire du detail, mais celui qui debogue la configuration si.
     """
     if not ai_available():
         raise AIError("L'IA n'est pas configuree sur ce ModBot. "
@@ -1412,13 +1485,23 @@ async def ask_claude(messages, system_prompt, max_tokens=AI_MAX_TOKENS):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(ANTHROPIC_URL, json=charge, headers=entetes) as reponse:
                 donnees = await reponse.json(content_type=None)
-                if reponse.status == 401:
-                    raise AIError("La clef d'API Anthropic est refusee. Verifie `ANTHROPIC_API_KEY`.")
+                detail = (donnees or {}).get("error", {}).get("message", "")
+                if reponse.status in (401, 403):
+                    raise AIError("La clef d'API Anthropic est refusée. "
+                                  "Vérifie `ANTHROPIC_API_KEY` : révoquée, expirée, "
+                                  "ou copiée incomplètement.")
+                if reponse.status == 404:
+                    # Cas courant et invisible autrement : la clef est bonne,
+                    # mais le compte n'a pas acces au modele demande.
+                    raise AIError(f"Le modèle `{ANTHROPIC_MODEL}` est introuvable pour "
+                                  "cette clef. Corrige `ANTHROPIC_MODEL` sur l'hébergeur.")
                 if reponse.status == 429:
                     raise AIError("L'IA est momentanement saturee. Reessaie dans un instant.")
                 if reponse.status >= 400:
-                    detail = (donnees or {}).get("error", {}).get("message", "")
                     print(f"Anthropic {reponse.status}: {detail}")
+                    if detailler:
+                        raise AIError(f"L'API Anthropic répond {reponse.status} : "
+                                      f"{detail or 'aucun détail fourni'}")
                     raise AIError("L'IA n'a pas pu repondre. Reessaie plus tard.")
 
         morceaux = [
@@ -4415,6 +4498,12 @@ async def api_health(request):
         "discord_state": BOT_STATUS["state"],
         "discord_detail": BOT_STATUS["detail"],
         "oauth_configured": bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and redirect_uri),
+        # Booleen seul : cette route est publique, aucun detail sur la clef.
+        # Le diagnostic complet est dans /ia statut, reserve aux admins.
+        "ai_configured": ai_available(),
+        # Permet de voir depuis un navigateur si le service a bien redemarre
+        # apres un changement de variable, sans attendre Discord.
+        "started_at": PROCESS_STARTED_AT.isoformat(),
         "client_id": DISCORD_CLIENT_ID,
         "version": "2.0",
     }, request=request)
@@ -5961,6 +6050,26 @@ async def start_dashboard_api():
         ) if not value]
         print(f"  ⚠️  OAuth Discord INCOMPLET — variables manquantes : {', '.join(manquantes)}")
         print("     La connexion au dashboard ne fonctionnera pas tant qu'elles ne sont pas definies.")
+
+    # L'etat de l'IA au demarrage, dans les logs de l'hebergeur. C'est la
+    # premiere chose a regarder quand /ia repond « non configuree » : ces
+    # lignes datent du lancement, donc elles disent ce que CE processus a lu.
+    diag = ai_diagnostic()
+    if diag["configured"]:
+        print(f"  • IA prete — clef {diag['prefix']}… ({diag['length']} caracteres), "
+              f"modele {ANTHROPIC_MODEL}")
+        if not diag["expected_prefix"]:
+            print("    ⚠️  Une clef Anthropic commence normalement par 'sk-ant-'.")
+    elif diag["similar_names"]:
+        print(f"  ⚠️  IA non configuree — variables proches trouvees : "
+              f"{', '.join(diag['similar_names'])}")
+        print("     Le bot lit exactement ANTHROPIC_API_KEY. Renomme la variable.")
+    elif diag["empty"]:
+        print("  ⚠️  IA non configuree — ANTHROPIC_API_KEY existe mais est vide.")
+    else:
+        print("  ⚠️  IA non configuree — ANTHROPIC_API_KEY absente de ce processus.")
+        print("     Ajoutee apres coup ? Les variables ne sont lues qu'au demarrage :")
+        print("     redeploie le service pour qu'elle soit prise en compte.")
 
 def recurring_interval_seconds(message):
     try:
@@ -10358,10 +10467,10 @@ def set_ai_cfg(gid, **changes):
 async def ia_activer(i: discord.Interaction, salon: discord.TextChannel = None):
     gid = str(i.guild.id)
     if not ai_available():
+        titre, consigne = ai_conseil_configuration(ai_diagnostic())
         return await safe_ephemeral(i, embed=embed_error(
-            "IA non configuree",
-            "Le proprietaire de ModBot doit definir la variable "
-            "`ANTHROPIC_API_KEY` sur l'hebergeur du bot.", gid))
+            "IA non configurée", f"**{titre}.** {consigne}\n\n"
+            "`/ia statut` donne le détail, `/ia statut verifier:Oui` teste la clef.", gid))
 
     reglages = ai_cfg(gid)
     salons = list(reglages["channels"])
@@ -10420,15 +10529,39 @@ async def ia_oublier(i: discord.Interaction):
         "Contexte efface", "Je repars de zero dans ce salon.", str(i.guild.id)))
 
 
+def ai_conseil_configuration(diag):
+    """
+    Transforme le diagnostic brut en une consigne unique et actionnable.
+    Repeter « definis ANTHROPIC_API_KEY » a quelqu'un qui vient de le faire
+    ne l'aide pas : il faut lui dire ce qui cloche precisement.
+    """
+    if diag["similar_names"]:
+        noms = ", ".join(f"`{n}`" for n in diag["similar_names"][:4])
+        return ("Nom de variable incorrect",
+                f"L'hébergeur fournit {noms}, mais le bot lit exactement "
+                "`ANTHROPIC_API_KEY`. Renomme la variable, puis redémarre le bot.")
+    if diag["empty"]:
+        return ("Variable vide",
+                "`ANTHROPIC_API_KEY` existe bien mais ne contient rien. "
+                "Recolle la clef, puis redémarre le bot.")
+    return ("Variable absente de ce processus",
+            "Le bot n'a **pas** vu `ANTHROPIC_API_KEY` au démarrage. Les variables "
+            "ne sont lues qu'au lancement : si tu l'as ajoutée après, **redéploie ou "
+            "redémarre le service**. Vérifie aussi que la variable est posée sur *ce* "
+            "service et dans *cet* environnement de l'hébergeur.")
+
+
 @ia_group.command(name="statut", description="Voir l'etat de l'IA")
-async def ia_statut(i: discord.Interaction):
+@app_commands.describe(verifier="Tester la clef par un vrai appel a l'API Anthropic")
+async def ia_statut(i: discord.Interaction, verifier: bool = False):
     gid = str(i.guild.id)
     reglages = ai_cfg(gid)
+    diag = ai_diagnostic()
     embed = embed_base("Assistant IA", "",
                        Palette.PRIMARY if reglages["enabled"] else Palette.NEUTRAL, gid)
     embed.add_field(name="Etat", value="`Actif`" if reglages["enabled"] else "`Inactif`", inline=True)
     embed.add_field(name="Clef API",
-                    value="`Configuree`" if ai_available() else "`Absente`", inline=True)
+                    value="`Configuree`" if diag["configured"] else "`Absente`", inline=True)
     embed.add_field(name="Modele", value=f"`{ANTHROPIC_MODEL}`", inline=True)
     embed.add_field(
         name="📍 Salons",
@@ -10440,11 +10573,26 @@ async def ia_statut(i: discord.Interaction):
     embed.add_field(name="💬 Contexte de ce salon",
                     value=f"`{len(ai_get_history(i.channel.id))}` message(s) memorise(s)",
                     inline=False)
-    if not ai_available():
-        embed.add_field(
-            name="⚠️ A faire",
-            value="Definis `ANTHROPIC_API_KEY` sur l'hebergeur du bot (Railway → Variables).",
-            inline=False)
+
+    # Le bot a demarre a cet instant : tout reglage pose APRES n'est pas dans
+    # ce processus. C'est ce qui permet a l'administrateur de trancher seul.
+    embed.add_field(name="🔄 Bot demarre",
+                    value=discord.utils.format_dt(PROCESS_STARTED_AT, "R"), inline=False)
+
+    if not diag["configured"]:
+        titre, consigne = ai_conseil_configuration(diag)
+        embed.add_field(name=f"⚠️ {titre}", value=consigne, inline=False)
+    else:
+        empreinte = f"`{diag['prefix']}…` · {diag['length']} caractères"
+        if not diag["expected_prefix"]:
+            empreinte += "\n⚠️ Une clef Anthropic commence normalement par `sk-ant-`."
+        embed.add_field(name="🔑 Clef chargee", value=empreinte, inline=False)
+
+    if verifier:
+        ok, message = await ai_verifier_clef()
+        embed.add_field(name="🧪 Test réel" if ok else "🧪 Test réel — échec",
+                        value=("✅ " if ok else "❌ ") + message, inline=False)
+
     await safe_ephemeral(i, embed=embed)
 
 
