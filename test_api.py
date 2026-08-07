@@ -291,6 +291,26 @@ def verifier_connaissances_ia():
     verifier("aucun secret dans la consigne",
              bot_mod.MISTRAL_API_KEY not in prompt_admin or not bot_mod.MISTRAL_API_KEY)
 
+    # L'IA doit repondre a tout, pas seulement aux questions sur le bot. Sans
+    # ces deux consignes, le pave de documentation ModBot qui suit la ramenait
+    # systematiquement au sujet du bot.
+    verifier("l'IA est autorisee a repondre hors sujet Discord",
+             "culture générale" in prompt_membre and "assistant des membres" in prompt_membre)
+    verifier("l'IA a interdiction de tout ramener a ModBot",
+             "ne ramène pas la conversation à ModBot" in prompt_membre)
+    verifier("la longueur s'adapte a la question, sans plafond arbitraire",
+             "Adapte la longueur" in prompt_membre
+             and "deux ou trois phrases suffisent" not in prompt_membre)
+    verifier("aucune consigne dupliquee",
+             prompt_membre.count("plutôt que d'inventer") == 1)
+
+    # Le palier gratuit ouvre tous les modeles : prendre le petit ne fait
+    # economiser que de la culture generale.
+    verifier("le modele par defaut n'est pas le plus petit",
+             "small" not in bot_mod.MISTRAL_MODEL, bot_mod.MISTRAL_MODEL)
+    verifier("la reponse peut etre developpee", bot_mod.AI_MAX_TOKENS >= 1000,
+             str(bot_mod.AI_MAX_TOKENS))
+
 
 def verifier_immunite_admins():
     """

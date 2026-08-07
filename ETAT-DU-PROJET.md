@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **7 août 2026** (voir §17 pour le dernier lot livré).
+> Dernière mise à jour : **7 août 2026** (voir §18 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -25,7 +25,7 @@ Attention, **Vercel suit `main`** : pousser une branche de travail ne déploie r
 Railway → Variables, pour que les deux IA fonctionnent. Tout le reste marche
 sans elle.
 
-### Chiffres au 7 août 2026 (après le lot §17)
+### Chiffres au 7 août 2026 (après le lot §18)
 
 | | |
 |---|---:|
@@ -38,7 +38,7 @@ sans elle.
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 63 + 98 + 2, tous au vert |
+| Tests | 63 + 104 + 2, tous au vert |
 
 ---
 
@@ -80,7 +80,7 @@ délibéré (voir §6).
 | `bot.py` | 12012 | Tout le câblage Discord + serveur aiohttp + API REST |
 | `security_core.py` | 1090 | Logique pure de sécurité, **aucune dépendance discord.py** |
 | `test_security.py` | 392 | 63 tests unitaires — passent tous |
-| `test_api.py` | 490 | 98 vérifications contre le vrai serveur aiohttp — passent |
+| `test_api.py` | 512 | 104 vérifications contre le vrai serveur aiohttp — passent |
 | `test_demarrage.py` | 105 | 2 scénarios de résilience au démarrage — passent |
 | `README.md` | 250 | Installation, configuration, déploiement |
 | `.env.example` | 50 | Modèle de configuration |
@@ -1162,3 +1162,67 @@ spécifiquement, l'exempter automatiquement viderait la surveillance de son sens
 s'il passe au vert alors que `trust_admins` a disparu de la configuration,
 l'anti-nuke ne protège plus contre rien. Un test vérifie aussi que la
 signature de `is_whitelisted()` reste rétrocompatible.
+
+---
+
+## 18. Livré le 7 août 2026 — l'IA répond à tout, pas qu'à ModBot
+
+Demande : « une plus grande culture, capable de répondre à de multiples
+questions ». Trois causes, dont une seule était le prompt.
+
+### 1. Le modèle était le petit — sans raison
+
+`mistral-small-latest` était le défaut. Or **le palier gratuit de Mistral
+ouvre tous les modèles**, Large compris : prendre le petit ne faisait
+économiser aucun argent, seulement de la culture générale et de la nuance.
+
+Défaut passé à **`mistral-large-latest`**. Redescendre à
+`mistral-medium-latest` ou `mistral-small-latest` par `MISTRAL_MODEL` si la
+latence gêne, ou si la limite de requêtes par minute du palier gratuit devient
+serrée sur un serveur actif.
+
+### 2. Le pavé de documentation ramenait tout à ModBot
+
+Le §16 avait donné à l'IA ~1 500 tokens de documentation ModBot. Effet de
+bord : cette masse en tête de chaque requête la poussait à ramener n'importe
+quelle conversation vers le bot.
+
+Deux consignes règlent ça, et il ne faut pas les retirer :
+
+- l'IA est présentée comme **l'assistant des membres** avant d'être un bot de
+  modération, explicitement autorisée sur la culture générale, les sciences,
+  le code, les jeux, la cuisine — « une question sans rapport avec Discord est
+  une question parfaitement normale » ;
+- « la documentation ModBot plus bas ne sert QUE si la question porte sur le
+  bot lui-même — **ne ramène pas la conversation à ModBot** ».
+
+### 3. La concision était plafonnée
+
+« Sois bref : deux ou trois phrases suffisent le plus souvent » interdisait
+toute explication développée. Remplacé par une consigne qui **adapte la
+longueur à la question**, et `AI_MAX_TOKENS` passe de 700 à 1200.
+
+Sans risque de troncature : la réponse est déjà découpée en morceaux de
+1 900 caractères avant envoi, la limite Discord de 2 000 ne peut pas la couper.
+
+### Ce qui n'a pas bougé
+
+Les garde-fous du §16 et du §17 tiennent tous : interdiction d'inventer une
+commande ou une adresse, posture de sécurité masquée aux non-administrateurs,
+aucun pouvoir de modération par la discussion, aucun secret divulgué. Six
+vérifications les couvrent.
+
+### Tests
+
+| Suite | Résultat |
+|---|---|
+| `test_security.py` | **63/63** |
+| `test_api.py` | **104/104** (6 nouvelles) |
+| `test_demarrage.py` | **1/1**, 1 non concluant sans accès à `discord.com` |
+
+Une vérification interdit le retour de l'ancien plafond (`deux ou trois
+phrases suffisent`), une autre refuse un modèle par défaut contenant
+`small` — les deux régressions faciles à réintroduire sans s'en apercevoir.
+
+Vérifié de bout en bout contre le faux serveur Mistral : le modèle envoyé, le
+`max_tokens`, et la présence des quatre consignes qui comptent.
