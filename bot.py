@@ -1453,6 +1453,49 @@ class AIError(Exception):
     """Erreur remontee a l'utilisateur, deja formulee en francais."""
 
 
+def ai_message_erreur(status, detail="", detailler=False):
+    """
+    Traduit une erreur de l'API Anthropic en une phrase actionnable.
+
+    Le piege repare ici : tout ce qui n'etait ni 401 ni 429 tombait dans
+    « L'IA n'a pas pu repondre, reessaie plus tard ». Or les causes les plus
+    frequentes sont **permanentes** — un compte sans credits ne se repare pas
+    en attendant, et le membre relance indefiniment une requete qui echouera
+    toujours. On nomme donc ce qui est nommable.
+
+    `detailler` reprend le message brut de l'API. Reserve au diagnostic
+    administrateur (`/ia statut verifier:`).
+    """
+    bas = str(detail or "").lower()
+
+    if status in (401, 403):
+        return ("La clef d'API Anthropic est refusée. Vérifie `ANTHROPIC_API_KEY` : "
+                "révoquée, expirée, ou copiée incomplètement.")
+    if status == 404:
+        # La clef est bonne, mais le compte n'a pas acces au modele demande.
+        return (f"Le modèle `{ANTHROPIC_MODEL}` est introuvable pour cette clef. "
+                "Corrige `ANTHROPIC_MODEL` sur l'hébergeur du bot.")
+    # 529 = surcharge cote Anthropic, meme conduite a tenir que 429.
+    if status in (429, 529) and "credit" not in bas:
+        return "L'IA est momentanément saturée. Réessaie dans un instant."
+
+    # Cas n°1 sur une clef neuve : elle est valide, le compte n'a simplement
+    # jamais ete credite. L'API renvoie 400, donc l'ancien code disait
+    # « reessaie plus tard » pour un probleme qui ne passera jamais tout seul.
+    if "credit balance" in bas or "billing" in bas or "purchase credits" in bas:
+        return ("Le compte Anthropic de ce ModBot n'a plus de crédits. Le propriétaire "
+                "doit en acheter sur console.anthropic.com → **Plans & Billing**. "
+                "Une clef valide ne suffit pas : l'API est payante à l'usage.")
+    if "rate limit" in bas or "quota" in bas:
+        return ("Le compte Anthropic a atteint sa limite d'usage. Réessaie plus tard, "
+                "ou augmente la limite sur console.anthropic.com.")
+
+    if detailler:
+        return f"L'API Anthropic répond {status} : {detail or 'aucun détail fourni'}"
+    return ("L'IA n'a pas pu répondre. Un administrateur peut lancer "
+            "`/ia statut verifier:Oui` pour voir la cause exacte.")
+
+
 async def ask_claude(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=False):
     """
     Appelle l'API Anthropic et retourne le texte de la reponse.
@@ -1485,24 +1528,12 @@ async def ask_claude(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detaille
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(ANTHROPIC_URL, json=charge, headers=entetes) as reponse:
                 donnees = await reponse.json(content_type=None)
-                detail = (donnees or {}).get("error", {}).get("message", "")
-                if reponse.status in (401, 403):
-                    raise AIError("La clef d'API Anthropic est refusée. "
-                                  "Vérifie `ANTHROPIC_API_KEY` : révoquée, expirée, "
-                                  "ou copiée incomplètement.")
-                if reponse.status == 404:
-                    # Cas courant et invisible autrement : la clef est bonne,
-                    # mais le compte n'a pas acces au modele demande.
-                    raise AIError(f"Le modèle `{ANTHROPIC_MODEL}` est introuvable pour "
-                                  "cette clef. Corrige `ANTHROPIC_MODEL` sur l'hébergeur.")
-                if reponse.status == 429:
-                    raise AIError("L'IA est momentanement saturee. Reessaie dans un instant.")
                 if reponse.status >= 400:
-                    print(f"Anthropic {reponse.status}: {detail}")
-                    if detailler:
-                        raise AIError(f"L'API Anthropic répond {reponse.status} : "
-                                      f"{detail or 'aucun détail fourni'}")
-                    raise AIError("L'IA n'a pas pu repondre. Reessaie plus tard.")
+                    erreur = (donnees or {}).get("error") or {}
+                    print(f"Anthropic {reponse.status} "
+                          f"[{erreur.get('type', '?')}]: {erreur.get('message', '')}")
+                    raise AIError(ai_message_erreur(
+                        reponse.status, erreur.get("message", ""), detailler))
 
         morceaux = [
             bloc.get("text", "")

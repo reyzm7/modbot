@@ -870,6 +870,37 @@ Neuf vérifications dans `test_api.py` couvrent les cinq cas : absente, vide,
 nom voisin, clef valide, préfixe inattendu — plus le fait que la clef n'est
 jamais exposée en entier.
 
+### « IA indisponible » : ne plus annoncer un problème permanent comme passager
+
+Deuxième temps du même problème. Une fois la clef posée, l'IA répondait
+« L'IA n'a pas pu répondre. Réessaie plus tard. » à chaque question.
+
+**La cause :** tout ce qui n'était ni 401 ni 429 tombait dans ce message.
+Or la panne n°1 sur une clef neuve est un **compte Anthropic sans crédits** —
+l'API renvoie un `400`, et la clef est parfaitement valide. Le bot annonçait
+donc comme temporaire une panne qui ne se répare jamais toute seule, et les
+membres relançaient indéfiniment une requête vouée à l'échec.
+
+`ai_message_erreur(status, detail, detailler)` — fonction **pure**, donc
+testable sans réseau — traduit la réponse de l'API en une phrase actionnable :
+
+| Cas | Message |
+|---|---|
+| `400` + « credit balance » / « billing » | Compte sans crédits, acheter sur console.anthropic.com → Plans & Billing |
+| `400` + « rate limit » / « quota » | Limite d'usage du compte atteinte |
+| `401` · `403` | Clef refusée : révoquée, expirée, tronquée |
+| `404` | `ANTHROPIC_MODEL` inaccessible pour cette clef |
+| `429` · `529` | Saturation réelle — le seul cas où « réessaie » est vrai |
+| autre | Renvoie vers `/ia statut verifier:Oui` au lieu d'un cul-de-sac |
+
+Le type ET le message de l'API sont désormais journalisés
+(`Anthropic 400 [invalid_request_error]: …`), au lieu du seul message.
+
+Onze vérifications supplémentaires dans `test_api.py`, dont deux qui comptent
+plus que les autres : une panne permanente ne doit **jamais** contenir
+« réessaie plus tard », et aucun message d'erreur ne doit laisser filtrer la
+clef.
+
 ### Reste à faire
 
 - Le débordement horizontal à 375 px vient du tiroir de menu `.nav-links`
