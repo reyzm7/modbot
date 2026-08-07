@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **7 août 2026** (voir §15 pour le dernier lot livré).
+> Dernière mise à jour : **7 août 2026** (voir §16 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -25,7 +25,7 @@ Attention, **Vercel suit `main`** : pousser une branche de travail ne déploie r
 Railway → Variables, pour que les deux IA fonctionnent. Tout le reste marche
 sans elle.
 
-### Chiffres au 7 août 2026 (après le lot §15)
+### Chiffres au 7 août 2026 (après le lot §16)
 
 | | |
 |---|---:|
@@ -38,7 +38,7 @@ sans elle.
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 59 + 79 + 2, tous au vert |
+| Tests | 59 + 90 + 2, tous au vert |
 
 ---
 
@@ -80,7 +80,7 @@ délibéré (voir §6).
 | `bot.py` | 12012 | Tout le câblage Discord + serveur aiohttp + API REST |
 | `security_core.py` | 1090 | Logique pure de sécurité, **aucune dépendance discord.py** |
 | `test_security.py` | 360 | 59 tests unitaires — passent tous |
-| `test_api.py` | 361 | 79 vérifications contre le vrai serveur aiohttp — passent |
+| `test_api.py` | 434 | 90 vérifications contre le vrai serveur aiohttp — passent |
 | `test_demarrage.py` | 105 | 2 scénarios de résilience au démarrage — passent |
 | `README.md` | 250 | Installation, configuration, déploiement |
 | `.env.example` | 50 | Modèle de configuration |
@@ -1017,3 +1017,79 @@ concluant.
   par téléphone) et la poser dans Railway sous le nom `MISTRAL_API_KEY`.
 - Supprimer l'ancienne variable `ANTHROPIC_API_KEY` de Railway une fois la
   nouvelle en place — elle n'est plus lue.
+
+---
+
+## 16. Livré le 7 août 2026 — l'IA connaît enfin ModBot
+
+### Le problème
+
+`build_ai_system_prompt()` faisait 216 tokens et ne contenait **aucune
+information sur ModBot** : ni l'adresse du dashboard, ni la liste des
+commandes, ni le fonctionnement des modules. À la question « comment
+j'accède au dashboard du bot ? », l'IA n'avait qu'une option : inventer une
+réponse plausible. C'est le pire comportement possible, parce qu'un membre
+n'a aucun moyen de faire la différence avec une vraie réponse.
+
+### La correction
+
+La consigne système embarque désormais trois blocs, et passe de 216 à
+~1 800 tokens (sans conséquence : le palier gratuit Mistral est à
+1 milliard de tokens/mois, et le bot est bridé à 30 requêtes/heure/serveur).
+
+**1. Connaissances produit** (`ai_connaissances_modbot()`) — accès au
+dashboard et ses deux conditions (être administrateur **et** que ModBot soit
+présent, la cause n°1 d'une liste vide), adresses du site et du wiki, les
+13 panneaux, et le fait que tout est gratuit.
+
+**2. Inventaire des commandes** (`ai_liste_commandes()`) — **généré depuis
+`bot.tree`**, pas écrit à la main. Une liste manuelle se serait
+désynchronisée au premier ajout ou retrait de commande, et l'IA aurait
+affirmé avec aplomb l'existence de commandes disparues. Les menus contextuels
+(clic droit) sont écartés : ils n'ont pas de description et ne se tapent pas.
+Résultat mis en cache — l'arbre ne bouge plus après le démarrage.
+
+**3. État réel du serveur** — `build_assistant_context()`, jusque-là réservé
+au dashboard, est réutilisé.
+
+La consigne interdit explicitement d'inventer une commande ou une adresse :
+si elle n'est pas dans l'inventaire, elle n'existe pas.
+
+### La décision qui compte : ce que voit un membre ordinaire
+
+`build_assistant_context()` gagne un paramètre `securite`. La posture
+défensive du serveur — anti-raid, anti-nuke, filtre, mode sécurité, nombre de
+sauvegardes, **permissions Discord manquantes** — n'est envoyée à l'IA que si
+la personne qui l'interroge a `manage_guild`.
+
+La raison est concrète : « est-ce que l'anti-raid est actif ? » et « quelles
+permissions manquent au bot ? » sont du repérage avant attaque. Un raideur ne
+doit pas pouvoir les poser au bot en mentionnant ModBot dans un salon public.
+Un membre ordinaire est renvoyé vers un administrateur ou vers
+`/securite status`.
+
+Le dashboard, lui, garde le contexte complet : il est déjà réservé aux
+administrateurs.
+
+### Tests
+
+| Suite | Résultat |
+|---|---|
+| `test_security.py` | **59/59** |
+| `test_api.py` | **90/90** (11 nouvelles) |
+| `test_demarrage.py` | **1/1**, 1 non concluant sans accès à `discord.com` |
+
+Les deux vérifications à ne pas casser : l'inventaire des commandes doit
+correspondre à `bot.tree` (sinon la génération ne sert plus à rien), et la
+posture de sécurité doit être **absente** de la consigne d'un non-administrateur.
+
+Vérifié aussi de bout en bout contre le faux serveur Mistral : la consigne
+part bien en premier message de rôle `system`, et contient la réponse à
+« comment j'accède au dashboard » avant même que le modèle réfléchisse.
+
+### Piste si les réponses restent trop vagues
+
+Le bloc de connaissances est volontairement court. S'il faut aller plus loin
+(expliquer le fonctionnement d'un module en détail), le bon endroit est
+`ai_connaissances_modbot()` — et non la personnalité du serveur, qui est
+prévue pour le ton, pas pour la documentation.

@@ -219,11 +219,85 @@ def verifier_extraction_detail():
     verifier("reponse vide ou illisible", lire({}) == "" and lire(None) == "")
 
 
+class FauxPermissions:
+    def __init__(self, admin):
+        self.manage_guild = admin
+        for nom in ("view_audit_log", "ban_members", "kick_members",
+                    "manage_roles", "manage_channels", "moderate_members"):
+            setattr(self, nom, True)
+
+
+class FauxMembre:
+    def __init__(self, admin, nom="Buffl"):
+        self.display_name = nom
+        self.guild_permissions = FauxPermissions(admin)
+
+
+class FauxServeur:
+    id = 1
+    name = "Serveur de test"
+    member_count = 128
+
+    class me:
+        guild_permissions = FauxPermissions(True)
+
+
+def verifier_connaissances_ia():
+    """
+    L'IA doit pouvoir repondre « comment j'accede au dashboard » sans
+    inventer. Deux exigences opposees se rencontrent ici : elle doit en
+    savoir assez sur ModBot, et pas trop sur la securite du serveur.
+    """
+    print("\n--- Ce que l'IA sait de ModBot ---")
+    prompt_admin = bot_mod.build_ai_system_prompt(
+        FauxServeur(), FauxMembre(True), {"persona": ""})
+    prompt_membre = bot_mod.build_ai_system_prompt(
+        FauxServeur(), FauxMembre(False), {"persona": ""})
+
+    verifier("l'adresse du dashboard est fournie",
+             bot_mod.DASHBOARD_SITE_URL in prompt_membre)
+    verifier("la condition d'acces au dashboard est expliquee",
+             "administrateur" in prompt_membre.lower()
+             and "présent" in prompt_membre)
+
+    # Liste generee depuis l'arbre : elle ne peut pas se desynchroniser.
+    inventaire = bot_mod.ai_liste_commandes()
+    noms_arbre = {c.name for c in bot_mod.bot.tree.get_commands()
+                  if getattr(c, "description", None) or getattr(c, "commands", None)}
+    verifier("l'inventaire des commandes vient de l'arbre reel",
+             noms_arbre and all(f"/{n}" in inventaire for n in noms_arbre),
+             f"{len(noms_arbre)} commandes racine")
+    verifier("les sous-commandes sont listees", "/backup restore" in inventaire)
+    verifier("l'inventaire est dans la consigne", "/backup restore" in prompt_membre)
+    verifier("l'IA a interdiction d'inventer une commande",
+             "N'invente jamais" in prompt_membre)
+
+    # Le point qui compte : un raideur ne doit pas pouvoir sonder les defenses.
+    posture = ("Anti-raid", "Anti-nuke", "Mode sécurité",
+               "Sauvegardes enregistrées", "Permissions Discord manquantes")
+    verifier("membre ordinaire : posture de securite masquee",
+             not any(mot in prompt_membre for mot in posture))
+    verifier("administrateur : posture de securite fournie",
+             all(mot in prompt_admin for mot in posture))
+    verifier("membre ordinaire : renvoye vers un administrateur",
+             "/securite status" in prompt_membre)
+
+    # La consigne du serveur reste prise en compte apres l'ajout des connaissances.
+    perso = bot_mod.build_ai_system_prompt(
+        FauxServeur(), FauxMembre(False), {"persona": "Parle comme un pirate."})
+    verifier("la personnalite du serveur est conservee",
+             "Parle comme un pirate." in perso)
+
+    verifier("aucun secret dans la consigne",
+             bot_mod.MISTRAL_API_KEY not in prompt_admin or not bot_mod.MISTRAL_API_KEY)
+
+
 async def main():
     verifier_repartition_langues()
     verifier_diagnostic_ia()
     verifier_erreurs_ia()
     verifier_extraction_detail()
+    verifier_connaissances_ia()
     await bot_mod.start_dashboard_api()
     await asyncio.sleep(0.4)
 
