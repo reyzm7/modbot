@@ -1356,12 +1356,22 @@ def get_msg_count(uid, gid):
 #  INTELLIGENCE ARTIFICIELLE
 # ════════════════════════════════════════════════
 
+# Fournisseur : Mistral AI. Choisi pour trois raisons, dans cet ordre :
+#   1. son palier gratuit est utilisable par un bot qui sert des membres
+#      europeens — celui de Google ne l'est pas (ses conditions imposent le
+#      payant des que le service s'adresse a des utilisateurs EEE/CH/UK) ;
+#   2. c'est une societe francaise, donc pas de bascule juridique a prevoir
+#      pour un serveur Discord francophone ;
+#   3. le francais y est de bonne qualite, ce qui est le seul usage ici.
+#
+# L'API est compatible OpenAI : messages [{role, content}] avec role parmi
+# system / user / assistant. L'historique du bot est deja dans ce format.
+#
 # La clef vit uniquement cote serveur. Elle n'est jamais renvoyee au
 # navigateur : le dashboard passe par /api/guilds/{id}/assistant, qui relaie.
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5").strip()
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_VERSION = "2023-06-01"
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "").strip()
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "mistral-small-latest").strip()
+MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 
 # Les variables d'environnement sont lues UNE FOIS, au demarrage du processus.
 # Une variable ajoutee sur l'hebergeur pendant que le bot tourne n'entre donc
@@ -1370,13 +1380,15 @@ ANTHROPIC_VERSION = "2023-06-01"
 # le voir. On la garde pour pouvoir la comparer a l'heure du reglage.
 PROCESS_STARTED_AT = now()
 
-# Noms deja vus a la place de ANTHROPIC_API_KEY. Sert a dire « tu as pose
-# CLAUDE_API_KEY, le bot attend ANTHROPIC_API_KEY » au lieu de « absente ».
+# Noms deja vus a la place de MISTRAL_API_KEY. Sert a dire « tu as pose
+# MISTRAL_KEY, le bot attend MISTRAL_API_KEY » au lieu de « absente ».
+# Les noms Anthropic restent listes : une installation qui vient de l'ancien
+# fournisseur a encore ANTHROPIC_API_KEY posee, et doit etre orientee.
 AI_KEY_VARIANTES = {
-    "ANTHROPIC_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_API", "ANTHROPIC_TOKEN",
-    "ANTHROPIC_SECRET", "ANTHROPIC_SECRET_KEY", "ANTROPIC_API_KEY",
-    "ANTHROPHIC_API_KEY", "CLAUDE_API_KEY", "CLAUDE_KEY", "CLAUDE_TOKEN",
-    "API_KEY_ANTHROPIC", "AI_API_KEY",
+    "MISTRAL_KEY", "MISTRAL_APIKEY", "MISTRAL_API", "MISTRAL_TOKEN",
+    "MISTRAL_SECRET", "MISTRAL_SECRET_KEY", "MISTRALAI_API_KEY",
+    "MISTRAL_AI_API_KEY", "API_KEY_MISTRAL", "AI_API_KEY",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_KEY", "CLAUDE_API_KEY",
 }
 
 AI_MAX_TOKENS = 700
@@ -1393,7 +1405,7 @@ _ai_last_use: dict = {}
 
 
 def ai_available():
-    return bool(ANTHROPIC_API_KEY)
+    return bool(MISTRAL_API_KEY)
 
 
 def ai_diagnostic():
@@ -1405,46 +1417,49 @@ def ai_diagnostic():
       1. la variable n'existe pas dans ce processus — mauvais service, mauvais
          environnement, ou ajoutee sans redemarrage ;
       2. elle existe mais elle est vide ;
-      3. elle a ete posee sous un autre nom (CLAUDE_API_KEY, faute de frappe...).
+      3. elle a ete posee sous un autre nom (MISTRAL_KEY, ou la variable de
+         l'ancien fournisseur ANTHROPIC_API_KEY, faute de frappe...).
 
     La clef elle-meme n'est jamais renvoyee : seulement sa longueur et ses
     premiers caracteres, de quoi verifier qu'on a colle la bonne chose.
     """
-    brute = os.environ.get("ANTHROPIC_API_KEY")
+    brute = os.environ.get("MISTRAL_API_KEY")
     similaires = sorted(
         nom for nom in os.environ
-        if nom != "ANTHROPIC_API_KEY"
+        if nom != "MISTRAL_API_KEY"
         and (nom.strip().upper() in AI_KEY_VARIANTES
-             or nom.strip().upper() == "ANTHROPIC_API_KEY"
-             or ("ANTHROPIC" in nom.upper() and "KEY" in nom.upper()))
+             or nom.strip().upper() == "MISTRAL_API_KEY"
+             or ("MISTRAL" in nom.upper() and "KEY" in nom.upper()))
     )
     return {
         "configured": ai_available(),
         "defined": brute is not None,
         "empty": brute is not None and not brute.strip(),
-        "length": len(ANTHROPIC_API_KEY),
-        "prefix": ANTHROPIC_API_KEY[:8] if ANTHROPIC_API_KEY else "",
-        "expected_prefix": ANTHROPIC_API_KEY.startswith("sk-ant-"),
+        "length": len(MISTRAL_API_KEY),
+        "prefix": MISTRAL_API_KEY[:8] if MISTRAL_API_KEY else "",
+        # Mistral ne publie pas de prefixe stable : on verifie seulement que la
+        # clef a une longueur plausible, plutot que d'inventer un motif.
+        "expected_prefix": len(MISTRAL_API_KEY) >= 24,
         "similar_names": similaires,
-        "model": ANTHROPIC_MODEL,
+        "model": MISTRAL_MODEL,
         "started_at": PROCESS_STARTED_AT.isoformat(),
     }
 
 
 async def ai_verifier_clef():
     """
-    Plus petit appel possible a l'API Anthropic, pour separer « clef presente »
-    de « clef qui marche » : une clef revoquee, expiree, ou un modele auquel le
-    compte n'a pas droit donnent tous les trois une clef *presente*.
+    Plus petit appel possible a l'API, pour separer « clef presente » de
+    « clef qui marche » : une clef revoquee, un quota epuise, ou un modele
+    auquel le compte n'a pas droit donnent tous les trois une clef *presente*.
 
     Retourne (ok, message deja formule en francais).
     """
     if not ai_available():
         return False, "Aucune clef n'est chargée dans ce processus."
     try:
-        await ask_claude([{"role": "user", "content": "ping"}],
-                         "Réponds exactement : pong", max_tokens=8, detailler=True)
-        return True, f"Clef acceptée, modèle `{ANTHROPIC_MODEL}` joignable."
+        await ask_ai([{"role": "user", "content": "ping"}],
+                     "Réponds exactement : pong", max_tokens=8, detailler=True)
+        return True, f"Clef acceptée, modèle `{MISTRAL_MODEL}` joignable."
     except AIError as ex:
         return False, str(ex)
 
@@ -1455,11 +1470,11 @@ class AIError(Exception):
 
 def ai_message_erreur(status, detail="", detailler=False):
     """
-    Traduit une erreur de l'API Anthropic en une phrase actionnable.
+    Traduit une erreur de l'API Mistral en une phrase actionnable.
 
     Le piege repare ici : tout ce qui n'etait ni 401 ni 429 tombait dans
     « L'IA n'a pas pu repondre, reessaie plus tard ». Or les causes les plus
-    frequentes sont **permanentes** — un compte sans credits ne se repare pas
+    frequentes sont **permanentes** — un compte sans quota ne se repare pas
     en attendant, et le membre relance indefiniment une requete qui echouera
     toujours. On nomme donc ce qui est nommable.
 
@@ -1469,39 +1484,74 @@ def ai_message_erreur(status, detail="", detailler=False):
     bas = str(detail or "").lower()
 
     if status in (401, 403):
-        return ("La clef d'API Anthropic est refusée. Vérifie `ANTHROPIC_API_KEY` : "
+        return ("La clef d'API Mistral est refusée. Vérifie `MISTRAL_API_KEY` : "
                 "révoquée, expirée, ou copiée incomplètement.")
     if status == 404:
         # La clef est bonne, mais le compte n'a pas acces au modele demande.
-        return (f"Le modèle `{ANTHROPIC_MODEL}` est introuvable pour cette clef. "
-                "Corrige `ANTHROPIC_MODEL` sur l'hébergeur du bot.")
-    # 529 = surcharge cote Anthropic, meme conduite a tenir que 429.
-    if status in (429, 529) and "credit" not in bas:
-        return "L'IA est momentanément saturée. Réessaie dans un instant."
+        return (f"Le modèle `{MISTRAL_MODEL}` est introuvable pour cette clef. "
+                "Corrige `MISTRAL_MODEL` sur l'hébergeur du bot.")
+    if status == 422:
+        # Requete mal formee : c'est un bug du bot, pas un probleme de compte.
+        return ("La requête envoyée à l'IA a été refusée comme invalide. "
+                "C'est un défaut du bot, pas de ta configuration.")
 
-    # Cas n°1 sur une clef neuve : elle est valide, le compte n'a simplement
-    # jamais ete credite. L'API renvoie 400, donc l'ancien code disait
-    # « reessaie plus tard » pour un probleme qui ne passera jamais tout seul.
-    if "credit balance" in bas or "billing" in bas or "purchase credits" in bas:
-        return ("Le compte Anthropic de ce ModBot n'a plus de crédits. Le propriétaire "
-                "doit en acheter sur console.anthropic.com → **Plans & Billing**. "
-                "Une clef valide ne suffit pas : l'API est payante à l'usage.")
-    if "rate limit" in bas or "quota" in bas:
-        return ("Le compte Anthropic a atteint sa limite d'usage. Réessaie plus tard, "
-                "ou augmente la limite sur console.anthropic.com.")
+    # Le palier gratuit se manifeste par un 429 : quota epuise. C'est
+    # temporaire (il se recharge), contrairement a une clef revoquee.
+    if status == 429 or "rate limit" in bas or "quota" in bas or "capacity" in bas:
+        return ("L'IA a atteint sa limite de requêtes. C'est le quota du palier "
+                "gratuit : il se recharge tout seul, réessaie dans un moment.")
+    if status in (500, 502, 503, 504):
+        return "Le service d'IA est momentanément indisponible. Réessaie dans un instant."
+
+    # Compte suspendu ou desactive : permanent, ne jamais annoncer « reessaie ».
+    if "inactive" in bas or "suspend" in bas or "subscription" in bas:
+        return ("Le compte Mistral de ce ModBot est inactif ou suspendu. Le propriétaire "
+                "doit le vérifier sur console.mistral.ai — réessayer n'y changera rien.")
 
     if detailler:
-        return f"L'API Anthropic répond {status} : {detail or 'aucun détail fourni'}"
+        return f"L'API Mistral répond {status} : {detail or 'aucun détail fourni'}"
     return ("L'IA n'a pas pu répondre. Un administrateur peut lancer "
             "`/ia statut verifier:Oui` pour voir la cause exacte.")
 
 
-async def ask_claude(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=False):
+def ai_detail_erreur(donnees):
     """
-    Appelle l'API Anthropic et retourne le texte de la reponse.
+    Extrait le message d'erreur d'une reponse Mistral.
+
+    Le format n'est pas stable d'un code HTTP a l'autre : selon le cas c'est
+    `{"message": ...}`, `{"error": {"message": ...}}`, ou le `{"detail": ...}`
+    de la couche de validation, ou `detail` est parfois une liste. On les
+    couvre tous plutot que de renvoyer une chaine vide au diagnostic.
+    """
+    if not isinstance(donnees, dict):
+        return ""
+    erreur = donnees.get("error")
+    if isinstance(erreur, dict) and erreur.get("message"):
+        return str(erreur["message"])
+    if isinstance(erreur, str) and erreur:
+        return erreur
+    if donnees.get("message"):
+        return str(donnees["message"])
+    detail = donnees.get("detail")
+    if isinstance(detail, list):
+        return " ; ".join(
+            str(d.get("msg") or d) for d in detail if d)[:400]
+    if detail:
+        return str(detail)
+    return ""
+
+
+async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=False):
+    """
+    Appelle l'API Mistral et retourne le texte de la reponse.
 
     Leve AIError avec un message lisible : l'appelant l'affiche tel quel,
     sans jamais exposer la clef ni la reponse brute de l'API.
+
+    `messages` est l'historique du bot, deja au format {role, content} avec
+    role parmi user / assistant — c'est exactement ce qu'attend Mistral. La
+    consigne systeme, elle, se passe comme un message de role `system` en tete
+    de la liste (et non dans un champ separe comme chez d'autres fournisseurs).
 
     `detailler` reprend le message d'erreur brut de l'API. Reserve au
     diagnostic administrateur (`/ia statut verifier:`) : un membre ordinaire
@@ -1509,38 +1559,34 @@ async def ask_claude(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detaille
     """
     if not ai_available():
         raise AIError("L'IA n'est pas configuree sur ce ModBot. "
-                      "Un administrateur doit definir `ANTHROPIC_API_KEY`.")
+                      "Un administrateur doit definir `MISTRAL_API_KEY`.")
 
     charge = {
-        "model": ANTHROPIC_MODEL,
+        "model": MISTRAL_MODEL,
         "max_tokens": max_tokens,
-        "system": system_prompt,
-        "messages": messages,
+        "messages": ([{"role": "system", "content": system_prompt}] if system_prompt
+                     else []) + list(messages),
     }
     entetes = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
+        "Authorization": f"Bearer {MISTRAL_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
     }
 
     try:
         timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(ANTHROPIC_URL, json=charge, headers=entetes) as reponse:
+            async with session.post(MISTRAL_URL, json=charge, headers=entetes) as reponse:
                 donnees = await reponse.json(content_type=None)
                 if reponse.status >= 400:
-                    erreur = (donnees or {}).get("error") or {}
-                    print(f"Anthropic {reponse.status} "
-                          f"[{erreur.get('type', '?')}]: {erreur.get('message', '')}")
-                    raise AIError(ai_message_erreur(
-                        reponse.status, erreur.get("message", ""), detailler))
+                    detail = ai_detail_erreur(donnees)
+                    print(f"Mistral {reponse.status}: {detail}")
+                    raise AIError(ai_message_erreur(reponse.status, detail, detailler))
 
-        morceaux = [
-            bloc.get("text", "")
-            for bloc in (donnees or {}).get("content", [])
-            if bloc.get("type") == "text"
-        ]
-        texte = "\n".join(m for m in morceaux if m).strip()
+        choix = (donnees or {}).get("choices") or []
+        texte = ""
+        if choix:
+            texte = str((choix[0].get("message") or {}).get("content") or "").strip()
         if not texte:
             raise AIError("L'IA a renvoye une reponse vide.")
         return texte
@@ -1550,7 +1596,7 @@ async def ask_claude(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detaille
     except asyncio.TimeoutError:
         raise AIError("L'IA met trop de temps a repondre. Reessaie.")
     except aiohttp.ClientError as ex:
-        print(f"Anthropic reseau: {ex}")
+        print(f"Mistral reseau: {ex}")
         raise AIError("Impossible de joindre l'IA. Verifie la connexion du bot.")
 
 
@@ -1709,7 +1755,7 @@ async def handle_ai_mention(message):
 
     try:
         async with message.channel.typing():
-            reponse = await ask_claude(
+            reponse = await ask_ai(
                 historique, build_ai_system_prompt(message.guild, message.author, reglages))
     except AIError as ex:
         try:
@@ -4891,7 +4937,7 @@ def serialize_security_config(guild):
             "interval_hours": int(cfg.get("auto_backup_interval_hours") or 24),
             "last": cfg.get("auto_backup_last") or "",
         },
-        "ai": {**ai_cfg(gid), "configured": ai_available(), "model": ANTHROPIC_MODEL},
+        "ai": {**ai_cfg(gid), "configured": ai_available(), "model": MISTRAL_MODEL},
         "logs_enabled": cfg.get("logs_enabled") if isinstance(cfg.get("logs_enabled"), dict) else {},
         "permissions": {
             "view_audit_log": perms.view_audit_log,
@@ -5681,7 +5727,7 @@ async def api_assistant(request):
 
     if not ai_available():
         raise web.HTTPServiceUnavailable(
-            text="L'assistant IA n'est pas configure. Definis ANTHROPIC_API_KEY cote bot.")
+            text="L'assistant IA n'est pas configure. Definis MISTRAL_API_KEY cote bot.")
 
     question = str(payload.get("question") or "").strip()
     if not question:
@@ -5707,7 +5753,7 @@ async def api_assistant(request):
     historique.append({"role": "user", "content": question})
 
     try:
-        reponse = await ask_claude(historique, build_assistant_system_prompt(guild))
+        reponse = await ask_ai(historique, build_assistant_system_prompt(guild))
     except AIError as ex:
         raise web.HTTPBadGateway(text=str(ex))
 
@@ -6088,17 +6134,17 @@ async def start_dashboard_api():
     diag = ai_diagnostic()
     if diag["configured"]:
         print(f"  • IA prete — clef {diag['prefix']}… ({diag['length']} caracteres), "
-              f"modele {ANTHROPIC_MODEL}")
+              f"modele {MISTRAL_MODEL}")
         if not diag["expected_prefix"]:
-            print("    ⚠️  Une clef Anthropic commence normalement par 'sk-ant-'.")
+            print("    ⚠️  Cette clef est courte pour une clef Mistral — verifie la copie.")
     elif diag["similar_names"]:
         print(f"  ⚠️  IA non configuree — variables proches trouvees : "
               f"{', '.join(diag['similar_names'])}")
-        print("     Le bot lit exactement ANTHROPIC_API_KEY. Renomme la variable.")
+        print("     Le bot lit exactement MISTRAL_API_KEY. Renomme la variable.")
     elif diag["empty"]:
-        print("  ⚠️  IA non configuree — ANTHROPIC_API_KEY existe mais est vide.")
+        print("  ⚠️  IA non configuree — MISTRAL_API_KEY existe mais est vide.")
     else:
-        print("  ⚠️  IA non configuree — ANTHROPIC_API_KEY absente de ce processus.")
+        print("  ⚠️  IA non configuree — MISTRAL_API_KEY absente de ce processus.")
         print("     Ajoutee apres coup ? Les variables ne sont lues qu'au demarrage :")
         print("     redeploie le service pour qu'elle soit prise en compte.")
 
@@ -10563,27 +10609,27 @@ async def ia_oublier(i: discord.Interaction):
 def ai_conseil_configuration(diag):
     """
     Transforme le diagnostic brut en une consigne unique et actionnable.
-    Repeter « definis ANTHROPIC_API_KEY » a quelqu'un qui vient de le faire
+    Repeter « definis MISTRAL_API_KEY » a quelqu'un qui vient de le faire
     ne l'aide pas : il faut lui dire ce qui cloche precisement.
     """
     if diag["similar_names"]:
         noms = ", ".join(f"`{n}`" for n in diag["similar_names"][:4])
         return ("Nom de variable incorrect",
                 f"L'hébergeur fournit {noms}, mais le bot lit exactement "
-                "`ANTHROPIC_API_KEY`. Renomme la variable, puis redémarre le bot.")
+                "`MISTRAL_API_KEY`. Renomme la variable, puis redémarre le bot.")
     if diag["empty"]:
         return ("Variable vide",
-                "`ANTHROPIC_API_KEY` existe bien mais ne contient rien. "
+                "`MISTRAL_API_KEY` existe bien mais ne contient rien. "
                 "Recolle la clef, puis redémarre le bot.")
     return ("Variable absente de ce processus",
-            "Le bot n'a **pas** vu `ANTHROPIC_API_KEY` au démarrage. Les variables "
+            "Le bot n'a **pas** vu `MISTRAL_API_KEY` au démarrage. Les variables "
             "ne sont lues qu'au lancement : si tu l'as ajoutée après, **redéploie ou "
             "redémarre le service**. Vérifie aussi que la variable est posée sur *ce* "
             "service et dans *cet* environnement de l'hébergeur.")
 
 
 @ia_group.command(name="statut", description="Voir l'etat de l'IA")
-@app_commands.describe(verifier="Tester la clef par un vrai appel a l'API Anthropic")
+@app_commands.describe(verifier="Tester la clef par un vrai appel a l'API Mistral")
 async def ia_statut(i: discord.Interaction, verifier: bool = False):
     gid = str(i.guild.id)
     reglages = ai_cfg(gid)
@@ -10593,7 +10639,7 @@ async def ia_statut(i: discord.Interaction, verifier: bool = False):
     embed.add_field(name="Etat", value="`Actif`" if reglages["enabled"] else "`Inactif`", inline=True)
     embed.add_field(name="Clef API",
                     value="`Configuree`" if diag["configured"] else "`Absente`", inline=True)
-    embed.add_field(name="Modele", value=f"`{ANTHROPIC_MODEL}`", inline=True)
+    embed.add_field(name="Modele", value=f"`{MISTRAL_MODEL}`", inline=True)
     embed.add_field(
         name="📍 Salons",
         value=(" ".join(f"<#{c}>" for c in reglages["channels"])
@@ -10616,7 +10662,7 @@ async def ia_statut(i: discord.Interaction, verifier: bool = False):
     else:
         empreinte = f"`{diag['prefix']}…` · {diag['length']} caractères"
         if not diag["expected_prefix"]:
-            empreinte += "\n⚠️ Une clef Anthropic commence normalement par `sk-ant-`."
+            empreinte += "\n⚠️ Cette clef est courte pour une clef Mistral — vérifie la copie."
         embed.add_field(name="🔑 Clef chargee", value=empreinte, inline=False)
 
     if verifier:

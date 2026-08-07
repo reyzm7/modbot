@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **7 août 2026** (voir §14 pour le dernier lot livré).
+> Dernière mise à jour : **7 août 2026** (voir §15 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -21,15 +21,15 @@ git clone https://github.com/reyzm7/modbot-site.git
 **Déploiement automatique au push :** `modbot` → Railway, `modbot-site` → Vercel.
 Attention, **Vercel suit `main`** : pousser une branche de travail ne déploie rien.
 
-**Une seule action reste côté humain :** définir `ANTHROPIC_API_KEY` dans
+**Une seule action reste côté humain :** définir `MISTRAL_API_KEY` dans
 Railway → Variables, pour que les deux IA fonctionnent. Tout le reste marche
 sans elle.
 
-### Chiffres au 7 août 2026 (après le lot §14)
+### Chiffres au 7 août 2026 (après le lot §15)
 
 | | |
 |---|---:|
-| `bot.py` | 11 787 lignes |
+| `bot.py` | 12 012 lignes |
 | `security_core.py` | 1 090 lignes |
 | `script.js` | 4 726 lignes |
 | `style.css` | 7 683 lignes |
@@ -38,7 +38,7 @@ sans elle.
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 59 + 47 + 2, tous au vert |
+| Tests | 59 + 79 + 2, tous au vert |
 
 ---
 
@@ -77,10 +77,10 @@ délibéré (voir §6).
 
 | Fichier | Lignes | Rôle |
 |---|---:|---|
-| `bot.py` | 11787 | Tout le câblage Discord + serveur aiohttp + API REST |
+| `bot.py` | 12012 | Tout le câblage Discord + serveur aiohttp + API REST |
 | `security_core.py` | 1090 | Logique pure de sécurité, **aucune dépendance discord.py** |
 | `test_security.py` | 360 | 59 tests unitaires — passent tous |
-| `test_api.py` | 260 | 59 vérifications contre le vrai serveur aiohttp — passent |
+| `test_api.py` | 361 | 79 vérifications contre le vrai serveur aiohttp — passent |
 | `test_demarrage.py` | 105 | 2 scénarios de résilience au démarrage — passent |
 | `README.md` | 250 | Installation, configuration, déploiement |
 | `.env.example` | 50 | Modèle de configuration |
@@ -711,8 +711,8 @@ fermé — il n'est plus atteignable au clavier.
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | *(vide)* | **Requise pour les deux IA.** Lue **au démarrage uniquement** : après l'avoir ajoutée, il faut redéployer. `/ia statut` dit ce que le processus voit réellement |
-| `ANTHROPIC_MODEL` | `claude-sonnet-5` | Modèle utilisé |
+| `MISTRAL_API_KEY` | *(vide)* | **Requise pour les deux IA.** Clef gratuite sur console.mistral.ai. Lue **au démarrage uniquement** : après l'avoir ajoutée, il faut redéployer. `/ia statut` dit ce que le processus voit réellement |
+| `MISTRAL_MODEL` | `mistral-small-latest` | Modèle utilisé |
 
 ### Fichiers à ne pas versionner (ajoutés)
 
@@ -833,6 +833,11 @@ chargement sans erreur JS des quatre pages du site.
 
 ### Diagnostic de la configuration IA (ajouté après coup)
 
+> ℹ️ Cette section décrit le fournisseur **Anthropic**, remplacé depuis par
+> Mistral (§15). Les mécanismes décrits — diagnostic, date de démarrage,
+> traduction des erreurs — ont été conservés et portés ; seuls les noms de
+> variables et les codes HTTP changent.
+
 `/ia activer` répondait « IA non configurée » alors que `ANTHROPIC_API_KEY`
 était bien posée sur Railway. Le message était le même dans trois situations
 qui ne se corrigent pas de la même façon, et ne donnait aucun moyen de les
@@ -909,4 +914,106 @@ clef.
 - Le module « tournois » a été retiré de l'interface mais `bot.py` et
   `style.css` gardent quelques traces (`tournament`, `.tournament-command-grid`).
   Même nature que le premium, à nettoyer de la même façon.
-- `ANTHROPIC_API_KEY` reste à définir dans Railway pour les deux IA.
+- `MISTRAL_API_KEY` reste à définir dans Railway pour les deux IA (§15).
+
+---
+
+## 15. Livré le 7 août 2026 — l'IA passe sur Mistral (gratuit)
+
+### Pourquoi changer de fournisseur
+
+L'API Anthropic est payante à l'usage et le compte n'avait pas de crédits :
+`/ia activer` marchait, mais chaque question renvoyait une erreur. La demande
+était donc « peut-on avoir l'IA gratuitement ». Réponse : oui, mais pas avec
+n'importe qui.
+
+**Le piège évité — à connaître avant de proposer Google.** Le palier gratuit
+de Gemini paraît idéal (~1 500 requêtes/jour, sans carte). Il est
+**inutilisable ici** : les conditions additionnelles de Google imposent les
+services *payants* dès que le client d'API s'adresse à des utilisateurs de
+l'**EEE, de Suisse ou du Royaume-Uni**. Les membres des serveurs ModBot sont
+francophones et européens — le gratuit n'est pas une option légale pour eux,
+il faudrait activer la facturation, ce qui annule l'intérêt. Ne pas rouvrir
+cette piste sans relire ce paragraphe.
+
+**Mistral AI a été retenu** pour trois raisons, dans cet ordre :
+
+1. son palier gratuit (« Experiment », sans carte, vérification par téléphone)
+   est utilisable pour servir des membres européens ;
+2. c'est une société française — pas de bascule juridique à prévoir ;
+3. le français y est de bonne qualité, et c'est le seul usage ici.
+
+Le quota gratuit (~1 milliard de tokens/mois) est sans commune mesure avec le
+besoin : un échange coûte environ 820 tokens, et le bot est **déjà** bridé à
+30 requêtes/heure/serveur, soit ~22 000 échanges/mois pour un serveur qui
+saturerait en permanence.
+
+### Ce qui change dans le code
+
+| Avant | Après |
+|---|---|
+| `ANTHROPIC_API_KEY` | `MISTRAL_API_KEY` |
+| `ANTHROPIC_MODEL` = `claude-sonnet-5` | `MISTRAL_MODEL` = `mistral-small-latest` |
+| `ask_claude()` | `ask_ai()` |
+| `x-api-key` + `anthropic-version` | `Authorization: Bearer` |
+| `system` dans un champ séparé | message de rôle `system` en tête de `messages` |
+| réponse dans `content[].text` | réponse dans `choices[0].message.content` |
+
+**L'API Mistral est compatible OpenAI**, donc l'historique du bot — déjà stocké
+en `{role, content}` avec `user`/`assistant` — passe tel quel. C'est le seul
+endroit où la migration n'a rien coûté.
+
+Tout le reste est conservé à l'identique : commandes `/ia`, assistant du
+dashboard, quotas, cooldown, contexte par salon, et **tout l'outillage de
+diagnostic du §14** (`ai_diagnostic()`, date de démarrage, `/ia statut
+verifier:Oui`, `ai_configured` sur `/api/health`).
+
+### Traduction des erreurs, réétalonnée
+
+Les codes HTTP de Mistral ne sont pas ceux d'Anthropic. Le principe du §14
+tient — ne jamais annoncer comme passager un problème permanent — mais il joue
+maintenant **dans les deux sens** :
+
+| Cas | Message |
+|---|---|
+| `429` | Quota du palier gratuit atteint — **se recharge tout seul**, réessayer est le bon conseil |
+| `401` · `403` | Clef refusée : révoquée, expirée, tronquée |
+| `404` | `MISTRAL_MODEL` inaccessible pour cette clef |
+| `422` | Requête invalide — c'est un défaut du bot, pas de la configuration |
+| `5xx` | Service momentanément indisponible |
+| « inactive » / « suspend » | Compte suspendu — **permanent**, réessayer n'y changera rien |
+
+`ai_detail_erreur()` a été ajoutée parce que Mistral ne renvoie pas ses erreurs
+sous une forme unique : `{message}`, `{error:{message}}`, `{error: texte}`,
+`{detail: texte}` et `{detail:[{msg}]}` sont tous rencontrés. Sans elle, le
+diagnostic administrateur affichait « aucun détail fourni » alors que l'API
+avait dit précisément ce qui n'allait pas.
+
+### Migration d'une installation existante
+
+`AI_KEY_VARIANTES` liste toujours `ANTHROPIC_API_KEY` : une installation qui
+vient de l'ancien fournisseur voit donc « **Nom de variable incorrect** — ton
+hébergeur fournit `ANTHROPIC_API_KEY`, le bot lit `MISTRAL_API_KEY` », au lieu
+du « variable absente » qui l'enverrait chercher au mauvais endroit. Un test
+verrouille ce comportement.
+
+### Tests
+
+| Suite | Résultat |
+|---|---|
+| `test_security.py` | **59/59** |
+| `test_api.py` | **79/79** |
+| `test_demarrage.py` | **1/1**, 1 non concluant sans accès à `discord.com` |
+
+Vérifié aussi contre un **faux serveur Mistral local**, ce que les tests seuls
+ne prouvent pas : en-tête `Authorization: Bearer`, consigne système bien placée
+en tête des messages, alternance `user`/`assistant` de l'historique préservée,
+429 traduit correctement, réponse vide gérée, et `/ia statut verifier:Oui`
+concluant.
+
+### Reste à faire
+
+- Créer la clef sur **console.mistral.ai** (gratuit, sans carte, vérification
+  par téléphone) et la poser dans Railway sous le nom `MISTRAL_API_KEY`.
+- Supprimer l'ancienne variable `ANTHROPIC_API_KEY` de Railway une fois la
+  nouvelle en place — elle n'est plus lue.

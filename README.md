@@ -341,6 +341,13 @@ Il n'y a pas d'offre payante, pas de module verrouillé, pas de compte à
 créer. Le projet est financé par des dons libres sur
 [paypal.me/hazkes](https://paypal.me/hazkes).
 
+**Pour héberger ton propre ModBot**, une seule chose peut coûter : l'IA. Elle
+tourne sur [Mistral AI](https://console.mistral.ai), dont le palier
+« Experiment » est **gratuit et sans carte bancaire** — largement suffisant
+ici, le bot étant bridé à 30 requêtes/heure/serveur. Pose la clef dans
+`MISTRAL_API_KEY` et c'est réglé. Sans elle, tout le reste fonctionne :
+les commandes IA expliquent simplement ce qui manque.
+
 ---
 
 ## 9. Structure

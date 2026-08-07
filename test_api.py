@@ -106,19 +106,20 @@ def verifier_diagnostic_ia():
     que le bot ne renvoie pas la meme consigne inutile dans les trois cas.
     """
     print("\n--- Diagnostic de la configuration IA ---")
-    cle = "ANTHROPIC_API_KEY"
+    cle = "MISTRAL_API_KEY"
+    parasites = ("ANTHROPIC_API_KEY", "MISTRAL_KEY", "CLAUDE_API_KEY")
     sauvegarde = dict(os.environ)
-    clef_module = bot_mod.ANTHROPIC_API_KEY
+    clef_module = bot_mod.MISTRAL_API_KEY
 
     def poser(valeur, autres=()):
         os.environ.pop(cle, None)
-        for parasite in ("CLAUDE_API_KEY", "ANTHROPIC_KEY"):
+        for parasite in parasites:
             os.environ.pop(parasite, None)
         for nom, val in autres:
             os.environ[nom] = val
         if valeur is not None:
             os.environ[cle] = valeur
-        bot_mod.ANTHROPIC_API_KEY = (valeur or "").strip()
+        bot_mod.MISTRAL_API_KEY = (valeur or "").strip()
         return bot_mod.ai_diagnostic()
 
     try:
@@ -134,65 +135,95 @@ def verifier_diagnostic_ia():
         titre, _ = bot_mod.ai_conseil_configuration(d)
         verifier("consigne : variable vide", "vide" in titre.lower())
 
-        d = poser(None, autres=[("CLAUDE_API_KEY", "sk-ant-api03-zzz")])
-        verifier("nom voisin repere", d["similar_names"] == ["CLAUDE_API_KEY"],
+        d = poser(None, autres=[("MISTRAL_KEY", "z" * 32)])
+        verifier("nom voisin repere", d["similar_names"] == ["MISTRAL_KEY"],
                  str(d["similar_names"]))
         titre, corps = bot_mod.ai_conseil_configuration(d)
         verifier("consigne : renommer la variable",
-                 "nom" in titre.lower() and "CLAUDE_API_KEY" in corps)
+                 "nom" in titre.lower() and "MISTRAL_KEY" in corps)
 
-        d = poser("sk-ant-api03-" + "x" * 80)
-        verifier("clef valide reconnue", d["configured"] and d["expected_prefix"])
+        # Une installation qui vient de l'ancien fournisseur garde sa variable
+        # Anthropic : le bot doit l'orienter au lieu de dire « absente ».
+        d = poser(None, autres=[("ANTHROPIC_API_KEY", "sk-ant-api03-zzz")])
+        verifier("ancienne variable Anthropic reperee comme nom voisin",
+                 d["similar_names"] == ["ANTHROPIC_API_KEY"], str(d["similar_names"]))
+
+        d = poser("x" * 32)
+        verifier("clef plausible reconnue", d["configured"] and d["expected_prefix"])
         verifier("la clef n'est jamais exposee en entier",
                  len(d["prefix"]) <= 8 and "x" * 20 not in str(d))
 
-        d = poser("AKIAIOSFODNN7EXAMPLE")
-        verifier("prefixe inattendu signale", d["configured"] and not d["expected_prefix"])
+        d = poser("court")
+        verifier("clef trop courte signalee", d["configured"] and not d["expected_prefix"])
     finally:
         os.environ.clear()
         os.environ.update(sauvegarde)
-        bot_mod.ANTHROPIC_API_KEY = clef_module
+        bot_mod.MISTRAL_API_KEY = clef_module
 
 
 def verifier_erreurs_ia():
     """
-    Une erreur permanente ne doit jamais s'annoncer comme temporaire : dire
-    « reessaie plus tard » a un compte sans credits fait relancer indefiniment
-    une requete qui echouera toujours.
+    Une erreur permanente ne doit jamais s'annoncer comme temporaire, et
+    l'inverse non plus : sur le palier gratuit, un quota epuise se recharge
+    tout seul et doit inviter a reessayer, alors qu'un compte suspendu ne
+    passera jamais et ne doit pas faire relancer indefiniment.
     """
-    print("\n--- Traduction des erreurs de l'API Anthropic ---")
+    print("\n--- Traduction des erreurs de l'API Mistral ---")
     msg = bot_mod.ai_message_erreur
 
-    credit = msg(400, "Your credit balance is too low to access the Anthropic API. "
-                      "Please go to Plans & Billing to upgrade or purchase credits.")
-    verifier("compte sans credits : cause nommee",
-             "crédits" in credit and "Billing" in credit)
-    verifier("compte sans credits : jamais annonce comme temporaire",
-             "réessaie" not in credit.lower() and "plus tard" not in credit.lower())
+    quota = msg(429, "Requests rate limit exceeded")
+    verifier("quota gratuit : annonce comme temporaire",
+             "quota" in quota.lower() and "réessaie" in quota.lower())
+    verifier("quota gratuit : dit que ca se recharge seul", "recharge" in quota.lower())
 
-    verifier("401 : clef refusee", "refusée" in msg(401, "invalid x-api-key"))
-    verifier("403 traite comme 401", msg(403, "forbidden") == msg(401, "invalid x-api-key"))
-    verifier("404 : modele nomme", "ANTHROPIC_MODEL" in msg(404, "model: inconnu"))
-    verifier("429 : saturation temporaire", "saturée" in msg(429, "rate limit"))
-    verifier("529 traite comme 429", msg(529, "Overloaded") == msg(429, "Overloaded"))
+    suspendu = msg(400, "Service subscription is inactive")
+    verifier("compte suspendu : cause nommee", "inactif" in suspendu or "suspendu" in suspendu)
+    verifier("compte suspendu : jamais annonce comme temporaire",
+             "réessaie dans" not in suspendu.lower())
 
-    inconnu = msg(400, "messages: at least one message is required")
+    verifier("401 : clef refusee", "refusée" in msg(401, "Unauthorized"))
+    verifier("403 traite comme 401", msg(403, "Forbidden") == msg(401, "Unauthorized"))
+    verifier("404 : modele nomme", "MISTRAL_MODEL" in msg(404, "model not found"))
+    verifier("422 : designe un defaut du bot", "défaut du bot" in msg(422, "validation"))
+    verifier("503 : indisponibilite temporaire", "indisponible" in msg(503, ""))
+
+    inconnu = msg(418, "je suis une theiere")
     verifier("erreur inconnue : renvoie vers le diagnostic",
              "/ia statut verifier" in inconnu)
     verifier("erreur inconnue : detail brut masque par defaut",
-             "at least one message" not in inconnu)
+             "theiere" not in inconnu)
     verifier("detailler=True : detail brut repris",
-             "at least one message" in msg(400, "messages: at least one message is required",
-                                           detailler=True))
+             "theiere" in msg(418, "je suis une theiere", detailler=True))
     verifier("aucun message d'erreur n'expose la clef",
-             all("sk-ant" not in m for m in
-                 (credit, inconnu, msg(401, "x"), msg(404, "x"), msg(429, "x"))))
+             all("Bearer" not in m and "MISTRAL_API_KEY`" not in m.replace(
+                 "Vérifie `MISTRAL_API_KEY`", "")
+                 for m in (quota, suspendu, inconnu, msg(404, "x"))))
+
+
+def verifier_extraction_detail():
+    """
+    Mistral ne renvoie pas ses erreurs sous une forme unique. Si l'extraction
+    rate, le diagnostic administrateur affiche « aucun detail fourni » alors
+    que l'API avait dit exactement ce qui n'allait pas.
+    """
+    print("\n--- Lecture des erreurs brutes de l'API ---")
+    lire = bot_mod.ai_detail_erreur
+
+    verifier("forme {message}", lire({"message": "Unauthorized"}) == "Unauthorized")
+    verifier("forme {error: {message}}",
+             lire({"error": {"message": "quota"}}) == "quota")
+    verifier("forme {error: texte}", lire({"error": "boum"}) == "boum")
+    verifier("forme {detail: texte}", lire({"detail": "invalide"}) == "invalide")
+    verifier("forme {detail: [ {msg} ]}",
+             lire({"detail": [{"msg": "champ manquant"}]}) == "champ manquant")
+    verifier("reponse vide ou illisible", lire({}) == "" and lire(None) == "")
 
 
 async def main():
     verifier_repartition_langues()
     verifier_diagnostic_ia()
     verifier_erreurs_ia()
+    verifier_extraction_detail()
     await bot_mod.start_dashboard_api()
     await asyncio.sleep(0.4)
 
