@@ -35,11 +35,11 @@ sans elle.
 | `style.css` | 7 683 lignes |
 | `dashboard.html` | 1 141 lignes |
 | `translations.js` | 3 044 lignes |
-| Clefs de traduction | **948 × 3 langues** |
+| Clefs de traduction | **951 × 3 langues** |
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 63 + 107 + 2 + 17, tous au vert |
+| Tests | 63 + 107 + 2 + 18, tous au vert |
 
 ---
 
@@ -1242,9 +1242,9 @@ en français quelle que soit la langue choisie.
 
 | | Avant | Après |
 |---|---:|---:|
-| Clefs en français | 124 | **948** |
-| Clefs en anglais | 124 | **948** |
-| Clefs en arabe | **83** | **948** |
+| Clefs en français | 124 | **951** |
+| Clefs en anglais | 124 | **951** |
+| Clefs en arabe | **83** | **951** |
 | Textes du HTML sans clef | **526** | 0 |
 | Textes écrits en dur dans `script.js` | **~250** | 0 |
 
@@ -1308,7 +1308,7 @@ fonctionnerait plus.
 | `test_security.py` | **63/63** |
 | `test_api.py` | **107/107** (3 nouvelles : code ISO des langues) |
 | `test_demarrage.py` | **1/1**, 1 non concluant sans accès à `discord.com` |
-| `modbot-site/test_i18n.py` | **17/17** — nouveau |
+| `modbot-site/test_i18n.py` | **18/18** — nouveau |
 
 `test_i18n.py` (dépôt du site, sans dépendance) verrouille les six pièges qui
 laissent une traduction se dégrader en silence :
@@ -1333,3 +1333,18 @@ visible en anglais ou en arabe.
 375 px de large), à cause de `.nav-links` replié. **Vérifié identique sur la
 version d'avant ce lot** : le défaut ne vient pas des traductions. Laissé tel
 quel pour ne pas mélanger deux sujets dans un même lot.
+
+### Un troisième partenaire
+
+`xWS TOURNAMENT` (`discord.gg/caAkTDeTe`, communauté club pro, 325 membres)
+rejoint VPG Belgique et MrDarryl sur la page d'accueil, même gabarit de carte.
+
+Son logo Discord n'est pas connu — il faudrait l'identifiant du serveur et le
+hash de son icône pour construire l'URL du CDN. La carte part donc directement
+sur `is-fallback`, qui affiche les initiales sur le dégradé : exactement le
+repli des deux autres quand leur logo ne charge pas. Aucune balise `<img>`,
+donc aucune requête pour rien.
+
+Pour lui donner son vrai logo plus tard : récupérer `guild.id` et `icon` via
+l'API Discord, puis reprendre le gabarit des deux autres cartes
+(`cdn.discordapp.com/icons/<id>/<hash>.png?size=128`).
