@@ -64,11 +64,12 @@ def verifier_repartition_langues():
     langue = bot_mod.langue_du_serveur
 
     verifier("langue reglee dans ModBot prioritaire sur la locale Discord",
-             langue(FauxGuild(1, locale="en-US"), {"1": {"langue": "fr"}}) == ("Français", "🇫🇷"))
+             langue(FauxGuild(1, locale="en-US"), {"1": {"langue": "fr"}})
+             == ("fr", "Français", "🇫🇷"))
     verifier("en-US d'un serveur non communautaire n'est pas compte",
              langue(FauxGuild(2, locale="en-US"), {}) is None)
     verifier("locale d'un serveur communautaire acceptee",
-             langue(FauxGuild(3, ("COMMUNITY",), "de"), {}) == ("Allemand", "🇩🇪"))
+             langue(FauxGuild(3, ("COMMUNITY",), "de"), {}) == ("de", "Allemand", "🇩🇪"))
     verifier("en-GB et en-US comptent pour une seule langue",
              langue(FauxGuild(4, ("COMMUNITY",), "en-GB"), {})
              == langue(FauxGuild(5, ("COMMUNITY",), "en-US"), {}))
@@ -97,6 +98,16 @@ def verifier_repartition_langues():
              sum(e["servers"] for e in stats["top_languages"]) == stats["servers"])
     verifier("'Non renseigne' ferme la liste",
              stats["top_languages"][-1].get("unknown") is True)
+    # Le site affiche le nom de la langue dans SA langue : il lui faut le code
+    # ISO, le nom francais ne servant que de repli.
+    identifiees = [e for e in stats["top_languages"] if not e.get("unknown")]
+    verifier("chaque langue porte son code ISO",
+             all(e.get("code") for e in identifiees),
+             str([e.get("code") for e in identifiees]))
+    verifier("le code ISO est sans variante regionale",
+             all("-" not in e["code"] for e in identifiees))
+    verifier("le nom francais reste disponible en repli",
+             all(e.get("language") for e in identifiees))
 
 
 def verifier_diagnostic_ia():

@@ -5944,47 +5944,47 @@ async def api_assistant(request):
 # en-GB/en-US, es-ES/es-419 et zh-CN/zh-TW sont fusionnes : ce sont des
 # variantes regionales d'une meme langue, et c'est bien la langue qu'on compte.
 LOCALE_LANGUES = {
-    "fr":     ("Français", "🇫🇷"),
-    "en":     ("Anglais", "🇬🇧"),
-    "en-US":  ("Anglais", "🇬🇧"),
-    "en-GB":  ("Anglais", "🇬🇧"),
-    "de":     ("Allemand", "🇩🇪"),
-    "es":     ("Espagnol", "🇪🇸"),
-    "es-ES":  ("Espagnol", "🇪🇸"),
-    "es-419": ("Espagnol", "🇪🇸"),
-    "it":     ("Italien", "🇮🇹"),
-    "pt":     ("Portugais", "🇵🇹"),
-    "pt-BR":  ("Portugais", "🇵🇹"),
-    "nl":     ("Néerlandais", "🇳🇱"),
-    "pl":     ("Polonais", "🇵🇱"),
-    "ru":     ("Russe", "🇷🇺"),
-    "tr":     ("Turc", "🇹🇷"),
-    "sv":     ("Suédois", "🇸🇪"),
-    "sv-SE":  ("Suédois", "🇸🇪"),
-    "da":     ("Danois", "🇩🇰"),
-    "fi":     ("Finnois", "🇫🇮"),
-    "no":     ("Norvégien", "🇳🇴"),
-    "cs":     ("Tchèque", "🇨🇿"),
-    "el":     ("Grec", "🇬🇷"),
-    "hu":     ("Hongrois", "🇭🇺"),
-    "ro":     ("Roumain", "🇷🇴"),
-    "uk":     ("Ukrainien", "🇺🇦"),
-    "bg":     ("Bulgare", "🇧🇬"),
-    "hr":     ("Croate", "🇭🇷"),
-    "lt":     ("Lituanien", "🇱🇹"),
-    "vi":     ("Vietnamien", "🇻🇳"),
-    "th":     ("Thaï", "🇹🇭"),
-    "id":     ("Indonésien", "🇮🇩"),
-    "ja":     ("Japonais", "🇯🇵"),
-    "ko":     ("Coréen", "🇰🇷"),
-    "zh":     ("Chinois", "🇨🇳"),
-    "zh-CN":  ("Chinois", "🇨🇳"),
-    "zh-TW":  ("Chinois", "🇨🇳"),
-    "hi":     ("Hindi", "🇮🇳"),
-    "ar":     ("Arabe", "🇸🇦"),
-    "he":     ("Hébreu", "🇮🇱"),
+    "fr":      ("fr", "Français", "🇫🇷"),
+    "en":      ("en", "Anglais", "🇬🇧"),
+    "en-US":   ("en", "Anglais", "🇬🇧"),
+    "en-GB":   ("en", "Anglais", "🇬🇧"),
+    "de":      ("de", "Allemand", "🇩🇪"),
+    "es":      ("es", "Espagnol", "🇪🇸"),
+    "es-ES":   ("es", "Espagnol", "🇪🇸"),
+    "es-419":  ("es", "Espagnol", "🇪🇸"),
+    "it":      ("it", "Italien", "🇮🇹"),
+    "pt":      ("pt", "Portugais", "🇵🇹"),
+    "pt-BR":   ("pt", "Portugais", "🇵🇹"),
+    "nl":      ("nl", "Néerlandais", "🇳🇱"),
+    "pl":      ("pl", "Polonais", "🇵🇱"),
+    "ru":      ("ru", "Russe", "🇷🇺"),
+    "tr":      ("tr", "Turc", "🇹🇷"),
+    "sv":      ("sv", "Suédois", "🇸🇪"),
+    "sv-SE":   ("sv", "Suédois", "🇸🇪"),
+    "da":      ("da", "Danois", "🇩🇰"),
+    "fi":      ("fi", "Finnois", "🇫🇮"),
+    "no":      ("no", "Norvégien", "🇳🇴"),
+    "cs":      ("cs", "Tchèque", "🇨🇿"),
+    "el":      ("el", "Grec", "🇬🇷"),
+    "hu":      ("hu", "Hongrois", "🇭🇺"),
+    "ro":      ("ro", "Roumain", "🇷🇴"),
+    "uk":      ("uk", "Ukrainien", "🇺🇦"),
+    "bg":      ("bg", "Bulgare", "🇧🇬"),
+    "hr":      ("hr", "Croate", "🇭🇷"),
+    "lt":      ("lt", "Lituanien", "🇱🇹"),
+    "vi":      ("vi", "Vietnamien", "🇻🇳"),
+    "th":      ("th", "Thaï", "🇹🇭"),
+    "id":      ("id", "Indonésien", "🇮🇩"),
+    "ja":      ("ja", "Japonais", "🇯🇵"),
+    "ko":      ("ko", "Coréen", "🇰🇷"),
+    "zh":      ("zh", "Chinois", "🇨🇳"),
+    "zh-CN":   ("zh", "Chinois", "🇨🇳"),
+    "zh-TW":   ("zh", "Chinois", "🇨🇳"),
+    "hi":      ("hi", "Hindi", "🇮🇳"),
+    "ar":      ("ar", "Arabe", "🇸🇦"),
+    "he":      ("he", "Hébreu", "🇮🇱"),
 }
-LANGUE_INCONNUE = ("Non renseigné", "🌐")
+LANGUE_INCONNUE = ("", "Non renseigné", "🌐")
 
 _STATS_PUBLIQUES = {"data": None, "expire": 0.0}
 STATS_PUBLIQUES_TTL = 300  # 5 minutes
@@ -6022,8 +6022,9 @@ def build_public_stats():
     """
     config = jload(F_CONFIG)
     langues = {}
-    inconnus = {"language": LANGUE_INCONNUE[0], "flag": LANGUE_INCONNUE[1],
-                "servers": 0, "members": 0, "unknown": True}
+    inconnus = {"code": LANGUE_INCONNUE[0], "language": LANGUE_INCONNUE[1],
+                "flag": LANGUE_INCONNUE[2], "servers": 0, "members": 0,
+                "unknown": True}
     membres = 0
     serveurs = 0
 
@@ -6036,9 +6037,12 @@ def build_public_stats():
         if identifiee is None:
             entree = inconnus
         else:
-            nom, drapeau = identifiee
-            entree = langues.setdefault(nom, {"language": nom, "flag": drapeau,
-                                              "servers": 0, "members": 0})
+            code, nom, drapeau = identifiee
+            # Regroupement par code ISO : le site affiche ensuite le nom dans
+            # la langue du visiteur, `language` ne servant que de repli.
+            entree = langues.setdefault(code, {"code": code, "language": nom,
+                                               "flag": drapeau,
+                                               "servers": 0, "members": 0})
         entree["servers"] += 1
         entree["members"] += compte
 

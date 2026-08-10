@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **7 août 2026** (voir §18 pour le dernier lot livré).
+> Dernière mise à jour : **10 août 2026** (voir §19 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -25,20 +25,21 @@ Attention, **Vercel suit `main`** : pousser une branche de travail ne déploie r
 Railway → Variables, pour que les deux IA fonctionnent. Tout le reste marche
 sans elle.
 
-### Chiffres au 7 août 2026 (après le lot §18)
+### Chiffres au 10 août 2026 (après le lot §19)
 
 | | |
 |---|---:|
-| `bot.py` | 12 012 lignes |
-| `security_core.py` | 1 090 lignes |
-| `script.js` | 4 726 lignes |
+| `bot.py` | 12 188 lignes |
+| `security_core.py` | 1 110 lignes |
+| `script.js` | 4 829 lignes |
 | `style.css` | 7 683 lignes |
 | `dashboard.html` | 1 141 lignes |
-| `translations.js` | 363 lignes |
+| `translations.js` | 3 044 lignes |
+| Clefs de traduction | **948 × 3 langues** |
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 63 + 104 + 2, tous au vert |
+| Tests | 63 + 107 + 2 + 17, tous au vert |
 
 ---
 
@@ -1226,3 +1227,109 @@ phrases suffisent`), une autre refuse un modèle par défaut contenant
 
 Vérifié de bout en bout contre le faux serveur Mistral : le modèle envoyé, le
 `max_tokens`, et la présence des quatre consignes qui comptent.
+
+---
+
+## 19. Livré le 10 août 2026 — le site se traduit vraiment en entier
+
+**Demande :** « quand on change de langue pour traduire il faut que ça traduise
+vraiment tout ».
+
+C'était le bon reproche. Le site se disait trilingue, mais l'essentiel restait
+en français quelle que soit la langue choisie.
+
+### Ce qui était réellement traduit avant ce lot
+
+| | Avant | Après |
+|---|---:|---:|
+| Clefs en français | 124 | **948** |
+| Clefs en anglais | 124 | **948** |
+| Clefs en arabe | **83** | **948** |
+| Textes du HTML sans clef | **526** | 0 |
+| Textes écrits en dur dans `script.js` | **~250** | 0 |
+
+L'arabe était le plus abîmé : des panneaux entiers (`welcome.*`, `gw.*`, une
+partie de `ai.*`) n'existaient pas et retombaient **silencieusement** sur le
+français. C'est le défaut de conception d'un repli : rien ne casse, donc
+personne ne le voit.
+
+### Quatre causes distinctes, quatre corrections
+
+**1. Les textes du HTML n'étaient pas marqués.** 526 nœuds de texte et 67
+attributs (`placeholder`, `title`, `aria-label`) ne portaient aucun
+`data-i18n`. Marqués par script plutôt qu'à la main : à ce volume, la
+probabilité d'en casser un à la main était proche de 1.
+
+**2. Le moteur ne voyait que le premier texte d'une balise.** Un paragraphe
+comme « La restauration est **additive** : elle recrée ce qui manque » ne
+traduisait que les trois premiers mots. Nouvel attribut **`data-i18n-html`**
+qui remplace tout le contenu de l'élément : l'ordre des mots change d'une
+langue à l'autre, une traduction morceau par morceau est impossible.
+
+Le HTML injecté vient de `translations.js`, un fichier du site écrit à la main.
+Les textes venant du bot ou d'un membre continuent de passer par `escapeHtml()`.
+
+**3. Tout ce que le JavaScript peignait restait en français.** Toasts, états
+vides, listes de serveurs, fiches membres, démonstration de la page d'accueil :
+~250 chaînes en dur. Elles passent par `t()`, et deux aides nouvelles :
+
+- `tp("js.testEnvoye", { plateforme, salon })` — substitution `{nom}`, pour que
+  chaque langue place le nombre ou le pseudo là où sa grammaire l'exige ;
+- `tn(clefUn, clefPlusieurs, n)` — singulier/pluriel.
+
+**4. Rien ne se redessinait au changement de langue.** L'événement
+`modbot:language` était bien émis… et personne ne l'écoutait. Un écouteur
+redessine désormais les vues rendues en JavaScript, dans les deux pages.
+
+### Deux détails qui trahissaient encore la langue
+
+- **Dates et nombres** étaient figés en `fr-FR`. Ils suivent maintenant la
+  langue du site. En arabe on force les chiffres latins (`ar-u-nu-latn`) :
+  le reste de l'écran affiche des identifiants Discord en chiffres latins, et
+  mélanger les deux systèmes dans une même page se lit mal.
+
+- **Les noms de langues des statistiques publiques** venaient du bot, en
+  français, et le restaient en anglais comme en arabe. `build_public_stats()`
+  renvoie désormais aussi le **code ISO** de chaque langue, et le site affiche
+  le nom via `Intl.DisplayNames` dans la langue du visiteur — le nom français
+  ne servant plus que de repli. C'est la seule modification de `bot.py` de ce
+  lot.
+
+### Ce qui reste volontairement non traduit
+
+La marque **ModBot**, les commandes slash (`/panel`, `/captcha activer`…), et
+les noms de plateformes (Twitch, TikTok, Instagram). Une commande traduite ne
+fonctionnerait plus.
+
+### Tests
+
+| Suite | Résultat |
+|---|---|
+| `test_security.py` | **63/63** |
+| `test_api.py` | **107/107** (3 nouvelles : code ISO des langues) |
+| `test_demarrage.py` | **1/1**, 1 non concluant sans accès à `discord.com` |
+| `modbot-site/test_i18n.py` | **17/17** — nouveau |
+
+`test_i18n.py` (dépôt du site, sans dépendance) verrouille les six pièges qui
+laissent une traduction se dégrader en silence :
+
+1. les trois langues portent exactement les mêmes clefs ;
+2. toute clef citée par le HTML ou par `script.js` est définie ;
+3. aucune clef définie ne dort sans emploi ;
+4. aucun texte visible n'échappe au moteur ;
+5. les substitutions `{x}` sont identiques dans les trois langues — une valeur
+   oubliée afficherait « {n} » à l'écran ;
+6. l'arabe ne recopie pas le français.
+
+**Vérifié dans un vrai navigateur** (Chromium) : les quatre pages, en 1280 px
+et 375 px, en basculant `fr→en→ar→fr→ar` par le sélecteur. Contrôlé à chaque
+bascule : `dir="rtl"` en arabe, `lang` correct, aucune erreur JavaScript,
+aucune substitution `{x}` laissée à l'écran, et aucun mot français témoin
+visible en anglais ou en arabe.
+
+### Un défaut préexistant, non corrigé
+
+À 375 px, `index.html` et `wiki.html` débordent horizontalement (650 px pour
+375 px de large), à cause de `.nav-links` replié. **Vérifié identique sur la
+version d'avant ce lot** : le défaut ne vient pas des traductions. Laissé tel
+quel pour ne pas mélanger deux sujets dans un même lot.
