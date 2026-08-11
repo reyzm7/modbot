@@ -35,11 +35,11 @@ sans elle.
 | `style.css` | 7 683 lignes |
 | `dashboard.html` | 1 141 lignes |
 | `translations.js` | 3 044 lignes |
-| Clefs de traduction | **958 × 3 langues** |
+| Clefs de traduction | **953 × 3 langues** |
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 63 + 129 + 2 + 18, tous au vert |
+| Tests | 63 + 132 + 2 + 18, tous au vert |
 
 ---
 
@@ -1569,3 +1569,23 @@ Les textes passent par `tr()` : « vient de rejoindre le serveur » en français
 
 Captcha et cartes rendus pour de vrai avec Pillow, hors du bot, et relus à
 l'œil : le code `A4KP7` se lit sans effort, la carte reproduit la maquette.
+
+### Correctif du même jour : uniquement les pays, sans « Non renseigné »
+
+Sur demande, la page d'accueil n'affiche plus que la répartition **par pays**.
+Le compteur « Langues représentées » et la liste par langue sont retirés, ainsi
+que la case « Non renseigné » du classement.
+
+`build_public_stats()` continue de calculer les langues — `/api/public/stats`
+les expose toujours — mais le site ne les affiche plus. Les serveurs dont la
+langue est inconnue ne figurent plus dans la liste ; leur nombre reste exposé
+sous `unspecified_country`, pour que le chiffre existe quelque part.
+
+**Conséquence à connaître :** la somme des serveurs du classement peut être
+inférieure au total « Serveurs protégés ». C'est le prix d'une liste sans case
+fourre-tout. Une vérification s'assure que classement + non-renseignés couvrent
+bien tous les serveurs.
+
+Code mort supprimé au passage : `nomDeLangue()` n'avait plus d'appelant, et
+cinq clefs de traduction plus d'emploi (958 → 953). Le test i18n refuse les
+clefs orphelines, il les a signalées tout seul.

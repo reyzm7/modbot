@@ -6183,9 +6183,11 @@ def build_public_stats():
     if inconnus["servers"]:
         classement.append(inconnus)
 
+    # Le classement ne montre que des pays reels : la case « Non renseigne »
+    # n'apparait plus. Les serveurs dont on ne sait rien restent comptes
+    # dans `unspecified_country`, pour que le chiffre existe quelque part
+    # meme s'il n'est pas affiche.
     classement_pays = sorted(pays.values(), key=lambda p: -p["members"])[:12]
-    if pays_inconnus["servers"]:
-        classement_pays.append(pays_inconnus)
 
     return {
         "members_protected": membres,
@@ -6197,6 +6199,8 @@ def build_public_stats():
         # Combien de serveurs ont vraiment choisi leur pays, par opposition
         # a ceux dont il est seulement deduit de la langue.
         "countries_declared": pays_declares,
+        "unspecified_country": {"servers": pays_inconnus["servers"],
+                                "members": pays_inconnus["members"]},
         "unspecified": {"servers": inconnus["servers"], "members": inconnus["members"]},
         "generated_at": now().isoformat(),
         "language_source": "langue configurée dans ModBot, ou langue du serveur "

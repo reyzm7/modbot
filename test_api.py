@@ -176,10 +176,20 @@ def verifier_repartition_pays():
              str(declares))
     verifier("le drapeau accompagne le pays",
              declares and declares[0]["flag"] == "🇧🇪")
-    verifier("le serveur sans declaration ferme la liste",
-             stats["top_countries"][-1].get("unknown") is True)
-    verifier("la somme couvre tous les serveurs",
-             sum(e["servers"] for e in stats["top_countries"]) == stats["servers"])
+    # Le classement ne montre que des pays reels : plus de case « Non
+    # renseigne ». Les serveurs sans signal restent comptes a part, pour
+    # que le chiffre existe meme s'il n'est pas affiche.
+    verifier("aucune case « Non renseigne » dans le classement",
+             all(not e.get("unknown") for e in stats["top_countries"]),
+             str(stats["top_countries"]))
+    verifier("chaque ligne porte un vrai code pays",
+             all(len(e["code"]) == 2 for e in stats["top_countries"]))
+    verifier("les serveurs sans pays restent comptes a part",
+             stats["unspecified_country"]["servers"] == 1,
+             str(stats["unspecified_country"]))
+    verifier("classement et non-renseignes couvrent tous les serveurs",
+             sum(e["servers"] for e in stats["top_countries"])
+             + stats["unspecified_country"]["servers"] == stats["servers"])
     verifier("la repartition par langue survit a l'ajout des pays",
              stats["languages"] >= 1 and isinstance(stats["top_languages"], list))
     verifier("les deux declarations sont comptees comme telles",
@@ -510,10 +520,13 @@ async def main():
             # tenir n'est plus « aucun pays » : c'est « aucun pays devine ».
             # Chaque entree porte donc un vrai code ISO, ou se declare
             # explicitement inconnue — jamais d'entre-deux.
-            verifier("aucun pays n'est devine",
-                     all(bool(e.get("code")) or e.get("unknown") is True
+            verifier("chaque pays du classement porte un code ISO",
+                     all(len(str(e.get("code") or "")) == 2
                          for e in (stats.get("top_countries") or [])),
                      str(stats.get("top_countries")))
+            verifier("aucune case « Non renseigne » exposee",
+                     all(not e.get("unknown")
+                         for e in (stats.get("top_countries") or [])))
             texte = str(data)
             verifier("aucun identifiant de serveur expose",
                      "guild_id" not in texte and "\"id\"" not in texte)
