@@ -1,3 +1,5 @@
 discord.py>=2.3.0
 aiohttp>=3.9.0
-Pillow>=10.0.0
+# >= 10.1 : ImageFont.load_default(size=...) n'existe pas avant. Sans lui,
+# la police de secours sort en ~11 px quelle que soit la taille demandee.
+Pillow>=10.1.0

@@ -12,6 +12,7 @@ de la configuration (PORT / API_PORT, 8080 par defaut) : arrete le bot
 avant de lancer ce test.
 """
 import asyncio
+import base64
 import importlib.util
 import os
 import sys
@@ -469,7 +470,101 @@ def verifier_immunite_admins():
              not bot_mod.sc.is_whitelisted("1", [], None, None, {}, is_admin=True))
 
 
+def verifier_polices():
+    """
+    Les images du bot doivent rester lisibles partout.
+
+    Le defaut d'origine : Railway construit avec Nixpacks, dont l'image
+    Python ne contient AUCUNE police. `_welcome_font` retombait alors sur
+    `ImageFont.load_default()`, qui rend en ~11 px et IGNORE la taille
+    demandee. Captchas et cartes de bienvenue sortaient minuscules, et
+    augmenter les tailles dans le code ne changeait rigoureusement rien —
+    ce qui est exactement ce qui rendait le defaut si difficile a voir.
+
+    On verifie donc la seule chose qui compte : que la police RESPECTE la
+    taille demandee, y compris quand le systeme n'en fournit aucune.
+    """
+    if not bot_mod.PIL_AVAILABLE:
+        print("  (Pillow absent, section ignoree)")
+        return
+
+    from PIL import Image, ImageDraw
+
+    verifier("les polices sont livrees avec le depot",
+             os.path.isdir(bot_mod.POLICES_EMBARQUEES),
+             bot_mod.POLICES_EMBARQUEES)
+    for graisse, fichier in ((True, "DejaVuSans-Bold.ttf"), (False, "DejaVuSans.ttf")):
+        verifier(f"police {'grasse' if graisse else 'normale'} presente",
+                 os.path.exists(os.path.join(bot_mod.POLICES_EMBARQUEES, fichier)))
+
+    dessin = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
+    def hauteur(taille):
+        police = bot_mod._welcome_font("Inter", taille, bold=True)
+        haut = dessin.textbbox((0, 0), "A", font=police)
+        return haut[3] - haut[1]
+
+    petite, grande = hauteur(20), hauteur(100)
+    verifier("la police respecte la taille demandee", grande > petite * 3,
+             f"20px -> {petite}px, 100px -> {grande}px")
+    verifier("une grande taille donne un glyphe reellement grand", grande >= 60,
+             f"{grande}px pour une demande de 100px")
+
+    # Meme scenario que Railway : plus aucune police systeme accessible.
+    vrai_exists = os.path.exists
+    try:
+        os.path.exists = lambda p: (False if str(p).startswith("/usr/share")
+                                    else vrai_exists(p))
+        secours = hauteur(100)
+        verifier("sans police systeme, la taille est encore respectee",
+                 secours >= 60, f"{secours}px pour une demande de 100px")
+    finally:
+        os.path.exists = vrai_exists
+
+    # Le captcha doit remplir son image : c'est ce que voit l'utilisateur.
+    fichier = bot_mod.render_captcha_image("A7K2M")
+    verifier("le captcha est bien genere", fichier is not None)
+    if fichier:
+        image = Image.open(fichier.fp)
+        pixels = image.convert("L").load()
+        lignes = [y for y in range(image.height)
+                  if any(pixels[x, y] > 185 for x in range(image.width))]
+        occupe = (max(lignes) - min(lignes) + 1) if lignes else 0
+        verifier("les lettres du captcha remplissent l'image",
+                 occupe >= image.height * 0.45,
+                 f"{occupe}px de haut sur {image.height}px")
+
+
+async def verifier_image_bienvenue():
+    """
+    L'image de la carte arrive du dashboard en data: (televersement depuis
+    la galerie). Le disque des hebergeurs etant efface a chaque deploiement,
+    c'est la configuration qui la transporte — encore faut-il savoir la lire.
+    """
+    charger = bot_mod._load_image_bytes
+    attendu = b"ModBot"
+    uri = "data:image/png;base64," + base64.b64encode(attendu).decode()
+    verifier("une image data: est decodee", (await charger(uri)) == attendu)
+    verifier("un data: sans base64 est refuse",
+             (await charger("data:image/png,brut")) is None)
+
+    # Un administrateur de serveur ne doit pas pouvoir faire lire n'importe
+    # quel fichier de la machine au bot en bricolant le chemin.
+    for sortie in ("../../etc/passwd", "/etc/passwd", "../../../etc/shadow"):
+        verifier(f"traversee refusee ({sortie})",
+                 (await charger(sortie)) is None)
+
+    reglages = bot_mod.sanitize_welcome_system({"background": uri})
+    verifier("le dashboard peut enregistrer une image televersee",
+             reglages.get("background") == uri)
+    verifier("un schema non image est refuse",
+             bot_mod.sanitize_welcome_system(
+                 {"background": "javascript:alert(1)"}).get("background") == "")
+
+
 async def main():
+    verifier_polices()
+    await verifier_image_bienvenue()
     verifier_repartition_langues()
     verifier_repartition_pays()
     verifier_diagnostic_ia()

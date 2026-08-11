@@ -1766,3 +1766,101 @@ tous bénins :
 | `/api/v10/invites/...` | idem, résolution des invitations partenaires |
 
 `/api/logout` était donc le seul véritable écart.
+
+## 25. Livré le 11 août 2026 — la police manquante, ou pourquoi agrandir ne servait à rien
+
+### Le vrai coupable des textes minuscules
+
+Deux demandes revenaient sans jamais être satisfaites : « le texte de bienvenue
+est tout petit » et « les lettres du captcha sont toujours petites ». Les deux
+fois, la taille avait pourtant bien été augmentée dans le code.
+
+La cause est la même, et elle n'est pas dans les tailles :
+
+```
+Railway construit avec Nixpacks → l'image Python n'installe AUCUNE police
+    → /usr/share/fonts/... n'existe pas
+    → _welcome_font() retombe sur ImageFont.load_default()
+    → cette police rend en ~11 px et IGNORE le paramètre `size`
+```
+
+Mesuré : « A7K » rendu à `size=110` occupe **251 × 80 px** avec une vraie
+police TrueType, contre **19 × 8 px** avec `load_default()`. Un facteur treize.
+
+D'où le symptôme si déroutant : **augmenter la taille dans le code ne changeait
+rigoureusement rien**, puisque la police ne la lisait pas. Chaque correction
+semblait donc ignorée, et la seule explication plausible — « la valeur n'est pas
+assez grande » — menait à l'augmenter encore, sans effet.
+
+### Le correctif
+
+- **La police est livrée avec le dépôt** (`assets/fonts/DejaVuSans*.ttf`,
+  1,5 Mo). Elle suit le code partout ; plus aucune dépendance à ce que
+  l'hébergeur a bien voulu installer. C'est le seul correctif qui tienne :
+  ajouter des chemins système, c'est parier sur l'image de l'hébergeur.
+- `ImageFont.load_default(size=…)` en dernier recours, et `Pillow >= 10.1`
+  dans `requirements.txt` — avant cette version le paramètre n'existe pas.
+- Captcha : la taille est désormais **déduite de la hauteur voulue**, mesurée
+  glyphe par glyphe, puis bornée en largeur pour que cinq caractères ne se
+  chevauchent pas. Les lettres occupent 60 à 68 % de la hauteur de l'image.
+- Carte de bienvenue : titre jusqu'à 54 px, sous-titre à 30 px, et la boîte de
+  texte suit la police au lieu d'être figée à 58 px.
+
+### Ce que le test vérifie maintenant
+
+Pas « la taille vaut 54 » — la valeur était déjà correcte pendant tout ce
+temps. Il vérifie **que la police respecte la taille demandée**, y compris en
+simulant l'absence de toute police système, et que les lettres du captcha
+remplissent au moins 45 % de l'image. Contrôle négatif : en retirant
+`assets/fonts/`, trois vérifications tombent.
+
+## 26. Livré le 11 août 2026 — menu déroulant du dashboard, image depuis la galerie
+
+### Le menu du dashboard
+
+Sous 760 px, la barre latérale devenait un ruban défilable horizontalement.
+Treize entrées y tenaient sur près de trois écrans de large, les intitulés de
+groupe étaient masqués, et rien n'annonçait qu'il fallait faire défiler : le
+menu passait simplement pour absent.
+
+C'est désormais un menu déroulant : un bouton qui affiche la section courante,
+et un panneau qui montre les treize entrées **avec leurs cinq intitulés de
+groupe**. Sa hauteur est calculée à l'ouverture sur la place réellement
+disponible sous le bouton — une valeur en `vh` ne suffisait pas, la barre du
+haut se repliant sur trois lignes en petit écran, et le bas du menu finissait
+sous le pli.
+
+Deux pièges rencontrés, notés pour la prochaine fois :
+
+- les règles de base ont d'abord été ajoutées **à la fin** de `style.css`,
+  donc après la media query. À spécificité égale, la dernière règle gagne :
+  `display: none` l'emportait partout et le bouton restait invisible. Les
+  règles de base doivent précéder la media query qui les surcharge ;
+- mesurer la place disponible depuis le **bouton** laissait dépasser le menu
+  d'exactement l'écart de la grille. C'est le menu lui-même qu'il faut mesurer.
+
+### L'image de bienvenue
+
+Le champ demandait une URL. Il ouvre maintenant la galerie du téléphone ou
+l'explorateur de l'ordinateur (`<input type="file" accept="image/*">`).
+
+L'image est recadrée dans le navigateur aux dimensions de la carte
+(1000 × 380), puis recompressée en JPEG par paliers de qualité jusqu'à passer
+sous 360 000 caractères. Une photo de 3000 × 2000 tombe ainsi à ~5,5 Ko. Elle
+est rangée en `data:` **dans la configuration**, et non sur le disque : celui
+des hébergeurs comme Railway est effacé à chaque déploiement, un fichier
+déposé ne survivrait pas.
+
+La valeur part sous la clef `background` — celle que lit le dessinateur de
+carte. `sanitize_welcome_system()` repartant des valeurs par défaut, l'ancienne
+clef `image` est remise à vide : une seule source pour l'image, sinon un ancien
+lien ressortirait tout seul.
+
+### Au passage : une lecture de fichier arbitraire
+
+`_load_image_bytes()` acceptait un chemin local et faisait
+`os.path.join(BASE_DIR, chemin)` après un simple `lstrip("/")`. Or `lstrip`
+n'enlève pas les `..` : `../../etc/passwd` sortait de `BASE_DIR`. Un
+administrateur de serveur pouvait ainsi faire lire un fichier quelconque de la
+machine au bot. Le chemin est maintenant résolu puis vérifié comme restant
+sous `BASE_DIR`. Trois tentatives de traversée sont couvertes par les tests.

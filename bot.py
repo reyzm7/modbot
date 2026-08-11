@@ -26,6 +26,11 @@ except Exception:
     Image = ImageDraw = ImageFont = ImageOps = None
     PIL_AVAILABLE = False
 
+# Polices livrees avec le depot. Elles suivent le code partout, y compris sur
+# un hebergeur dont l'image systeme ne contient aucune police — le cas de
+# Railway. Voir _welcome_font() pour ce que coutait leur absence.
+POLICES_EMBARQUEES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
+
 # ════════════════════════════════════════════════
 #  CONFIGURATION
 # ════════════════════════════════════════════════
@@ -2358,17 +2363,48 @@ def render_captcha_image(code):
 
         # Chaque caractere est dessine separement : taille, angle et couleur
         # varient, ce qui casse la reconnaissance automatique simple.
-        pas = largeur // (len(code) + 1)
+        #
+        # La taille est DEDUITE de la hauteur voulue, jamais supposee : on
+        # mesure le glyphe a une taille de reference puis on applique le
+        # rapport. Les metriques changent d'une police a l'autre, et une
+        # valeur en dur donnait des lettres deux fois trop petites des que
+        # la police de secours prenait le relais.
+        colonne = largeur / len(code)
         for index, caractere in enumerate(code):
-            taille = random.randint(96, 122)
+            gabarit = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+            reference = _welcome_font("Inter", 100, bold=True)
+            g0, h0, d0, b0 = gabarit.textbbox((0, 0), caractere, font=reference)
+            largeur_ref, hauteur_ref = max(d0 - g0, 1), max(b0 - h0, 1)
+
+            # Contraint EN HAUTEUR ET EN LARGEUR : la plus petite des deux
+            # echelles gagne. Ne borner que la hauteur faisait deborder les
+            # lettres sur leurs voisines jusqu'a les rendre illisibles.
+            echelle = min(hauteur * random.uniform(0.60, 0.76) / hauteur_ref,
+                          colonne * 0.94 / largeur_ref)
+            taille = max(48, int(100 * echelle))
             police = _welcome_font("Inter", taille, bold=True)
+
+            # Vignette taillee sur le glyphe reel, marge comprise : dessiner a
+            # une position fixe rognait les lettres montantes ou descendantes.
+            gauche, haut, droite, bas = gabarit.textbbox((0, 0), caractere, font=police)
+            marge = 12
+            vignette = Image.new("RGBA",
+                                 (droite - gauche + marge * 2, bas - haut + marge * 2),
+                                 (0, 0, 0, 0))
             couleur = (random.randint(190, 255), random.randint(190, 255), random.randint(210, 255))
-            vignette = Image.new("RGBA", (taille + 52, taille + 52), (0, 0, 0, 0))
-            ImageDraw.Draw(vignette).text((24, 6), caractere, font=police, fill=couleur + (255,))
-            vignette = vignette.rotate(random.randint(-22, 22), resample=Image.BICUBIC, expand=False)
-            x = pas * (index + 1) - taille // 2 + random.randint(-8, 8)
-            y = (hauteur - taille) // 2 + random.randint(-16, 16)
-            image.paste(vignette, (max(0, x), max(0, y)), vignette)
+            ImageDraw.Draw(vignette).text((marge - gauche, marge - haut), caractere,
+                                          font=police, fill=couleur + (255,))
+            # expand=True : sans lui la rotation coupe les coins du glyphe.
+            vignette = vignette.rotate(random.randint(-22, 22), resample=Image.BICUBIC,
+                                       expand=True)
+
+            # Centre de colonne, puis bornage : une lettre partiellement hors
+            # cadre est un echec de captcha, pas une difficulte supplementaire.
+            x = int(colonne * (index + 0.5) - vignette.width / 2) + random.randint(-6, 6)
+            y = int((hauteur - vignette.height) / 2) + random.randint(-10, 10)
+            x = max(0, min(x, largeur - vignette.width))
+            y = max(0, min(y, hauteur - vignette.height))
+            image.paste(vignette, (x, y), vignette)
 
         # Arc parasite par-dessus le texte
         dessin.arc([random.randint(0, 90), 30,
@@ -8113,8 +8149,18 @@ def _welcome_font(name, size, bold=False):
         if "verdana" in name:
             candidates.append(os.path.join(win, "verdanab.ttf" if bold else "verdana.ttf"))
         candidates.append(os.path.join(win, "arialbd.ttf" if bold else "arial.ttf"))
+    # La police EMBARQUEE passe avant celles du systeme. Railway construit
+    # avec Nixpacks : l'image Python n'installe aucune police, donc les
+    # chemins /usr/share/fonts n'existent pas en production. Sans ce
+    # fichier dans le depot, on retombait sur load_default() — une police
+    # bitmap minuscule qui IGNORE le parametre `size`. C'est la vraie cause
+    # des captchas et des cartes de bienvenue illisibles : agrandir la
+    # taille dans le code ne changeait rigoureusement rien.
+    candidates.append(os.path.join(
+        POLICES_EMBARQUEES, "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"))
     candidates.extend([
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     ])
     for path in candidates:
@@ -8123,6 +8169,15 @@ def _welcome_font(name, size, bold=False):
                 return ImageFont.truetype(path, size=size)
         except Exception:
             continue
+    # Dernier recours. `size=` n'existe qu'a partir de Pillow 10.1 ; sans
+    # lui la police sort en ~11 px quoi qu'on demande.
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        print("ModBot: Pillow trop ancien pour dimensionner la police de secours "
+              "(mettre a jour vers >= 10.1) — texte des images minuscule.")
+    except Exception:
+        pass
     try:
         return ImageFont.load_default()
     except Exception:
@@ -8132,6 +8187,19 @@ async def _load_image_bytes(value):
     value = str(value or "").strip()
     if not value:
         return None
+
+    # Image televersee depuis le dashboard : elle voyage et se stocke en
+    # data:. Le disque des hebergeurs comme Railway est efface a chaque
+    # deploiement — un fichier depose ne survivrait pas, la config si.
+    if value.startswith("data:"):
+        try:
+            entete, _, charge = value.partition(",")
+            if not charge or "base64" not in entete:
+                return None
+            return base64.b64decode(charge, validate=False)
+        except Exception:
+            return None
+
     if value.startswith(("http://", "https://")):
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
@@ -8141,8 +8209,16 @@ async def _load_image_bytes(value):
                     return await response.read()
         except Exception:
             return None
+
+    # Chemin local. `lstrip("/")` ne suffit pas : « ../../etc/passwd » sort
+    # quand meme de BASE_DIR une fois joint. On resout le chemin et on exige
+    # qu'il reste sous BASE_DIR, sinon un administrateur de serveur pourrait
+    # faire lire n'importe quel fichier de la machine au bot.
     path = value.replace("\\", "/").lstrip("/")
-    local_path = os.path.join(BASE_DIR, path)
+    local_path = os.path.realpath(os.path.join(BASE_DIR, path))
+    racine = os.path.realpath(BASE_DIR)
+    if not (local_path == racine or local_path.startswith(racine + os.sep)):
+        return None
     if os.path.exists(local_path):
         try:
             with open(local_path, "rb") as handle:
@@ -8203,7 +8279,7 @@ async def build_member_event_card(member, system, departure=False):
     # ── Avatar rond, cercle de blanc ─────────────────────────────────
     taille_avatar = 150
     ax = (largeur - taille_avatar) // 2
-    ay = marge + 34
+    ay = marge + 26
     try:
         octets = await _load_image_bytes(str(member.display_avatar.with_size(256).url))
     except Exception:
@@ -8240,21 +8316,28 @@ async def build_member_event_card(member, system, departure=False):
                 number=max(1, int(getattr(member.guild, "member_count", 0) or 1)))
 
     couleur_titre = _welcome_rgb(system.get("color"), 0xFFFFFF)
-    haut_titre = ay + taille_avatar + 26
+    # 20 px : avec 26 et un titre a 54, le sous-titre butait sur le bord
+    # du panneau, sans la moindre respiration.
+    haut_titre = ay + taille_avatar + 20
 
     # La phrase porte un nom de longueur imprevisible : on reduit la
     # police tant qu'elle deborde, plutot que de couper le pseudo.
-    for taille in (46, 42, 38, 34, 30, 26):
+    taille = 54
+    for taille in (54, 50, 46, 42, 38, 34, 30, 26):
         titre = _welcome_font(police, taille, bold=True)
         if not titre:
             break
         if dessin.textlength(phrase, font=titre) <= largeur - marge * 2 - 60:
             break
-    _center_text(dessin, (marge, haut_titre, largeur - marge, haut_titre + 58),
+    # La boite suit la police : figee a 58 px, elle collait le texte en haut
+    # des que la taille montait.
+    _center_text(dessin, (marge, haut_titre, largeur - marge,
+                          haut_titre + int(taille * 1.3)),
                  phrase, titre, couleur_titre)
 
-    sous_titre = _welcome_font(police, 26, bold=False)
-    _center_text(dessin, (marge, haut_titre + 62, largeur - marge, haut_titre + 104),
+    bas_titre = haut_titre + int(taille * 1.3)
+    sous_titre = _welcome_font(police, 30, bold=False)
+    _center_text(dessin, (marge, bas_titre + 6, largeur - marge, bas_titre + 48),
                  numero, sous_titre, (150, 156, 168))
 
     sortie = io.BytesIO()
