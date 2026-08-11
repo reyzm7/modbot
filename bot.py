@@ -6102,28 +6102,68 @@ PAYS_PAR_LANGUE = {
 }
 
 
+# Regions vocales Discord et leur pays. Une region choisie a la main est un
+# signal geographique volontaire : personne ne met « Sydney » par hasard.
+# Les regions americaines pointent toutes vers US, la region « europe »
+# est trop vague pour conclure et n'est donc pas listee.
+REGIONS_VOCALES_PAYS = {
+    "brazil": "BR", "buenos-aires": "AR", "bucharest": "RO", "dubai": "AE",
+    "finland": "FI", "frankfurt": "DE", "hongkong": "HK", "india": "IN",
+    "japan": "JP", "madrid": "ES", "milan": "IT", "rotterdam": "NL",
+    "russia": "RU", "singapore": "SG", "south-korea": "KR",
+    "southafrica": "ZA", "stockholm": "SE", "sydney": "AU", "tel-aviv": "IL",
+    "warsaw": "PL", "atlanta": "US", "newark": "US", "oregon": "US",
+    "santa-clara": "US", "seattle": "US", "st-pete": "US", "us-central": "US",
+    "us-east": "US", "us-south": "US", "us-west": "US",
+}
+
+
+def region_vocale_du_serveur(guild):
+    """Pays de la premiere region vocale fixee a la main, ou None."""
+    for salon in (getattr(guild, "voice_channels", None) or []):
+        region = str(getattr(salon, "rtc_region", "") or "").strip().lower()
+        if region in REGIONS_VOCALES_PAYS:
+            return REGIONS_VOCALES_PAYS[region]
+    return None
+
+
 def pays_du_serveur(guild, config=None):
     """
     Pays du serveur, et la facon dont on le sait.
 
-    Retourne (code, declare) : `declare` vaut True quand le proprietaire a
-    choisi son pays dans le dashboard, False quand il est seulement deduit
-    de la langue du bot. (None, False) si on ne sait rien.
+    Retourne (code, source). Quatre sources, de la plus sure a la plus
+    faible — la premiere qui repond gagne :
 
-    La declaration prime toujours : c'est la seule source exacte, et elle
-    permet de corriger la deduction quand elle se trompe.
+      "declare"  le proprietaire a choisi son pays dans le dashboard ;
+      "langue"   il a choisi la langue de ModBot, ou son serveur est
+                 Communautaire et Discord expose alors sa vraie locale ;
+      "region"   une region vocale a ete fixee a la main sur un salon ;
+      "defaut"   rien de tout cela : on retombe sur la langue par defaut
+                 du bot.
+
+    Le dernier echelon existe pour qu'AUCUN membre ne reste hors de la
+    carte. C'est une supposition, pas une information : un serveur qui n'a
+    jamais rien reglé est compte en France parce que ModBot parle francais
+    par defaut, pas parce qu'on sait quoi que ce soit de lui. Seule la
+    declaration corrige cela, et `countries_declared` dit combien de
+    serveurs l'ont faite.
     """
     cfg = (config or {}).get(str(guild.id)) or {}
     code = str(cfg.get("pays") or "").strip().upper()
     if len(code) == 2 and code.isalpha():
-        return code, True
+        return code, "declare"
 
     identifiee = langue_du_serveur(guild, config)
     if identifiee:
         deduit = PAYS_PAR_LANGUE.get(identifiee[0])
         if deduit:
-            return deduit, False
-    return None, False
+            return deduit, "langue"
+
+    par_region = region_vocale_du_serveur(guild)
+    if par_region:
+        return par_region, "region"
+
+    return PAYS_PAR_LANGUE.get(DEFAULT_LANG, "FR"), "defaut"
 
 
 def build_public_stats():
@@ -6139,12 +6179,10 @@ def build_public_stats():
                 "flag": LANGUE_INCONNUE[2], "servers": 0, "members": 0,
                 "unknown": True}
     pays = {}
-    pays_inconnus = {"code": PAYS_INCONNU[0], "country": PAYS_INCONNU[1],
-                     "flag": PAYS_INCONNU[2], "servers": 0, "members": 0,
-                     "unknown": True}
     membres = 0
     serveurs = 0
     pays_declares = 0
+    sources_pays = {}
 
     for guild in bot.guilds:
         compte = int(guild.member_count or 0)
@@ -6164,16 +6202,14 @@ def build_public_stats():
         entree["servers"] += 1
         entree["members"] += compte
 
-        code_pays, declare = pays_du_serveur(guild, config)
-        if declare:
+        code_pays, source = pays_du_serveur(guild, config)
+        sources_pays[source] = sources_pays.get(source, 0) + 1
+        if source == "declare":
             pays_declares += 1
-        if code_pays is None:
-            case = pays_inconnus
-        else:
-            case = pays.setdefault(code_pays, {"code": code_pays,
-                                               "country": code_pays,
-                                               "flag": drapeau_du_pays(code_pays),
-                                               "servers": 0, "members": 0})
+        case = pays.setdefault(code_pays, {"code": code_pays,
+                                           "country": code_pays,
+                                           "flag": drapeau_du_pays(code_pays),
+                                           "servers": 0, "members": 0})
         case["servers"] += 1
         case["members"] += compte
 
@@ -6199,8 +6235,9 @@ def build_public_stats():
         # Combien de serveurs ont vraiment choisi leur pays, par opposition
         # a ceux dont il est seulement deduit de la langue.
         "countries_declared": pays_declares,
-        "unspecified_country": {"servers": pays_inconnus["servers"],
-                                "members": pays_inconnus["members"]},
+        # Detail des sources : combien de serveurs par echelon de deduction.
+        # C'est ce qui permet de savoir a quel point la carte est fiable.
+        "country_sources": sources_pays,
         "unspecified": {"servers": inconnus["servers"], "members": inconnus["members"]},
         "generated_at": now().isoformat(),
         "language_source": "langue configurée dans ModBot, ou langue du serveur "

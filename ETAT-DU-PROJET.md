@@ -1589,3 +1589,48 @@ bien tous les serveurs.
 Code mort supprimé au passage : `nomDeLangue()` n'avait plus d'appelant, et
 cinq clefs de traduction plus d'emploi (958 → 953). Le test i18n refuse les
 clefs orphelines, il les a signalées tout seul.
+
+### Second correctif : plus aucun membre hors de la carte
+
+Demande : « les 6 704 personnes qui sont et celles qui seront rajoutées doivent
+être mises dans un pays, par logique ou déduction ».
+
+`pays_du_serveur()` suit désormais **quatre échelons**, du plus sûr au plus
+faible — le premier qui répond gagne :
+
+| # | Source | Signal |
+|---|---|---|
+| 1 | `declare` | Le pays choisi dans le dashboard |
+| 2 | `langue` | Langue ModBot réglée, ou locale d'un serveur Communautaire |
+| 3 | `region` | Une région vocale fixée à la main sur un salon |
+| 4 | `defaut` | Rien de tout cela : pays de la langue par défaut du bot |
+
+L'échelon 3 est un vrai signal géographique : personne ne choisit « Sydney »
+par hasard. Les régions américaines pointent toutes vers `US`, et « europe »
+est trop vague pour conclure — elle n'est donc pas dans la table.
+
+**L'échelon 4 est une supposition, pas une information.** Un serveur qui n'a
+jamais rien réglé est compté en France parce que ModBot parle français par
+défaut, pas parce qu'on sait quoi que ce soit de lui. C'est le prix d'une carte
+sans trou, et c'est assumé.
+
+Pour que cela reste mesurable, `/api/public/stats` expose **`country_sources`**
+— le nombre de serveurs par échelon. On sait donc exactement ce qui est su et
+ce qui est supposé, et `countries_declared` reste le chiffre à faire monter.
+
+Deux vérifications tiennent l'invariant demandé : **aucun serveur** et **aucun
+membre** ne reste hors du classement. `unspecified_country` disparaît, faute
+d'objet.
+
+### Un piège d'outillage, corrigé
+
+Le script de fusion des traductions n'écrasait **jamais** une valeur existante —
+règle utile à la migration initiale, néfaste ensuite : deux corrections
+successives de `stats.note` n'étaient jamais parties en ligne, le fichier
+gardant la toute première version. Une liste `FORCER` rend explicites les clefs
+dont le texte a changé.
+
+Deuxième piège du même passage : un `"stats.note"` ajouté en double dans les
+dictionnaires anglais et arabe. En Python, la **dernière** définition gagne
+silencieusement — donc l'ancienne valeur écrasait la nouvelle. Un contrôle de
+doublons a été passé sur les cinq fichiers de traduction.

@@ -42,11 +42,12 @@ def verifier(nom, condition, detail=""):
 class FauxGuild:
     """Serveur minimal : seuls les champs lus par la repartition par langue."""
 
-    def __init__(self, gid, features=(), locale="", membres=10):
+    def __init__(self, gid, features=(), locale="", membres=10, region=None):
         self.id = gid
         self.features = list(features)
         self.preferred_locale = locale
         self.member_count = membres
+        self.voice_channels = [type("Salon", (), {"rtc_region": region})()] if region else []
 
 
 class FauxBot:
@@ -112,11 +113,12 @@ def verifier_repartition_langues():
 
 def verifier_repartition_pays():
     """
-    Le pays n'est jamais deduit : Discord ne le communique pas, et le
-    deviner depuis la locale comptait des serveurs francophones sous
-    « Etats-Unis ». Seule vaut la declaration du proprietaire.
+    Chaque serveur doit tomber dans un pays : c'est la demande, et c'est
+    aussi ce qui rend la carte lisible. Le prix a payer est un dernier
+    echelon qui SUPPOSE au lieu de savoir ; ces verifications s'assurent
+    qu'il reste identifie comme tel.
     """
-    print("\n--- Repartition par pays (declaration seulement) ---")
+    print("\n--- Repartition par pays (chaine de deduction) ---")
     drapeau = bot_mod.drapeau_du_pays
     pays = bot_mod.pays_du_serveur
 
@@ -129,38 +131,39 @@ def verifier_repartition_pays():
     else:
         verifier("tout code invalide retombe sur le globe", True)
 
-    verifier("pays declare, minuscule acceptee",
-             pays(FauxGuild(1), {"1": {"pays": "be"}}) == ("BE", True))
-    verifier("sans rien du tout -> aucun pays",
-             pays(FauxGuild(2), {}) == (None, False))
-    verifier("declaration vide, aucune langue -> aucun pays",
-             pays(FauxGuild(3), {"3": {"pays": ""}}) == (None, False))
-    verifier("un nom de pays n'est pas un code",
-             pays(FauxGuild(4), {"4": {"pays": "Belgique"}}) == (None, False))
+    # ── Les quatre echelons, du plus sur au plus faible ──────────────
+    verifier("1. declaration du dashboard",
+             pays(FauxGuild(1), {"1": {"pays": "be"}}) == ("BE", "declare"))
+    verifier("2. langue reglee dans ModBot",
+             pays(FauxGuild(2), {"2": {"langue": "en"}}) == ("GB", "langue"))
+    verifier("2. locale d'un serveur Communautaire",
+             pays(FauxGuild(3, ("COMMUNITY",), "bg"), {}) == ("BG", "langue"))
+    verifier("3. region vocale fixee a la main",
+             pays(FauxGuild(4, region="sydney"), {}) == ("AU", "region"))
+    verifier("4. rien de connu -> langue par defaut du bot",
+             pays(FauxGuild(5), {}) == ("FR", "defaut"))
 
-    # Deduction depuis la langue : c'est un DEFAUT, jamais une declaration.
-    # Seuls `fr` et `en` sont reglables comme langue ModBot : les autres
-    # langues ne remontent que de la locale d'un serveur Communautaire.
-    verifier("langue d'un serveur communautaire -> pays deduit, non declare",
-             pays(FauxGuild(5, ("COMMUNITY",), "bg"), {}) == ("BG", False))
-    verifier("la declaration prime sur la deduction",
-             pays(FauxGuild(6), {"6": {"langue": "fr", "pays": "BE"}}) == ("BE", True))
-    # Le piege que cette ligne verrouille : un serveur belge en francais est
-    # compte en France tant qu'il n'a pas declare son pays. C'est assume,
-    # mais il ne faut pas que cela se transforme en « declare ».
-    verifier("serveur francophone sans declaration : deduit FR, non declare",
-             pays(FauxGuild(7), {"7": {"langue": "fr"}}) == ("FR", False))
-    verifier("la locale Discord d'un serveur non communautaire ne sert a rien",
-             pays(FauxGuild(8, locale="en-US"), {}) == (None, False))
+    verifier("la declaration prime sur tout le reste",
+             pays(FauxGuild(6, ("COMMUNITY",), "bg", region="sydney"),
+                  {"6": {"pays": "MA", "langue": "en"}}) == ("MA", "declare"))
+    verifier("la langue prime sur la region vocale",
+             pays(FauxGuild(7, region="sydney"), {"7": {"langue": "en"}}) == ("GB", "langue"))
+    verifier("une region vocale automatique n'apprend rien",
+             pays(FauxGuild(8, region="europe"), {}) == ("FR", "defaut"))
+    verifier("un nom de pays n'est pas un code, on redescend d'un echelon",
+             pays(FauxGuild(9), {"9": {"pays": "Belgique"}}) == ("FR", "defaut"))
 
+    # ── Agregation ───────────────────────────────────────────────────
     original = bot_mod.bot
+    original_jload = bot_mod.jload
     bot_mod.bot = FauxBot([
-        FauxGuild(10, ("COMMUNITY",), "fr", 100),
-        FauxGuild(11, ("COMMUNITY",), "fr", 50),
-        FauxGuild(12, membres=30),
+        FauxGuild(10, ("COMMUNITY",), "fr", 100),       # declare BE
+        FauxGuild(11, ("COMMUNITY",), "fr", 50),        # declare be
+        FauxGuild(12, membres=30),                      # rien -> defaut FR
+        FauxGuild(13, ("COMMUNITY",), "bg", 20),        # langue -> BG
+        FauxGuild(14, membres=40, region="sydney"),     # region -> AU
     ])
     config = {"10": {"pays": "BE"}, "11": {"pays": "be"}}   # meme pays, casse differente
-    original_jload = bot_mod.jload
     bot_mod.jload = lambda chemin: config
     try:
         stats = bot_mod.build_public_stats()
@@ -169,48 +172,34 @@ def verifier_repartition_pays():
         bot_mod.jload = original_jload
 
     verifier("deux ecritures du meme code comptent pour un pays",
-             stats["countries"] == 1, str(stats["countries"]))
-    declares = [e for e in stats["top_countries"] if not e.get("unknown")]
-    verifier("les membres des deux serveurs sont additionnes",
-             declares and declares[0]["members"] == 150,
-             str(declares))
-    verifier("le drapeau accompagne le pays",
-             declares and declares[0]["flag"] == "🇧🇪")
-    # Le classement ne montre que des pays reels : plus de case « Non
-    # renseigne ». Les serveurs sans signal restent comptes a part, pour
-    # que le chiffre existe meme s'il n'est pas affiche.
+             stats["countries"] == 4, str(stats["countries"]))
+    par_code = {e["code"]: e for e in stats["top_countries"]}
+    verifier("les membres des deux serveurs belges sont additionnes",
+             par_code.get("BE", {}).get("members") == 150, str(par_code.get("BE")))
+    verifier("le drapeau accompagne le pays", par_code.get("BE", {}).get("flag") == "🇧🇪")
+
+    # L'invariant demande : personne ne reste hors de la carte.
+    verifier("AUCUN serveur ne reste sans pays",
+             sum(e["servers"] for e in stats["top_countries"]) == stats["servers"],
+             f'{sum(e["servers"] for e in stats["top_countries"])} / {stats["servers"]}')
+    verifier("AUCUN membre ne reste hors de la carte",
+             sum(e["members"] for e in stats["top_countries"]) == stats["members_protected"],
+             f'{sum(e["members"] for e in stats["top_countries"])} / {stats["members_protected"]}')
     verifier("aucune case « Non renseigne » dans le classement",
-             all(not e.get("unknown") for e in stats["top_countries"]),
-             str(stats["top_countries"]))
+             all(not e.get("unknown") for e in stats["top_countries"]))
     verifier("chaque ligne porte un vrai code pays",
              all(len(e["code"]) == 2 for e in stats["top_countries"]))
-    verifier("les serveurs sans pays restent comptes a part",
-             stats["unspecified_country"]["servers"] == 1,
-             str(stats["unspecified_country"]))
-    verifier("classement et non-renseignes couvrent tous les serveurs",
-             sum(e["servers"] for e in stats["top_countries"])
-             + stats["unspecified_country"]["servers"] == stats["servers"])
+
+    # La fiabilite reste mesurable : on sait ce qui est su et ce qui est suppose.
+    verifier("les declarations sont comptees", stats["countries_declared"] == 2,
+             str(stats["countries_declared"]))
+    verifier("le detail des sources est expose",
+             stats["country_sources"] == {"declare": 2, "langue": 1, "region": 1, "defaut": 1},
+             str(stats["country_sources"]))
+    verifier("la somme des sources couvre tous les serveurs",
+             sum(stats["country_sources"].values()) == stats["servers"])
     verifier("la repartition par langue survit a l'ajout des pays",
              stats["languages"] >= 1 and isinstance(stats["top_languages"], list))
-    verifier("les deux declarations sont comptees comme telles",
-             stats["countries_declared"] == 2, str(stats.get("countries_declared")))
-
-    # Sans aucune declaration, la langue fournit le defaut : la carte n'est
-    # plus vide, mais rien n'est compte comme declare.
-    bot_mod.bot = FauxBot([FauxGuild(20, ("COMMUNITY",), "bg", 80)])
-    bot_mod.jload = lambda chemin: {}
-    try:
-        deduit = bot_mod.build_public_stats()
-    finally:
-        bot_mod.bot = original
-        bot_mod.jload = original_jload
-    verifier("un pays est deduit de la langue",
-             deduit["countries"] == 1, str(deduit["top_countries"]))
-    verifier("mais aucun n'est compte comme declare",
-             deduit["countries_declared"] == 0)
-    verifier("le drapeau du pays deduit est correct",
-             deduit["top_countries"][0]["flag"] == "🇧🇬",
-             deduit["top_countries"][0]["flag"])
 
 
 def verifier_diagnostic_ia():
