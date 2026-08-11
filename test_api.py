@@ -130,13 +130,28 @@ def verifier_repartition_pays():
         verifier("tout code invalide retombe sur le globe", True)
 
     verifier("pays declare, minuscule acceptee",
-             pays(FauxGuild(1), {"1": {"pays": "be"}}) == "BE")
-    verifier("aucune declaration -> None", pays(FauxGuild(2), {}) is None)
-    verifier("declaration vide -> None", pays(FauxGuild(3), {"3": {"pays": ""}}) is None)
+             pays(FauxGuild(1), {"1": {"pays": "be"}}) == ("BE", True))
+    verifier("sans rien du tout -> aucun pays",
+             pays(FauxGuild(2), {}) == (None, False))
+    verifier("declaration vide, aucune langue -> aucun pays",
+             pays(FauxGuild(3), {"3": {"pays": ""}}) == (None, False))
     verifier("un nom de pays n'est pas un code",
-             pays(FauxGuild(4), {"4": {"pays": "Belgique"}}) is None)
-    verifier("la locale Discord ne sert jamais de pays",
-             pays(FauxGuild(5, ("COMMUNITY",), "fr"), {}) is None)
+             pays(FauxGuild(4), {"4": {"pays": "Belgique"}}) == (None, False))
+
+    # Deduction depuis la langue : c'est un DEFAUT, jamais une declaration.
+    # Seuls `fr` et `en` sont reglables comme langue ModBot : les autres
+    # langues ne remontent que de la locale d'un serveur Communautaire.
+    verifier("langue d'un serveur communautaire -> pays deduit, non declare",
+             pays(FauxGuild(5, ("COMMUNITY",), "bg"), {}) == ("BG", False))
+    verifier("la declaration prime sur la deduction",
+             pays(FauxGuild(6), {"6": {"langue": "fr", "pays": "BE"}}) == ("BE", True))
+    # Le piege que cette ligne verrouille : un serveur belge en francais est
+    # compte en France tant qu'il n'a pas declare son pays. C'est assume,
+    # mais il ne faut pas que cela se transforme en « declare ».
+    verifier("serveur francophone sans declaration : deduit FR, non declare",
+             pays(FauxGuild(7), {"7": {"langue": "fr"}}) == ("FR", False))
+    verifier("la locale Discord d'un serveur non communautaire ne sert a rien",
+             pays(FauxGuild(8, locale="en-US"), {}) == (None, False))
 
     original = bot_mod.bot
     bot_mod.bot = FauxBot([
@@ -167,6 +182,25 @@ def verifier_repartition_pays():
              sum(e["servers"] for e in stats["top_countries"]) == stats["servers"])
     verifier("la repartition par langue survit a l'ajout des pays",
              stats["languages"] >= 1 and isinstance(stats["top_languages"], list))
+    verifier("les deux declarations sont comptees comme telles",
+             stats["countries_declared"] == 2, str(stats.get("countries_declared")))
+
+    # Sans aucune declaration, la langue fournit le defaut : la carte n'est
+    # plus vide, mais rien n'est compte comme declare.
+    bot_mod.bot = FauxBot([FauxGuild(20, ("COMMUNITY",), "bg", 80)])
+    bot_mod.jload = lambda chemin: {}
+    try:
+        deduit = bot_mod.build_public_stats()
+    finally:
+        bot_mod.bot = original
+        bot_mod.jload = original_jload
+    verifier("un pays est deduit de la langue",
+             deduit["countries"] == 1, str(deduit["top_countries"]))
+    verifier("mais aucun n'est compte comme declare",
+             deduit["countries_declared"] == 0)
+    verifier("le drapeau du pays deduit est correct",
+             deduit["top_countries"][0]["flag"] == "🇧🇬",
+             deduit["top_countries"][0]["flag"])
 
 
 def verifier_diagnostic_ia():

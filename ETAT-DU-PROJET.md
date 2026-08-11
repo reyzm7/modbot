@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **11 août 2026** (voir §21 pour le dernier lot livré).
+> Dernière mise à jour : **11 août 2026** (voir §22 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -39,7 +39,7 @@ sans elle.
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 63 + 122 + 2 + 18, tous au vert |
+| Tests | 63 + 129 + 2 + 18, tous au vert |
 
 ---
 
@@ -1502,3 +1502,70 @@ est trié correctement dans les trois.
 échouer une fois sur contention (les attentes sont à durée fixe). Trois
 passages consécutifs isolés donnent 24/24 sur le menu. En cas d'échec isolé,
 relancer la suite seule avant de conclure à une régression.
+
+---
+
+## 22. Livré le 11 août 2026 — pays déduits, captcha lisible, carte d'arrivée
+
+### 1. Le pays se déduit de la langue
+
+Le §21 exigeait une déclaration explicite, ce qui laissait la carte vide tant
+que personne n'avait rempli le champ. Le pays est désormais **déduit de la
+langue du serveur**, la déclaration du dashboard servant à corriger.
+
+```
+pays_du_serveur(guild, config) -> (code, declare)
+```
+
+`declare` distingue les deux cas, et `/api/public/stats` expose
+`countries_declared` : on sait combien de serveurs ont vraiment choisi.
+
+**La limite est réelle et assumée :** une langue n'est pas un pays. Le français
+se parle en Belgique, en Suisse, au Canada et au Maroc — **VPG Belgique sera
+compté en France** tant que son pays n'est pas choisi dans le dashboard. Une
+vérification verrouille précisément ce cas, pour que le déduit ne se déguise
+jamais en déclaré.
+
+À noter : seuls `fr` et `en` sont réglables comme langue ModBot. Les autres
+langues (bulgare, allemand…) ne remontent que de la locale d'un serveur
+**Communautaire**. Pour un serveur non communautaire, la déclaration reste le
+seul moyen d'apparaître sous son vrai pays.
+
+### 2. Le captcha se lit
+
+L'image passe de **420×150 à 640×240**, et les lettres de **52–68 px à
+96–122 px**. Les déformations qui gênent un robot gênent beaucoup moins un
+humain quand les caractères sont grands.
+
+Surtout : **le captcha attribue maintenant un rôle même sans configuration.**
+Avant, sans `captcha_role` réglé, le membre répondait juste… et rien ne se
+passait. `role_de_verification()` reprend un rôle nommé « Verifier » s'il
+existe, le crée sinon, puis **le mémorise** pour que le serveur garde le même
+ensuite. La configuration prime toujours.
+
+### 3. La carte d'arrivée
+
+Refaite d'après la maquette : panneau sombre à coins arrondis, avatar rond
+cerclé de blanc, la phrase en grand, le numéro du membre en dessous.
+
+Deux détails qui comptent :
+
+- le fond du serveur, s'il en a choisi un, **reste visible autour du panneau**
+  au lieu d'être recouvert — c'est ce qui distingue deux serveurs ;
+- la phrase porte un pseudo de longueur imprévisible : la police **se réduit
+  par paliers** (46 → 26 px) jusqu'à tenir, plutôt que de couper le pseudo.
+  Vérifié de 1 à 28 caractères.
+
+Les textes passent par `tr()` : « vient de rejoindre le serveur » en français,
+« just joined the server » en anglais.
+
+### Tests
+
+| Suite | Résultat |
+|---|---|
+| `test_security.py` | **63/63** |
+| `test_api.py` | **129/129** (7 nouvelles sur la déduction) |
+| `modbot-site/test_i18n.py` | **18/18** |
+
+Captcha et cartes rendus pour de vrai avec Pillow, hors du bot, et relus à
+l'œil : le code `A4KP7` se lit sans effort, la carte reproduit la maquette.

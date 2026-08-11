@@ -127,6 +127,11 @@ TEXTS = {
         "en": "Control panel for **{bot_name}** on **{guild_name}**. Changes are saved per server and statuses refresh here.",
     },
     "language": {"fr": "Langue", "en": "Language"},
+    "card_joined": {"fr": "{name} vient de rejoindre le serveur",
+                    "en": "{name} just joined the server"},
+    "card_left": {"fr": "{name} a quitté le serveur",
+                  "en": "{name} just left the server"},
+    "card_member_number": {"fr": "Membre n°{number}", "en": "Member #{number}"},
     "language_panel_title": {"fr": "Langue du bot", "en": "Bot language"},
     "language_panel_desc": {"fr": "Choisis la langue utilisee par le bot sur ce serveur.", "en": "Choose the language used by the bot on this server."},
     "language_current": {"fr": "Langue actuelle", "en": "Current language"},
@@ -2331,7 +2336,10 @@ def render_captcha_image(code):
     if not PIL_AVAILABLE or not code:
         return None
     try:
-        largeur, hauteur = 420, 150
+        # Grand format : le code se lit sur un telephone sans zoomer, et
+        # les deformations qui genent un robot genent moins un humain
+        # quand les lettres sont grandes.
+        largeur, hauteur = 640, 240
         image = Image.new("RGB", (largeur, hauteur), (32, 34, 44))
         dessin = ImageDraw.Draw(image)
 
@@ -2344,7 +2352,7 @@ def render_captcha_image(code):
             x2, y2 = random.randint(0, largeur), random.randint(0, hauteur)
             dessin.line([(x1, y1), (x2, y2)],
                         fill=(random.randint(60, 110),) * 3, width=random.randint(1, 3))
-        for _ in range(320):
+        for _ in range(520):
             x, y = random.randint(0, largeur), random.randint(0, hauteur)
             dessin.point((x, y), fill=(random.randint(70, 150),) * 3)
 
@@ -2352,21 +2360,21 @@ def render_captcha_image(code):
         # varient, ce qui casse la reconnaissance automatique simple.
         pas = largeur // (len(code) + 1)
         for index, caractere in enumerate(code):
-            taille = random.randint(52, 68)
+            taille = random.randint(96, 122)
             police = _welcome_font("Inter", taille, bold=True)
             couleur = (random.randint(190, 255), random.randint(190, 255), random.randint(210, 255))
-            vignette = Image.new("RGBA", (taille + 30, taille + 30), (0, 0, 0, 0))
-            ImageDraw.Draw(vignette).text((14, 4), caractere, font=police, fill=couleur + (255,))
-            vignette = vignette.rotate(random.randint(-26, 26), resample=Image.BICUBIC, expand=False)
-            x = pas * (index + 1) - taille // 2 + random.randint(-6, 6)
-            y = (hauteur - taille) // 2 + random.randint(-12, 12)
+            vignette = Image.new("RGBA", (taille + 52, taille + 52), (0, 0, 0, 0))
+            ImageDraw.Draw(vignette).text((24, 6), caractere, font=police, fill=couleur + (255,))
+            vignette = vignette.rotate(random.randint(-22, 22), resample=Image.BICUBIC, expand=False)
+            x = pas * (index + 1) - taille // 2 + random.randint(-8, 8)
+            y = (hauteur - taille) // 2 + random.randint(-16, 16)
             image.paste(vignette, (max(0, x), max(0, y)), vignette)
 
         # Arc parasite par-dessus le texte
-        dessin.arc([random.randint(0, 60), 20,
-                    largeur - random.randint(0, 60), hauteur - 20],
+        dessin.arc([random.randint(0, 90), 30,
+                    largeur - random.randint(0, 90), hauteur - 30],
                    start=random.randint(0, 180), end=random.randint(180, 360),
-                   fill=(random.randint(120, 190),) * 3, width=3)
+                   fill=(random.randint(120, 190),) * 3, width=4)
 
         tampon = io.BytesIO()
         image.save(tampon, format="PNG")
@@ -2897,11 +2905,47 @@ async def _construire_defi(interaction, role_id):
     return embed, fichier
 
 
+NOM_ROLE_VERIFIE = "Verifier"
+
+
+async def role_de_verification(guild, role_id=""):
+    """
+    Role a donner apres un captcha reussi.
+
+    La configuration prime toujours. Sans configuration, le captcha ne
+    servait a rien : le membre repondait juste, et rien ne changeait. On
+    reprend donc un role nomme « Verifier » s'il existe deja, sinon on le
+    cree — puis on le memorise, pour que le serveur garde le meme role
+    aux verifications suivantes.
+    """
+    if str(role_id).isdigit():
+        existant = guild.get_role(int(role_id))
+        if existant:
+            return existant, ""
+
+    deja = discord.utils.find(
+        lambda r: r.name.lower() == NOM_ROLE_VERIFIE.lower(), guild.roles)
+    if deja:
+        update_cfg(guild.id, "captcha_role", str(deja.id))
+        return deja, ""
+
+    try:
+        cree = await guild.create_role(
+            name=NOM_ROLE_VERIFIE, colour=discord.Colour(0x43B581),
+            reason="Role de verification du captcha ModBot")
+    except discord.Forbidden:
+        return None, "ModBot n'a pas la permission « Gerer les roles » pour creer le role de verification."
+    except Exception:
+        return None, "Impossible de creer le role de verification. Previens un administrateur."
+    update_cfg(guild.id, "captcha_role", str(cree.id))
+    return cree, ""
+
+
 async def accorder_acces_captcha(member, role_id):
     """Attribue le role de verification. Retourne (succes, message d'erreur)."""
-    if not role_id:
-        return True, ""
-    role = member.guild.get_role(int(role_id)) if str(role_id).isdigit() else None
+    role, erreur = await role_de_verification(member.guild, role_id)
+    if erreur:
+        return False, erreur
     if not role:
         return False, "Le role de verification n'existe plus. Previens un administrateur."
     if role in member.roles:
@@ -5970,20 +6014,6 @@ def drapeau_du_pays(code):
     return "".join(chr(0x1F1E6 + ord(lettre) - ord("A")) for lettre in code)
 
 
-def pays_du_serveur(guild, config=None):
-    """
-    Pays declare par le proprietaire du serveur, ou None.
-
-    Rien n'est devine : sans declaration explicite, le serveur reste
-    « Non renseigné ». Un pays invente vaudrait moins qu'une case vide.
-    """
-    cfg = (config or {}).get(str(guild.id)) or {}
-    code = str(cfg.get("pays") or "").strip().upper()
-    if len(code) != 2 or not code.isalpha():
-        return None
-    return code
-
-
 LOCALE_LANGUES = {
     "fr":      ("fr", "Français", "🇫🇷"),
     "en":      ("en", "Anglais", "🇬🇧"),
@@ -6054,6 +6084,48 @@ def langue_du_serveur(guild, config=None):
     return LOCALE_LANGUES.get(locale) or LOCALE_LANGUES.get(locale.split("-")[0])
 
 
+# Pays ou la langue est majoritairement parlee. Sert UNIQUEMENT de valeur
+# par defaut quand le serveur n'a pas declare son pays.
+#
+# Une langue n'est pas un pays : le francais se parle en Belgique, en
+# Suisse, au Canada et au Maroc. Un serveur belge qui laisse ModBot en
+# francais sera donc compte en France tant qu'il n'aura pas choisi son
+# pays dans le dashboard. C'est le prix d'un defaut : il evite une carte
+# vide, il ne remplace pas une declaration.
+PAYS_PAR_LANGUE = {
+    "fr": "FR", "en": "GB", "de": "DE", "es": "ES", "it": "IT", "pt": "PT",
+    "nl": "NL", "pl": "PL", "ru": "RU", "tr": "TR", "sv": "SE", "da": "DK",
+    "fi": "FI", "no": "NO", "cs": "CZ", "el": "GR", "hu": "HU", "ro": "RO",
+    "uk": "UA", "bg": "BG", "hr": "HR", "lt": "LT", "vi": "VN", "th": "TH",
+    "id": "ID", "ja": "JP", "ko": "KR", "zh": "CN", "hi": "IN", "ar": "SA",
+    "he": "IL",
+}
+
+
+def pays_du_serveur(guild, config=None):
+    """
+    Pays du serveur, et la facon dont on le sait.
+
+    Retourne (code, declare) : `declare` vaut True quand le proprietaire a
+    choisi son pays dans le dashboard, False quand il est seulement deduit
+    de la langue du bot. (None, False) si on ne sait rien.
+
+    La declaration prime toujours : c'est la seule source exacte, et elle
+    permet de corriger la deduction quand elle se trompe.
+    """
+    cfg = (config or {}).get(str(guild.id)) or {}
+    code = str(cfg.get("pays") or "").strip().upper()
+    if len(code) == 2 and code.isalpha():
+        return code, True
+
+    identifiee = langue_du_serveur(guild, config)
+    if identifiee:
+        deduit = PAYS_PAR_LANGUE.get(identifiee[0])
+        if deduit:
+            return deduit, False
+    return None, False
+
+
 def build_public_stats():
     """
     Agrege les chiffres publics du reseau ModBot.
@@ -6072,6 +6144,7 @@ def build_public_stats():
                      "unknown": True}
     membres = 0
     serveurs = 0
+    pays_declares = 0
 
     for guild in bot.guilds:
         compte = int(guild.member_count or 0)
@@ -6091,7 +6164,9 @@ def build_public_stats():
         entree["servers"] += 1
         entree["members"] += compte
 
-        code_pays = pays_du_serveur(guild, config)
+        code_pays, declare = pays_du_serveur(guild, config)
+        if declare:
+            pays_declares += 1
         if code_pays is None:
             case = pays_inconnus
         else:
@@ -6119,6 +6194,9 @@ def build_public_stats():
         "top_languages": classement,
         "countries": len(pays),
         "top_countries": classement_pays,
+        # Combien de serveurs ont vraiment choisi leur pays, par opposition
+        # a ceux dont il est seulement deduit de la langue.
+        "countries_declared": pays_declares,
         "unspecified": {"servers": inconnus["servers"], "members": inconnus["members"]},
         "generated_at": now().isoformat(),
         "language_source": "langue configurée dans ModBot, ou langue du serveur "
@@ -8045,62 +8123,104 @@ def _center_text(draw, box, text, font, fill, stroke_width=0, stroke_fill=(0, 0,
     draw.text((x, y), text, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=stroke_fill)
 
 async def build_member_event_card(member, system, departure=False):
+    """
+    Carte d'arrivee ou de depart, facon message Discord.
+
+    Un panneau sombre a coins arrondis, l'avatar rond cercle de blanc, la
+    phrase en grand et le numero du membre en dessous. Le fond du serveur,
+    s'il en a choisi un, reste visible derriere le panneau plutot que
+    d'etre recouvert : c'est ce qui distingue deux serveurs.
+    """
     if not PIL_AVAILABLE:
         return None
-    width, height = 1000, 360
-    background_bytes = await _load_image_bytes(system.get("background") or "assets/default_banner.png")
+    largeur, hauteur = 1000, 380
+    marge = 26
+    rayon = 34
+
+    # ── Fond ─────────────────────────────────────────────────────────
+    fond_octets = await _load_image_bytes(system.get("background") or "")
     try:
-        if background_bytes:
-            base = Image.open(io.BytesIO(background_bytes)).convert("RGB")
-            base = ImageOps.fit(base, (width, height), method=Image.Resampling.LANCZOS)
+        if fond_octets:
+            base = Image.open(io.BytesIO(fond_octets)).convert("RGB")
+            base = ImageOps.fit(base, (largeur, hauteur), method=Image.Resampling.LANCZOS)
         else:
-            base = Image.new("RGB", (width, height), (30, 44, 138))
+            base = Image.new("RGB", (largeur, hauteur), (0, 0, 0))
     except Exception:
-        base = Image.new("RGB", (width, height), (30, 44, 138))
+        base = Image.new("RGB", (largeur, hauteur), (0, 0, 0))
+    base = base.convert("RGBA")
 
-    overlay = Image.new("RGBA", (width, height), (14, 18, 56, 95 if not departure else 120))
-    base = Image.alpha_composite(base.convert("RGBA"), overlay)
-    draw = ImageDraw.Draw(base)
+    # ── Panneau arrondi ──────────────────────────────────────────────
+    # Dessine a part puis colle : cela donne des coins nets, et le fond
+    # du serveur transparait autour.
+    panneau = Image.new("RGBA", (largeur - marge * 2, hauteur - marge * 2), (0, 0, 0, 0))
+    ImageDraw.Draw(panneau).rounded_rectangle(
+        (0, 0, panneau.width - 1, panneau.height - 1), radius=rayon,
+        fill=(18, 19, 24, 242))
+    base.alpha_composite(panneau, (marge, marge))
+    dessin = ImageDraw.Draw(base)
 
-    avatar_size = 132
-    avatar_x = (width - avatar_size) // 2
-    avatar_y = 38
-    avatar_bytes = None
+    # ── Avatar rond, cercle de blanc ─────────────────────────────────
+    taille_avatar = 150
+    ax = (largeur - taille_avatar) // 2
+    ay = marge + 34
     try:
-        avatar_bytes = await _load_image_bytes(str(member.display_avatar.with_size(256).url))
+        octets = await _load_image_bytes(str(member.display_avatar.with_size(256).url))
     except Exception:
-        avatar_bytes = None
-    if avatar_bytes:
+        octets = None
+
+    anneau = Image.new("RGBA", (taille_avatar + 14, taille_avatar + 14), (0, 0, 0, 0))
+    ImageDraw.Draw(anneau).ellipse(
+        (0, 0, taille_avatar + 13, taille_avatar + 13), fill=(255, 255, 255, 245))
+    base.alpha_composite(anneau, (ax - 7, ay - 7))
+
+    pose = False
+    if octets:
         try:
-            avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
-            avatar = ImageOps.fit(avatar, (avatar_size, avatar_size), method=Image.Resampling.LANCZOS)
-            mask = Image.new("L", (avatar_size, avatar_size), 0)
-            mask_draw = ImageDraw.Draw(mask)
-            mask_draw.ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
-            ring = Image.new("RGBA", (avatar_size + 12, avatar_size + 12), (0, 0, 0, 0))
-            ring_draw = ImageDraw.Draw(ring)
-            ring_draw.ellipse((0, 0, avatar_size + 11, avatar_size + 11), fill=(255, 255, 255, 240))
-            base.alpha_composite(ring, (avatar_x - 6, avatar_y - 6))
-            base.paste(avatar, (avatar_x, avatar_y), mask)
+            avatar = Image.open(io.BytesIO(octets)).convert("RGBA")
+            avatar = ImageOps.fit(avatar, (taille_avatar, taille_avatar),
+                                  method=Image.Resampling.LANCZOS)
+            masque = Image.new("L", (taille_avatar, taille_avatar), 0)
+            ImageDraw.Draw(masque).ellipse(
+                (0, 0, taille_avatar - 1, taille_avatar - 1), fill=255)
+            base.paste(avatar, (ax, ay), masque)
+            pose = True
         except Exception:
-            draw.ellipse((avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size), fill=(125, 154, 255), outline=(255, 255, 255), width=5)
-    else:
-        draw.ellipse((avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size), fill=(125, 154, 255), outline=(255, 255, 255), width=5)
+            pose = False
+    if not pose:
+        dessin.ellipse((ax, ay, ax + taille_avatar, ay + taille_avatar),
+                       fill=(88, 101, 242, 255))
 
-    font_name = system.get("font") or "Inter"
-    title_font = _welcome_font(font_name, 64, bold=True)
-    name_font = _welcome_font(font_name, 32, bold=True)
-    title_color = _welcome_rgb(system.get("color"), 0xFFFFFF)
-    title = "AU REVOIR" if departure else "BIENVENUE"
-    name = member.display_name.upper()[:32]
-    _center_text(draw, (80, 188, width - 80, 268), title, title_font, title_color, stroke_width=3, stroke_fill=(0, 0, 0))
-    _center_text(draw, (80, 258, width - 80, 315), name, name_font, (255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0))
+    # ── Textes ───────────────────────────────────────────────────────
+    police = system.get("font") or "Inter"
+    gid = member.guild.id
+    nom = (member.display_name or member.name)[:28]
+    phrase = tr(gid, "card_left" if departure else "card_joined", name=nom)
+    numero = tr(gid, "card_member_number",
+                number=max(1, int(getattr(member.guild, "member_count", 0) or 1)))
 
-    output = io.BytesIO()
-    base.convert("RGB").save(output, format="PNG", optimize=True)
-    output.seek(0)
-    filename = f"{'departure' if departure else 'welcome'}-{member.guild.id}-{member.id}.png"
-    return discord.File(output, filename=filename)
+    couleur_titre = _welcome_rgb(system.get("color"), 0xFFFFFF)
+    haut_titre = ay + taille_avatar + 26
+
+    # La phrase porte un nom de longueur imprevisible : on reduit la
+    # police tant qu'elle deborde, plutot que de couper le pseudo.
+    for taille in (46, 42, 38, 34, 30, 26):
+        titre = _welcome_font(police, taille, bold=True)
+        if not titre:
+            break
+        if dessin.textlength(phrase, font=titre) <= largeur - marge * 2 - 60:
+            break
+    _center_text(dessin, (marge, haut_titre, largeur - marge, haut_titre + 58),
+                 phrase, titre, couleur_titre)
+
+    sous_titre = _welcome_font(police, 26, bold=False)
+    _center_text(dessin, (marge, haut_titre + 62, largeur - marge, haut_titre + 104),
+                 numero, sous_titre, (150, 156, 168))
+
+    sortie = io.BytesIO()
+    base.convert("RGB").save(sortie, format="PNG", optimize=True)
+    sortie.seek(0)
+    nom_fichier = f"{'departure' if departure else 'welcome'}-{member.guild.id}-{member.id}.png"
+    return discord.File(sortie, filename=nom_fichier)
 
 async def send_dashboard_member_event(member, departure=False):
     cfg = get_cfg(member.guild.id)
