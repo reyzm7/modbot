@@ -35,7 +35,7 @@ sans elle.
 | `style.css` | 7 683 lignes |
 | `dashboard.html` | 1 141 lignes |
 | `translations.js` | 3 044 lignes |
-| Clefs de traduction | **953 × 3 langues** |
+| Clefs de traduction | **960 × 3 langues** |
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
@@ -1634,3 +1634,68 @@ Deuxième piège du même passage : un `"stats.note"` ajouté en double dans les
 dictionnaires anglais et arabe. En Python, la **dernière** définition gagne
 silencieusement — donc l'ancienne valeur écrasait la nouvelle. Un contrôle de
 doublons a été passé sur les cinq fichiers de traduction.
+
+---
+
+## 23. Livré le 11 août 2026 — changer de compte Discord
+
+**Demande :** « certaines personnes ont plusieurs comptes, mets dans le
+dashboard pour changer / se connecter avec un autre compte ».
+
+Rien ne permettait de savoir sous quel compte on était, ni d'en changer sans
+vider le stockage du navigateur à la main.
+
+### Ce qui a été ajouté
+
+Une pastille **« Connecté en tant que <pseudo> »** avec l'avatar Discord, et un
+menu à deux entrées : **Changer de compte** et **Se déconnecter**.
+
+Elle est présente **à deux endroits**, et c'est le point important : la barre du
+dashboard, mais aussi **l'écran de sélection de serveur**. Ce second
+emplacement compte au moins autant — c'est là qu'on s'aperçoit qu'on est sur le
+mauvais compte, en ne voyant pas les serveurs attendus. Le premier essai ne
+l'avait que dans la barre du dashboard, donc invisible tant qu'aucun serveur
+n'était choisi ; c'est le test au navigateur qui l'a révélé.
+
+### Ce que fait « Changer de compte »
+
+Trois étapes, dans cet ordre :
+
+1. **prévenir le bot** (`POST /api/logout`), sinon la session resterait valable
+   de son côté ;
+2. **effacer localement** les quatre traces (`session`, `access-token`,
+   `oauth-state`, `login-redirected`) — une seule oubliée et le dashboard se
+   reconnecte sur l'ancien compte sans rien demander ;
+3. **renvoyer vers Discord**.
+
+Le bot injoignable n'empêche pas de changer de compte : le jeton local, lui,
+est bien parti.
+
+Côté Discord, la route de connexion demandait déjà `prompt=consent` : l'écran
+d'autorisation s'affiche, avec le lien pour basculer de compte. Sans cela
+Discord ré-autoriserait le même compte en silence. Rien à changer.
+
+### Tests
+
+`verifier_compte.mjs` — 17 vérifications, l'API du bot étant simulée :
+affichage du pseudo et de l'avatar, ouverture du menu, fermeture par Échap et
+par clic extérieur, effacement des deux jetons, appel à `/api/logout`,
+redirection demandée, déconnexion sans redirection, et bloc masqué quand
+personne n'est connecté.
+
+Deux astuces de test, notées pour la prochaine fois :
+
+- une navigation interceptée par `route.abort()` fait quand même basculer le
+  document sur l'origine cible, et `localStorage` devient illisible depuis le
+  test. Un **`fulfill({ status: 204 })`** annule la navigation en gardant la
+  page courante ;
+- les deux blocs coexistent, dont un masqué : le test doit cliquer **celui qui
+  est visible**, pas le premier du document.
+
+### Incident sans conséquence
+
+L'atelier a été rembobiné à un commit antérieur en cours de session, et le
+travail sur les pays avait disparu localement. Le distant, lui, avait tout :
+`git fetch` puis `git reset --hard origin/main` a suffi. Réflexe à garder —
+**vérifier `git log HEAD..origin/main` avant de repartir**, plutôt que de
+construire sur une base périmée.
