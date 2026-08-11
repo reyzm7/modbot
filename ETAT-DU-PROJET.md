@@ -1864,3 +1864,77 @@ n'enlève pas les `..` : `../../etc/passwd` sortait de `BASE_DIR`. Un
 administrateur de serveur pouvait ainsi faire lire un fichier quelconque de la
 machine au bot. Le chemin est maintenant résolu puis vérifié comme restant
 sous `BASE_DIR`. Trois tentatives de traversée sont couvertes par les tests.
+
+## 27. Livré le 11 août 2026 — la bande vide de la barre du dashboard, et le wiki remis à jour
+
+### La bande noire au-dessus de la pastille
+
+Sur téléphone, une large bande vide séparait le logo ModBot de la pastille du
+compte, reléguée seule tout à droite d'une deuxième ligne.
+
+La barre restait une **grille** de trois colonnes dont celle du milieu
+réclamait 240 px au minimum. Sous 1120 px elle passait à une seule colonne :
+ses trois blocs s'empilaient alors sur toute la largeur, et `.dashboard-actions`
+— qui contient le compte, la langue et les deux boutons — était renvoyée seule
+sur une ligne. Le `flex-wrap` censé arranger cela était bien déclaré, mais **sur
+un conteneur grille, où il ne s'applique pas**.
+
+`display: contents` résout le problème sans toucher au HTML : la boîte de
+`.dashboard-actions` disparaît, ses enfants deviennent des éléments flexibles de
+la barre elle-même, et peuvent donc être ordonnés librement. D'où :
+
+| | Contenu |
+|---|---|
+| Ligne 1 | logo ModBot ····· pastille du compte |
+| Ligne 2 | serveur actif |
+| Ligne 3 | langue · Enregistrer · Retour au site |
+
+Hauteur de la barre : **267 → 211 px** sur téléphone, **184 → 121 px** sur
+tablette. Le pseudo revient dans la pastille — un avatar seul au milieu d'une
+bande vide n'apprenait à personne avec quel compte il était connecté.
+
+Vérifié à huit largeurs de 320 à 1440 px : aucun débordement, aucun
+chevauchement, aucun élément manquant.
+
+Un piège de mesure au passage : il existe **deux** `.account-switch` dans la
+page (barre du dashboard et écran de choix du serveur). Le second est plus haut
+dans le document ; `querySelector` renvoyait donc une boîte de taille nulle, et
+les contrôles passaient à vide. Les sélecteurs sont désormais préfixés par
+`.dashboard-topbar`.
+
+### Le wiki
+
+Il décrivait huit modules là où le dashboard en compte treize, et ignorait tout
+ce qui a été ajouté depuis. Ajouté : les treize modules réels, une section
+**Vérification** (captcha, rôle `Verifier` attribué et créé au besoin), une
+section **Arrivées et départs** (carte, image choisie depuis la galerie,
+variables), et une section **Compte et langue** (changement de compte, trois
+langues, pays du serveur).
+
+**Les commandes ont été confrontées au code.** Le wiki en citait 8 sur 24 — et
+en documentait 5 qui **n'existent pas** : `/poules`, `/huitieme`,
+`/classement`, `/podium`, `/inscription`. Elles appartiennent au module Tournois
+IFC, en attente de l'API. La section le disait en introduction, mais les
+présentait dans une grille identique à celle des vraies commandes : rien ne
+signalait qu'aucune ne répondrait. Un avertissement explicite les précède
+désormais, et les quatre commandes réelles qui manquaient (`/addticket`,
+`/infractions-reset`, `/profilestats`, `/massdm`) ont été ajoutées. Le
+croisement wiki ↔ `bot.py` ne laisse plus aucun écart.
+
+### Deux corrections dans les tests eux-mêmes
+
+- **Faux positif.** Le contrôle « substitution non remplacée » signalait
+  `{user}`, `{server}` et `{memberCount}` dans le wiki. Ce sont pourtant les
+  noms de variables *documentés*, affichés à dessein. Le contrôle ignore
+  maintenant ce qui est dans un `<code>`.
+- **La première correction en a cassé une autre.** Vouloir retirer les `<code>`
+  d'une copie détachée du document a changé la nature du contrôle : sur un nœud
+  détaché, `innerText` ne filtre plus rien, et le test s'est mis à lire les
+  panneaux *masqués* du dashboard, qui listent eux aussi ces variables. Le
+  parcours se fait désormais sur le DOM vivant, en sautant l'invisible et les
+  `<code>`. Contrôle négatif : une fausse substitution injectée dans du texte
+  visible est bien détectée.
+
+Une regle qui se confirme : quand un test devient rouge apres un changement de
+contenu, la premiere question n'est pas « comment le faire passer » mais « que
+verifiait-il exactement, et le verifie-t-il encore apres ma correction ».
