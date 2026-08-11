@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **10 août 2026** (voir §19 pour le dernier lot livré).
+> Dernière mise à jour : **11 août 2026** (voir §20 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -1327,12 +1327,12 @@ bascule : `dir="rtl"` en arabe, `lang` correct, aucune erreur JavaScript,
 aucune substitution `{x}` laissée à l'écran, et aucun mot français témoin
 visible en anglais ou en arabe.
 
-### Un défaut préexistant, non corrigé
+### Un défaut préexistant, corrigé depuis
 
-À 375 px, `index.html` et `wiki.html` débordent horizontalement (650 px pour
-375 px de large), à cause de `.nav-links` replié. **Vérifié identique sur la
-version d'avant ce lot** : le défaut ne vient pas des traductions. Laissé tel
-quel pour ne pas mélanger deux sujets dans un même lot.
+À 375 px, `index.html` et `wiki.html` débordaient horizontalement (650 px pour
+375 px de large), à cause de `.nav-links` replié. Vérifié identique sur la
+version d'avant ce lot : le défaut ne venait pas des traductions. C'était en
+fait le symptôme du menu mobile cassé — voir §20.
 
 ### Un troisième partenaire
 
@@ -1348,3 +1348,81 @@ donc aucune requête pour rien.
 Pour lui donner son vrai logo plus tard : récupérer `guild.id` et `icon` via
 l'API Discord, puis reprendre le gabarit des deux autres cartes
 (`cdn.discordapp.com/icons/<id>/<hash>.png?size=128`).
+
+---
+
+## 20. Livré le 11 août 2026 — le menu mobile s'ouvrait derrière le voile
+
+**Signalement :** « le menu marche pas. L'animation quand on ouvre marche mais
+on voit flou après ».
+
+La description était exacte et pointait la bonne cause : l'animation
+s'exécutait, mais le panneau arrivait **derrière** le voile et son
+`backdrop-filter: blur(2px)`.
+
+### Trois défauts qui se cumulaient
+
+**1. Une règle fantôme de l'ancien menu déroulant.** Le point de rupture 980 px
+posait `left: 20px`. Le bloc 900 px, qui l'a remplacé, définit `top`, `right` et
+`bottom` mais **jamais `left`**. Or quand `left`, `width` et `right` sont tous
+donnés, c'est `right` qui est ignoré : le tiroir se collait à gauche, et une
+fois fermé il débordait à 340 px du bord.
+
+C'était l'origine des 650 px de largeur de page relevés au §19 — un symptôme,
+pas un défaut de mise en page indépendant.
+
+**2. L'en-tête piégeait le `position: fixed`.** `.site-header` porte
+`backdrop-filter: blur(14px)`, ce qui en fait le **bloc conteneur** de ses
+descendants fixes. `bottom: 0` valait donc le bas de l'en-tête : le tiroir
+mesurait **114 px de haut** au lieu de toute la hauteur de l'écran.
+
+**3. Le `z-index` était enfermé.** Le même attribut, avec `position: sticky`,
+crée aussi un **contexte d'empilement**. Le `z-index: 101` du tiroir restait
+prisonnier du `z-index: 50` de l'en-tête, donc sous le voile à 100. C'est la
+cause directe du flou.
+
+### Correction
+
+L'ancien bloc déroulant est supprimé. Sous 980 px, l'en-tête cesse d'être un
+piège (`backdrop-filter`, `animation` et `transform` neutralisés, `z-index`
+porté à 120) et le tiroir déclare `left: auto`.
+
+Le fond de l'en-tête est déjà opaque à 85 % : perdre le flou sur mobile ne se
+voit pratiquement pas, et c'est le prix d'un menu qui fonctionne.
+
+### Deux corrections attenantes
+
+- **Le point de rupture passe de 900 à 980 px**, et le seuil correspondant dans
+  `script.js` de 901 à 981 px. Désaccordés, ils laissaient une bande
+  901–980 px sans bouton et avec une barre de navigation trop large ; le
+  JavaScript y refermait aussi le menu tout seul.
+
+- **`html { overflow-x: clip }` sous 980 px.** Un élément `position: fixed`
+  compte dans la largeur défilable de la page : le tiroir rangé hors écran
+  permettait de faire glisser tout le site vers la droite et de découvrir une
+  bande vide de 320 px. `clip` et non `hidden`, qui ferait de la racine un
+  conteneur de défilement et casserait l'en-tête collant.
+
+### Un défaut de contraste, antérieur et indépendant
+
+Visible sur les captures : le libellé du bouton **« Ajouter ModBot »** héritait
+du gris des liens, parce que `.nav-links a` (spécificité 0-1-1) l'emporte sur
+`.nav-cta` (0-1-0). Contraste **1,53:1** sur le violet saturé — trois fois moins
+que le minimum lisible de 4,5:1 — et cela **sur ordinateur comme sur mobile**.
+Rétabli en blanc : **4,61:1**.
+
+### Vérification
+
+`verifier_menu.mjs` passe 4 pages × 6 largeurs (360 à 1280 px). À chaque cas :
+
+- le bord droit du tiroir colle au bord de l'écran ;
+- sa hauteur fait celle de la fenêtre ;
+- `elementFromPoint` au centre du panneau touche **un lien du menu** et non le
+  voile — c'est le test qui verrouille le défaut d'empilement ;
+- les entrées finissent à l'opacité 1 (la cascade va au bout) ;
+- l'en-tête reste `sticky` ;
+- la page ne déborde ni ouverte ni fermée ;
+- le clic sur le voile referme et libère le verrou de défilement.
+
+Rendu contrôlé en français et en arabe : en RTL, la croix de fermeture passe
+bien à gauche et les libellés s'alignent à droite.
