@@ -4567,6 +4567,7 @@ def serialize_dashboard_config(guild):
             "color": f"#{int(cfg.get('embed_color', DEFAULT_EMBED_COLOR)):06X}",
         },
         "language": cfg.get("langue") or DEFAULT_LANG,
+        "country": cfg.get("pays") or "",
         "welcome": {**WELCOME_DEFAULTS, **(cfg.get("welcome_system") or {})},
         "reaction_roles": cfg.get("reaction_roles", []),
         "reaction_title": cfg.get("reaction_title") or "Choisis tes roles",
@@ -4661,6 +4662,12 @@ async def apply_dashboard_config(guild, payload):
 
     if payload.get("language") in BOT_LANGUAGES:
         cfg["langue"] = payload.get("language")
+
+    # Le pays n'est jamais devine : soit le proprietaire le declare, soit
+    # le serveur reste « Non renseigné ». Une chaine vide efface le choix.
+    if "country" in payload:
+        code = str(payload.get("country") or "").strip().upper()
+        cfg["pays"] = code if len(code) == 2 and code.isalpha() else ""
 
     if "reaction_roles" in payload and isinstance(payload.get("reaction_roles"), list):
         cfg["reaction_roles"] = [
@@ -5943,6 +5950,40 @@ async def api_assistant(request):
 #
 # en-GB/en-US, es-ES/es-419 et zh-CN/zh-TW sont fusionnes : ce sont des
 # variantes regionales d'une meme langue, et c'est bien la langue qu'on compte.
+# Codes ISO-3166 alpha-2 acceptes pour la declaration de pays. La liste
+# reste ouverte : tout code de deux lettres est valide, on ne verifie que
+# la forme. Le nom affiche est traduit par le site, le drapeau est calcule.
+PAYS_INCONNU = ("", "Non renseigné", "🌐")
+
+
+def drapeau_du_pays(code):
+    """
+    Emoji drapeau a partir d'un code ISO-3166 alpha-2.
+
+    « BE » donne 🇧🇪 : chaque lettre devient son indicateur regional. Cela
+    evite d'embarquer une table de 200 drapeaux, et tout nouveau pays
+    fonctionne sans modification.
+    """
+    code = str(code or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return PAYS_INCONNU[2]
+    return "".join(chr(0x1F1E6 + ord(lettre) - ord("A")) for lettre in code)
+
+
+def pays_du_serveur(guild, config=None):
+    """
+    Pays declare par le proprietaire du serveur, ou None.
+
+    Rien n'est devine : sans declaration explicite, le serveur reste
+    « Non renseigné ». Un pays invente vaudrait moins qu'une case vide.
+    """
+    cfg = (config or {}).get(str(guild.id)) or {}
+    code = str(cfg.get("pays") or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return None
+    return code
+
+
 LOCALE_LANGUES = {
     "fr":      ("fr", "Français", "🇫🇷"),
     "en":      ("en", "Anglais", "🇬🇧"),
@@ -6025,6 +6066,10 @@ def build_public_stats():
     inconnus = {"code": LANGUE_INCONNUE[0], "language": LANGUE_INCONNUE[1],
                 "flag": LANGUE_INCONNUE[2], "servers": 0, "members": 0,
                 "unknown": True}
+    pays = {}
+    pays_inconnus = {"code": PAYS_INCONNU[0], "country": PAYS_INCONNU[1],
+                     "flag": PAYS_INCONNU[2], "servers": 0, "members": 0,
+                     "unknown": True}
     membres = 0
     serveurs = 0
 
@@ -6046,17 +6091,34 @@ def build_public_stats():
         entree["servers"] += 1
         entree["members"] += compte
 
+        code_pays = pays_du_serveur(guild, config)
+        if code_pays is None:
+            case = pays_inconnus
+        else:
+            case = pays.setdefault(code_pays, {"code": code_pays,
+                                               "country": code_pays,
+                                               "flag": drapeau_du_pays(code_pays),
+                                               "servers": 0, "members": 0})
+        case["servers"] += 1
+        case["members"] += compte
+
     classement = sorted(langues.values(), key=lambda l: -l["members"])[:12]
     # "Non renseigne" ferme toujours la liste : les totaux affiches restent
     # coherents avec le nombre de serveurs, sans gonfler une vraie langue.
     if inconnus["servers"]:
         classement.append(inconnus)
 
+    classement_pays = sorted(pays.values(), key=lambda p: -p["members"])[:12]
+    if pays_inconnus["servers"]:
+        classement_pays.append(pays_inconnus)
+
     return {
         "members_protected": membres,
         "servers": serveurs,
         "languages": len(langues),
         "top_languages": classement,
+        "countries": len(pays),
+        "top_countries": classement_pays,
         "unspecified": {"servers": inconnus["servers"], "members": inconnus["members"]},
         "generated_at": now().isoformat(),
         "language_source": "langue configurée dans ModBot, ou langue du serveur "

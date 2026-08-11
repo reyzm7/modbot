@@ -110,6 +110,65 @@ def verifier_repartition_langues():
              all(e.get("language") for e in identifiees))
 
 
+def verifier_repartition_pays():
+    """
+    Le pays n'est jamais deduit : Discord ne le communique pas, et le
+    deviner depuis la locale comptait des serveurs francophones sous
+    « Etats-Unis ». Seule vaut la declaration du proprietaire.
+    """
+    print("\n--- Repartition par pays (declaration seulement) ---")
+    drapeau = bot_mod.drapeau_du_pays
+    pays = bot_mod.pays_du_serveur
+
+    verifier("le drapeau se calcule depuis le code", drapeau("BE") == "🇧🇪")
+    verifier("le code est normalise en majuscules", drapeau("be") == drapeau("BE"))
+    for mauvais in ("", None, "XYZ", "1A", "B"):
+        if drapeau(mauvais) != "🌐":
+            verifier(f"code invalide {mauvais!r} refuse", False, drapeau(mauvais))
+            break
+    else:
+        verifier("tout code invalide retombe sur le globe", True)
+
+    verifier("pays declare, minuscule acceptee",
+             pays(FauxGuild(1), {"1": {"pays": "be"}}) == "BE")
+    verifier("aucune declaration -> None", pays(FauxGuild(2), {}) is None)
+    verifier("declaration vide -> None", pays(FauxGuild(3), {"3": {"pays": ""}}) is None)
+    verifier("un nom de pays n'est pas un code",
+             pays(FauxGuild(4), {"4": {"pays": "Belgique"}}) is None)
+    verifier("la locale Discord ne sert jamais de pays",
+             pays(FauxGuild(5, ("COMMUNITY",), "fr"), {}) is None)
+
+    original = bot_mod.bot
+    bot_mod.bot = FauxBot([
+        FauxGuild(10, ("COMMUNITY",), "fr", 100),
+        FauxGuild(11, ("COMMUNITY",), "fr", 50),
+        FauxGuild(12, membres=30),
+    ])
+    config = {"10": {"pays": "BE"}, "11": {"pays": "be"}}   # meme pays, casse differente
+    original_jload = bot_mod.jload
+    bot_mod.jload = lambda chemin: config
+    try:
+        stats = bot_mod.build_public_stats()
+    finally:
+        bot_mod.bot = original
+        bot_mod.jload = original_jload
+
+    verifier("deux ecritures du meme code comptent pour un pays",
+             stats["countries"] == 1, str(stats["countries"]))
+    declares = [e for e in stats["top_countries"] if not e.get("unknown")]
+    verifier("les membres des deux serveurs sont additionnes",
+             declares and declares[0]["members"] == 150,
+             str(declares))
+    verifier("le drapeau accompagne le pays",
+             declares and declares[0]["flag"] == "🇧🇪")
+    verifier("le serveur sans declaration ferme la liste",
+             stats["top_countries"][-1].get("unknown") is True)
+    verifier("la somme couvre tous les serveurs",
+             sum(e["servers"] for e in stats["top_countries"]) == stats["servers"])
+    verifier("la repartition par langue survit a l'ajout des pays",
+             stats["languages"] >= 1 and isinstance(stats["top_languages"], list))
+
+
 def verifier_diagnostic_ia():
     """
     « IA non configuree » doit dire POURQUOI. Trois causes se ressemblent de
@@ -379,6 +438,7 @@ def verifier_immunite_admins():
 
 async def main():
     verifier_repartition_langues()
+    verifier_repartition_pays()
     verifier_diagnostic_ia()
     verifier_erreurs_ia()
     verifier_extraction_detail()
@@ -410,8 +470,16 @@ async def main():
             verifier("/api/public/stats accessible sans jeton", r.status == 200, f"recu {r.status}")
             verifier("expose members_protected", "members_protected" in stats)
             verifier("expose la repartition par langue", isinstance(stats.get("top_languages"), list))
-            verifier("ne pretend plus connaitre le pays",
-                     "top_countries" not in stats and "countries" not in stats)
+            verifier("expose la repartition par pays",
+                     isinstance(stats.get("top_countries"), list))
+            # Le pays est de retour, mais uniquement declare. L'invariant a
+            # tenir n'est plus « aucun pays » : c'est « aucun pays devine ».
+            # Chaque entree porte donc un vrai code ISO, ou se declare
+            # explicitement inconnue — jamais d'entre-deux.
+            verifier("aucun pays n'est devine",
+                     all(bool(e.get("code")) or e.get("unknown") is True
+                         for e in (stats.get("top_countries") or [])),
+                     str(stats.get("top_countries")))
             texte = str(data)
             verifier("aucun identifiant de serveur expose",
                      "guild_id" not in texte and "\"id\"" not in texte)

@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **11 août 2026** (voir §20 pour le dernier lot livré).
+> Dernière mise à jour : **11 août 2026** (voir §21 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -35,11 +35,11 @@ sans elle.
 | `style.css` | 7 683 lignes |
 | `dashboard.html` | 1 141 lignes |
 | `translations.js` | 3 044 lignes |
-| Clefs de traduction | **951 × 3 langues** |
+| Clefs de traduction | **958 × 3 langues** |
 | Routes API | 39 |
 | Commandes slash | 50 |
 | Panneaux du dashboard | 13 |
-| Tests | 63 + 107 + 2 + 18, tous au vert |
+| Tests | 63 + 122 + 2 + 18, tous au vert |
 
 ---
 
@@ -1426,3 +1426,79 @@ Rétabli en blanc : **4,61:1**.
 
 Rendu contrôlé en français et en arabe : en RTL, la croix de fermeture passe
 bien à gauche et les libellés s'alignent à droite.
+
+---
+
+## 21. Livré le 11 août 2026 — les pays, déclarés et non devinés
+
+**Demande :** « renseigne les pays des serveurs ».
+
+Le §14 avait retiré la répartition par pays pour une raison qui tient
+toujours : **Discord ne communique pas le pays d'un serveur.** `preferred_locale`
+est forcé à `en-US` sur tout serveur non Communautaire, si bien que la déduire
+comptait des serveurs francophones sous « États-Unis ».
+
+La solution n'est donc pas de mieux deviner, c'est d'**arrêter de deviner** :
+chaque serveur déclare son pays dans son dashboard, à côté de sa langue.
+
+### Ce qui a été ajouté
+
+| Où | Quoi |
+|---|---|
+| Dashboard → Langue | Un sélecteur **Pays du serveur**, 250 pays, « Non renseigné » par défaut |
+| `bot.py` | `pays_du_serveur()` et `drapeau_du_pays()`, agrégation par code ISO |
+| `/api/public/stats` | `countries` et `top_countries`, à côté des langues |
+| Accueil | Compteur **Pays représentés** et répartition « Par pays » / « Par langue » |
+
+Les deux répartitions coexistent : la langue vient du réglage ModBot, le pays
+de la déclaration. Aucune information n'est perdue.
+
+### Trois choix qui évitent une table à maintenir
+
+**Le bot ne stocke que le code ISO-3166 alpha-2.** Pas de nom de pays, pas de
+drapeau en base.
+
+**Le drapeau se calcule.** « BE » → 🇧🇪 : chaque lettre devient son indicateur
+régional Unicode. Tout nouveau pays fonctionne sans modification.
+
+**Le nom est traduit par le navigateur**, via `Intl.DisplayNames`, dans la
+langue du visiteur — la même mécanique que les langues au §19. Le sélecteur du
+dashboard est même **retrié à chaque changement de langue** : l'ordre
+alphabétique n'est pas le même en français, en anglais et en arabe.
+
+Sans ces trois choix il aurait fallu tenir 250 noms de pays × 3 langues, plus
+250 drapeaux, à la main.
+
+### L'invariant qui compte
+
+Rien n'est jamais déduit. Un code invalide, un nom de pays écrit en toutes
+lettres, une locale Discord : tout cela laisse le serveur en « Non renseigné ».
+Un pays inventé vaudrait moins qu'une case vide.
+
+La vérification du §14 (« ne prétend plus connaître le pays ») a été remplacée
+par celle qui protège le vrai invariant : **chaque entrée porte un code ISO
+réel, ou se déclare explicitement inconnue — jamais d'entre-deux.**
+
+### Un nettoyage au passage
+
+Le rendu d'une répartition était écrit deux fois — une fois au chargement, une
+fois au changement de langue — et il aurait fallu l'écrire deux fois de plus
+pour les pays. Factorisé en une fonction unique.
+
+### Tests
+
+| Suite | Résultat |
+|---|---|
+| `test_security.py` | **63/63** |
+| `test_api.py` | **122/122** (15 nouvelles) |
+| `modbot-site/test_i18n.py` | **18/18**, 958 clefs |
+
+Vérifié au navigateur avec une réponse d'API simulée : la répartition sort en
+`🇧🇪 Belgique / 🇫🇷 France / 🇲🇦 Maroc` en français, `Belgium / France / Morocco`
+en anglais, `بلجيكا / فرنسا / المغرب` en arabe — et le sélecteur des 250 pays
+est trié correctement dans les trois.
+
+**Une note sur les suites navigateur :** enchaînées à la file, elles peuvent
+échouer une fois sur contention (les attentes sont à durée fixe). Trois
+passages consécutifs isolés donnent 24/24 sur le menu. En cas d'échec isolé,
+relancer la suite seule avant de conclure à une régression.
