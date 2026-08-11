@@ -1679,7 +1679,7 @@ Discord ré-autoriserait le même compte en silence. Rien à changer.
 
 `verifier_compte.mjs` — 17 vérifications, l'API du bot étant simulée :
 affichage du pseudo et de l'avatar, ouverture du menu, fermeture par Échap et
-par clic extérieur, effacement des deux jetons, appel à `/api/logout`,
+par clic extérieur, effacement des deux jetons, appel à `/api/auth/logout`,
 redirection demandée, déconnexion sans redirection, et bloc masqué quand
 personne n'est connecté.
 
@@ -1699,3 +1699,70 @@ travail sur les pays avait disparu localement. Le distant, lui, avait tout :
 `git fetch` puis `git reset --hard origin/main` a suffi. Réflexe à garder —
 **vérifier `git log HEAD..origin/main` avant de repartir**, plutôt que de
 construire sur une base périmée.
+
+## 24. Livré le 11 août 2026 — « Se déconnecter » ne déconnectait pas
+
+### Le défaut
+
+Le changement de compte appelait `POST /api/logout`. Le bot n'a jamais exposé
+cette route : il écoute `/api/auth/logout`. L'appel partait donc dans le vide.
+
+Ce qui rend ce défaut intéressant, c'est qu'il était **invisible**. `fetch` ne
+lève pas d'exception sur un 404 — il renvoie une réponse avec `ok: false`, et
+le code n'examinait pas la réponse. Le `catch` prévu pour « bot injoignable »
+ne se déclenchait donc jamais. La session locale était effacée, la redirection
+vers Discord se faisait, l'écran de sélection de compte s'affichait : de bout
+en bout, tout avait l'air de marcher.
+
+Sauf que le jeton de session restait **valide sur le bot** jusqu'à son
+expiration naturelle. Quiconque remettait la main sur ce jeton — un navigateur
+partagé, un poste non verrouillé — retrouvait le compte. Autrement dit, le
+bouton « Se déconnecter » ne déconnectait pas.
+
+### Pourquoi les 17 tests ne l'ont pas vu
+
+Le simulacre répondait à `/api/logout` — c'est-à-dire à l'orthographe que
+j'avais écrite dans le code, pas à celle que le bot expose réellement. Le test
+validait **mon hypothèse contre elle-même**. Il aurait continué à passer aussi
+longtemps que les deux se trompaient de la même façon.
+
+La leçon n'est pas « écrire plus de tests » : il y en avait dix-sept, et ils
+étaient verts. C'est qu'un test dont le simulacre est écrit d'après le code
+testé, plutôt que d'après le contrat du serveur, ne vérifie rien. **La source
+de vérité d'une route, c'est `app.router.add_*` dans `bot.py`**, pas le
+souvenir qu'on en a.
+
+### Le correctif
+
+- la route corrigée en `/api/auth/logout` ;
+- la réponse est désormais examinée : un statut non-`ok` part en
+  `console.warn`. Un 404 silencieux ne peut plus se faire passer pour un
+  succès ;
+- le simulacre du test ne répond plus qu'à `/api/auth/logout` ; toute autre
+  orthographe tombe dans le `route.abort()` final et fait échouer le test ;
+- **contrôle négatif** : en réinjectant `/api/logout` dans le code, les deux
+  assertions de déconnexion échouent bien. Un test de régression qu'on n'a pas
+  vu échouer au moins une fois ne prouve pas encore grand-chose.
+
+Le bot injoignable reste non bloquant : la session locale part quand même. On
+ne piège personne dans un compte parce que Railway dort.
+
+### Vérification des autres routes
+
+Le même défaut pouvait se cacher ailleurs. Croisement automatisé des 31 routes
+déclarées par `app.router.add_*` avec les 29 chemins `/api/...` cités par le
+site, les segments variables (`{guild_id}`, `${guildId}`) étant normalisés de
+part et d'autre.
+
+Cinq chemins sont ressortis sans correspondance, tous vérifiés un par un et
+tous bénins :
+
+| Chemin signalé | Verdict |
+|---|---|
+| `/api/logout` | le commentaire qui documente justement la correction |
+| `/api/public/stats.` | de la prose, le point final appartient à la phrase |
+| `/api/guilds/{}/search/{}` | `searchMode` ne vaut que `members` ou `roles`, deux routes existantes |
+| `/api/users/@me/guilds` | l'API de Discord, pas celle du bot |
+| `/api/v10/invites/...` | idem, résolution des invitations partenaires |
+
+`/api/logout` était donc le seul véritable écart.
