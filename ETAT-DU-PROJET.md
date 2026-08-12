@@ -2206,3 +2206,71 @@ vérifications, de 320 à 760 px.
 
 Le test parcourt tous les `button`, `a` et `select` de la barre plutôt qu'une
 liste nommée : un élément ajouté demain y passera sans qu'on ait à y penser.
+
+## 33. Livré le 12 août 2026 — check-up complet : commandes, modules, images
+
+Audit systématique demandé après plusieurs lots de corrections. Deux défauts
+trouvés, l'un dans le code, l'autre dans la documentation. Le reste est vérifié
+et sain — ce qui vaut d'être écrit, car un audit qui ne trouve rien n'a de sens
+que si l'on sait ce qu'il a regardé.
+
+### Défaut corrigé — la carte pouvait faire perdre tout le message
+
+La carte de bienvenue demande « Joindre des fichiers » **dans le salon**, pas
+seulement au niveau du serveur. Un refus au niveau du salon faisait lever
+`channel.send()`, et l'exception était simplement journalisée :
+
+```
+except Exception as ex:
+    print(...)          ← le membre n'a RIEN reçu
+```
+
+Pour une image en trop, le message de bienvenue entier disparaissait. Les droits
+sont désormais vérifiés avant d'attacher la carte, et un second envoi sans elle
+rattrape le cas où l'envoi échoue quand même. Mieux vaut un accueil sans image
+que pas d'accueil.
+
+### Défaut corrigé — le wiki citait 28 commandes sur 55
+
+Les **vingt-sept sous-commandes** des groupes `/securite`, `/captcha`,
+`/backup`, `/giveaway` et `/ia` n'étaient documentées nulle part, soit la moitié
+de ce que le bot expose. Et `/insultes` était décrite comme *gérant* la liste
+des mots filtrés alors qu'elle se contente de l'**afficher** — ce qui explique
+au passage son absence de garde-fou, cohérente pour une lecture seule.
+
+Le croisement wiki ↔ arbre de commandes est maintenant un test permanent : il
+refuse autant une commande citée qui n'existe pas qu'une commande réelle passée
+sous silence.
+
+### Ce que l'audit a vérifié sans rien trouver
+
+| Contrôle | Résultat |
+|---|---|
+| Noms non définis dans `bot.py` et `security_core.py` | aucun (le piège du `escapeHtml` de §28, côté Python) |
+| Clefs de `TEXTS` | les 90 ont français **et** anglais |
+| Réglages enregistrables jamais relus | aucun ; les 9 écarts apparents sont des conteneurs, des alias (`country` → `pays`) ou des drapeaux d'effacement |
+| Permissions de l'invitation | `EMBED_LINKS` et `ATTACH_FILES` présents — les deux droits dont dépend l'affichage des images |
+| Limite Discord | 29 entrées de premier niveau sur 100 |
+| Commandes sensibles sans garde-fou | aucune |
+| Clefs lues par le dashboard mais non exposées par l'API | aucune ; `welcome_system` retombe sur `welcome` |
+
+**Une fausse alerte, notée pour ne pas la refaire :** une première expression
+régulière annonçait « 19 clefs sans anglais ». Elle franchissait les frontières
+d'entrées du dictionnaire. En important réellement le module, le compte est
+zéro. Sur une structure de données, l'import fait autorité, pas la regex.
+
+### Ce que les nouveaux tests mesurent
+
+Treize vérifications de plus, dont la carte de bienvenue **de bout en bout** :
+un fond téléversé en `data:` réellement décodé et visible sur l'image finale
+(vérifié sur un pixel hors du panneau), les dimensions, le poids sous la limite
+de 10 Mo de Discord, et un nom de fichier acceptable par `attachment://`.
+
+178/178.
+
+### Limite connue, non corrigée
+
+Le bot ne parle que **français et anglais**, quand le site en propose trois. Un
+serveur réglé en arabe verra le site en arabe mais les messages du bot en
+français. Ajouter l'arabe demanderait de traduire les 90 clefs de `TEXTS` ; ce
+n'est pas un défaut, mais l'écart mérite d'être connu.
