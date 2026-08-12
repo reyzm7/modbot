@@ -2118,3 +2118,51 @@ dans leur propre cadre pour que la **page** ne défile jamais, et le motif
 `INTRADUISIBLE` du test accueille les noms d'hébergeurs (Railway, Vercel,
 Mistral AI, MyMemory) — des noms propres qui ne se traduisent pas, au même titre
 que « Discord » qui y figurait déjà.
+
+## 31. Livré le 12 août 2026 — les menus déroulants du haut, à l'étroit sur téléphone
+
+### Le sélecteur de serveur
+
+Il était bridé à `320 px` et ancré à droite. Or son bouton occupe toute la
+ligne : **362 px** sur un téléphone courant. Le panneau démarrait donc à 42 px
+du bord gauche, plus étroit que ce qui l'ouvre, et son contenu s'en trouvait
+tassé — noms de serveurs et nombres de membres compris.
+
+Il épouse maintenant la largeur de son bouton (`left: 0; right: 0`). Sa liste
+passe de 50 à 58 % de la hauteur d'écran : la moitié ne laissait voir que deux
+ou trois serveurs.
+
+Le pied de ce menu contient un `<button>` **et** un `<a>`, mais seul le bouton
+était stylé. « Ajouter ModBot à un serveur » gardait sa taille et son
+alignement par défaut, visiblement décalé de la ligne au-dessus.
+
+### Le menu du compte débordait par la gauche
+
+Plus subtil, et invisible sur téléphone. Le menu est ancré **par sa droite** sur
+la pastille du compte :
+
+```
+right: 0  →  le bord droit du menu s'aligne sur celui de la pastille
+```
+
+Tant que la pastille touche le bord de l'écran, le menu tient. Mais la barre du
+haut se replie selon la place disponible : vers 768 px, la pastille se retrouve
+**au milieu d'une ligne** (elle finissait à x=221 sur un écran de 768). Un menu
+de 330 px s'étendait alors de 221 vers la gauche, soit **jusqu'à −109** : cent
+pixels hors de l'écran.
+
+Il est recadré à l'ouverture, par la même méthode que la hauteur du menu latéral
+en §26 — mesurer, puis corriger, plutôt que parier sur une valeur fixe.
+
+### Ce que les tests mesurent
+
+Trente vérifications sur cinq largeurs, de 320 à 1440 px :
+
+- le menu n'est **jamais plus étroit que le bouton qui l'ouvre** ;
+- il reste **entièrement dans la fenêtre**, des deux côtés ;
+- au moins **quatre serveurs** sont lisibles sans faire défiler ;
+- les entrées du pied sont **alignées entre elles** ;
+- les cibles font au moins 36 px de haut, pour le doigt.
+
+Contrôle négatif : en rétablissant la largeur bridée, deux vérifications tombent
+en affichant les mesures exactes (« menu 320px pour un bouton de 362px »).
