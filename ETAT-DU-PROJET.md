@@ -2274,3 +2274,55 @@ Le bot ne parle que **français et anglais**, quand le site en propose trois. Un
 serveur réglé en arabe verra le site en arabe mais les messages du bot en
 français. Ajouter l'arabe demanderait de traduire les 90 clefs de `TEXTS` ; ce
 n'est pas un défaut, mais l'écart mérite d'être connu.
+
+## 34. Livré le 12 août 2026 — l'écran de choix du serveur, et un clic qui ramenait à l'accueil
+
+### La barre débordait de son parent
+
+Mesurée à 390 px, la barre de l'écran de choix du serveur faisait **687 px de
+large dans un parent de 390**. Le logo sortait par la gauche (x = −132), la
+navigation par la droite (jusqu'à 522), et la pastille du compte — coincée dans
+ce qui restait visible — tombait à 61 × 42 px avec un avatar de 28.
+
+La règle censée faire passer la navigation à la ligne posait `width: 100%`.
+Sans effet : sur un élément flexible, c'est la **base** (`flex-basis`) qui
+décide de la taille principale, et un `flex: 1 1 0%` la ramenait à zéro. La
+navigation prend désormais `flex: 1 1 100%` — donc sa propre ligne — la barre
+est bornée à 100 %, et la pastille passe à 48 px de haut avec un avatar de 34.
+
+### Un clic dans le vide ramenait à l'accueil
+
+Régression de la section 32. Pour pousser la pastille du compte contre le bord
+droit, le lien du logo avait reçu `flex: 1 1 auto`. Il s'étirait donc sur tout
+l'espace libre — **238 px pour 101 px réellement affichés** — et le vide entre
+le nom « ModBot » et la pastille restait cliquable.
+
+```
+flex: 1 1 auto      →  l'élément grandit           →  zone cliquable géante
+margin-right: auto  →  la MARGE absorbe l'espace   →  l'élément garde sa taille
+```
+
+Le second produit le même alignement sans agrandir la cible.
+
+### Mes premiers tests ne voyaient ni l'un ni l'autre
+
+Le contrôle négatif est passé au vert avec les deux défauts réinjectés. En
+cause, le balayage de la ligne :
+
+```js
+for (let x = r.right + 10; ...)   // r = la boîte du lien
+```
+
+Il commençait **après le bord droit du lien**. Un lien étiré poussait ce bord
+si loin que la zone fautive n'était jamais échantillonnée : le test mesurait
+précisément la région où le défaut ne peut pas se trouver.
+
+Il compare maintenant la **boîte du lien à son contenu affiché** (somme des
+enfants plus les espacements) et balaie la ligne entière. Les deux contrôles
+négatifs reproduisent désormais les mesures exactes : « 238px pour 101px
+affichés » avec la liste des points qui naviguent à tort, et « 687/390 » avec
+les éléments hors écran.
+
+**La leçon, deuxième fois qu'elle se présente** (voir §27) : un test de
+régression qu'on n'a pas vu échouer ne prouve rien. Ici il était pire
+qu'inutile — il donnait l'assurance d'avoir vérifié.
