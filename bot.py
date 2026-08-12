@@ -353,6 +353,7 @@ def jsave(f, d):
     with open(tmp, "w", encoding="utf-8") as fp:
         json.dump(d, fp, indent=2, ensure_ascii=False)
     os.replace(tmp, f)
+    _marquer_a_sauvegarder(f)
 
 def jload(f):
     if not os.path.exists(f):
@@ -362,6 +363,217 @@ def jload(f):
             return json.load(fp)
         except json.JSONDecodeError:
             return {}
+
+
+# ════════════════════════════════════════════════
+#  FILET DE SECOURS : LA CONFIGURATION DANS DISCORD
+# ════════════════════════════════════════════════
+#
+# Un volume persistant reste la bonne solution. Mais son interface Railway
+# n'existe qu'au clic droit ou au raccourci clavier : depuis un telephone,
+# elle est hors d'atteinte. Ce filet permet de s'en passer.
+#
+# Le bot depose sa configuration en piece jointe dans sa conversation privee
+# avec son proprietaire, et la reprend au demarrage si le disque est vide.
+# Discord garde les messages : le conteneur peut etre reconstruit autant de
+# fois qu'il veut, la configuration, elle, survit.
+
+NOM_SAUVEGARDE = "modbot-config.json"
+FORMAT_SAUVEGARDE_AUTO = 1
+# Taille de garde : une piece jointe Discord plafonne a 10 Mo, on s'arrete
+# bien avant plutot que d'echouer a l'envoi.
+TAILLE_MAX_SAUVEGARDE = 6 * 1024 * 1024
+
+# Liste BLANCHE, et volontairement pas une liste noire.
+#
+# dashboard_sessions.json contient les jetons OAuth Discord des personnes
+# connectees au dashboard : l'envoyer reviendrait a poster les identifiants
+# de tes utilisateurs dans une conversation. Une liste noire fait fuiter des
+# qu'on ajoute un fichier en oubliant de l'y inscrire ; une liste blanche
+# fait l'inverse — elle oublie de sauvegarder, ce qui se repare.
+FICHIERS_SAUVEGARDES = (
+    "config.json",        # les reglages : c'est le fichier qui compte
+    "blacklist.json",
+    "tickets.json",
+    "giveaways.json",
+    "infractions.json",
+)
+
+_sauvegarde_a_faire = False
+_sauvegarde_derniere = None
+
+
+def _marquer_a_sauvegarder(chemin):
+    """Note qu'un fichier suivi a change. Appele depuis jsave, donc partout."""
+    global _sauvegarde_a_faire
+    if os.path.basename(chemin) in FICHIERS_SAUVEGARDES:
+        _sauvegarde_a_faire = True
+
+
+def construire_sauvegarde():
+    """Le contenu a deposer : les fichiers de la liste blanche, tels quels."""
+    fichiers = {}
+    for nom in FICHIERS_SAUVEGARDES:
+        chemin = chemin_donnees(nom)
+        if not os.path.exists(chemin):
+            continue
+        try:
+            with open(chemin, encoding="utf-8") as fp:
+                fichiers[nom] = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            continue
+    return {
+        "format": FORMAT_SAUVEGARDE_AUTO,
+        "sauvegarde_le": now().isoformat(),
+        "fichiers": fichiers,
+    }
+
+
+async def _destinataire_sauvegarde():
+    """La conversation privee du proprietaire de l'application."""
+    try:
+        app = await bot.application_info()
+    except Exception:
+        return None
+    proprietaire = getattr(app, "owner", None)
+    equipe = getattr(app, "team", None)
+    if equipe is not None:
+        # Application d'equipe : owner n'est pas renseigne, on vise le
+        # proprietaire de l'equipe.
+        membre = getattr(equipe, "owner", None) or getattr(equipe, "owner_id", None)
+        if isinstance(membre, int):
+            proprietaire = bot.get_user(membre) or await _chercher_utilisateur(membre)
+        elif membre is not None:
+            proprietaire = getattr(membre, "user", membre)
+    return proprietaire
+
+
+async def _chercher_utilisateur(uid):
+    try:
+        return await bot.fetch_user(uid)
+    except Exception:
+        return None
+
+
+async def deposer_sauvegarde_discord():
+    """Depose la configuration courante en piece jointe. Silencieux si echec."""
+    destinataire = await _destinataire_sauvegarde()
+    if destinataire is None:
+        return False
+    contenu = json.dumps(construire_sauvegarde(), ensure_ascii=False, indent=2)
+    brut = contenu.encode("utf-8")
+    if len(brut) > TAILLE_MAX_SAUVEGARDE:
+        print(f"ModBot: sauvegarde Discord ignoree, {len(brut)} octets")
+        return False
+    try:
+        fichier = discord.File(io.BytesIO(brut), filename=NOM_SAUVEGARDE)
+        await destinataire.send(
+            content=("🧷 Sauvegarde automatique des réglages ModBot — "
+                     f"{fmt()}. Ce message permet au bot de retrouver ta "
+                     "configuration après une mise à jour ; ne le supprime pas."),
+            file=fichier,
+        )
+        return True
+    except Exception as err:
+        print(f"ModBot: sauvegarde Discord impossible ({err})")
+        return False
+
+
+def _config_est_vide():
+    """Vrai si on demarre sans reglages — le cas que le filet doit rattraper."""
+    chemin = chemin_donnees("config.json")
+    if not os.path.exists(chemin):
+        return True
+    try:
+        with open(chemin, encoding="utf-8") as fp:
+            return not json.load(fp)
+    except (OSError, json.JSONDecodeError):
+        return True
+
+
+def appliquer_sauvegarde(charge):
+    """
+    Ecrit les fichiers d'une sauvegarde. Rend la liste des fichiers repris.
+
+    On revalide ici plutot que de faire confiance a la piece jointe : le
+    format doit correspondre, et seuls les noms de la liste blanche sont
+    acceptes — pas de chemin, pas de traversee de repertoire.
+    """
+    if not isinstance(charge, dict):
+        return []
+    if charge.get("format") != FORMAT_SAUVEGARDE_AUTO:
+        return []
+    fichiers = charge.get("fichiers")
+    if not isinstance(fichiers, dict):
+        return []
+    repris = []
+    for nom, donnees in fichiers.items():
+        if nom not in FICHIERS_SAUVEGARDES:
+            continue
+        if not isinstance(donnees, (dict, list)):
+            continue
+        try:
+            jsave(chemin_donnees(nom), donnees)
+            repris.append(nom)
+        except OSError:
+            continue
+    return repris
+
+
+async def reprendre_sauvegarde_discord():
+    """
+    Au demarrage : si la configuration est vide, on va rechercher la
+    derniere piece jointe deposee.
+
+    La condition « vide » est essentielle — une sauvegarde ne doit jamais
+    ecraser des reglages vivants, seulement combler un disque efface.
+    """
+    if not _config_est_vide():
+        return []
+    destinataire = await _destinataire_sauvegarde()
+    if destinataire is None:
+        return []
+    try:
+        salon = destinataire.dm_channel or await destinataire.create_dm()
+    except Exception:
+        return []
+    try:
+        async for message in salon.history(limit=60):
+            if message.author.id != bot.user.id:
+                continue
+            for piece in message.attachments:
+                if piece.filename != NOM_SAUVEGARDE:
+                    continue
+                if piece.size > TAILLE_MAX_SAUVEGARDE:
+                    continue
+                brut = await piece.read()
+                charge = json.loads(brut.decode("utf-8"))
+                repris = appliquer_sauvegarde(charge)
+                if repris:
+                    print(f"ModBot: reglages repris depuis Discord ({', '.join(repris)})")
+                return repris
+    except Exception as err:
+        print(f"ModBot: reprise Discord impossible ({err})")
+    return []
+
+
+async def sauvegarde_discord_loop():
+    """
+    Depose une sauvegarde quand quelque chose a change, pas plus d'une fois
+    par tranche de temps : cocher cinq modules d'affilee ne doit pas produire
+    cinq messages.
+    """
+    global _sauvegarde_a_faire, _sauvegarde_derniere
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            if _sauvegarde_a_faire:
+                _sauvegarde_a_faire = False
+                if await deposer_sauvegarde_discord():
+                    _sauvegarde_derniere = now()
+        except Exception as err:
+            print(f"boucle sauvegarde Discord: {err}")
+        await asyncio.sleep(300)
 
 # ════════════════════════════════════════════════
 #  BASE DE DONNEES DASHBOARD
@@ -8821,6 +9033,7 @@ BACKUPS = sc.BackupStore(D_BACKUPS)
 _security_task = None
 _autobackup_task = None
 _giveaway_task = None
+_sauvegarde_task = None
 # Cache des objets supprimes pour la restauration automatique anti-nuke
 _deleted_cache: dict = {}
 
@@ -11843,8 +12056,15 @@ async def sync_guild_command_language(guild):
 @bot.event
 async def on_ready():
     global _dashboard_recurring_task, _dashboard_social_task
-    global _security_task, _autobackup_task, _giveaway_task
+    global _security_task, _autobackup_task, _giveaway_task, _sauvegarde_task
     BOT_STATUS.update({"state": "connecte", "detail": ""})
+    # Avant tout le reste : si le disque a ete efface par un redeploiement,
+    # on recupere les reglages dans Discord. Tout ce qui suit lit la
+    # configuration, donc elle doit etre en place des maintenant.
+    try:
+        await reprendre_sauvegarde_discord()
+    except Exception as err:
+        print(f"reprise des reglages : {err}")
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher(),
@@ -11867,6 +12087,8 @@ async def on_ready():
         _autobackup_task = asyncio.create_task(auto_backup_loop())
     if not _giveaway_task or _giveaway_task.done():
         _giveaway_task = asyncio.create_task(giveaway_loop())
+    if not _sauvegarde_task or _sauvegarde_task.done():
+        _sauvegarde_task = asyncio.create_task(sauvegarde_discord_loop())
     try:
         synced = await bot.tree.sync()
         for guild in bot.guilds:

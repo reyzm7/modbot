@@ -935,6 +935,90 @@ def verifier_persistance():
                  infos.get("dir") == choisi, str(infos.get("dir")))
 
 
+def verifier_filet_discord():
+    """
+    Le filet de secours : la configuration deposee dans Discord.
+
+    Ce qu'on veut prouver tient en trois points — rien de secret ne part,
+    une sauvegarde n'ecrase jamais des reglages vivants, et ce qui revient
+    est revalide plutot que cru sur parole.
+    """
+    print("\n--- Filet de secours Discord ---")
+    import tempfile, json as _json
+
+    # 1. Le secret. dashboard_sessions.json porte les jetons OAuth Discord
+    #    des utilisateurs du dashboard : le poster serait une fuite.
+    liste = bot_mod.FICHIERS_SAUVEGARDES
+    verifier("le fichier de sessions n'est pas sauvegarde",
+             "dashboard_sessions.json" not in liste, str(liste))
+    verifier("aucun fichier hors de la liste blanche n'est repris",
+             bot_mod.appliquer_sauvegarde({
+                 "format": bot_mod.FORMAT_SAUVEGARDE_AUTO,
+                 "fichiers": {"dashboard_sessions.json": {"vole": True}},
+             }) == [])
+
+    # Une liste blanche protege aussi des noms fabriques.
+    for piege in ("../config.json", "/etc/passwd", "config.json.tmp"):
+        verifier(f"nom de fichier refuse : {piege}",
+                 bot_mod.appliquer_sauvegarde({
+                     "format": bot_mod.FORMAT_SAUVEGARDE_AUTO,
+                     "fichiers": {piege: {"x": 1}},
+                 }) == [])
+
+    # 2. Le format est controle avant d'ecrire quoi que ce soit.
+    verifier("une charge d'un autre format est ignoree",
+             bot_mod.appliquer_sauvegarde({"format": 999, "fichiers":
+                                           {"config.json": {"x": 1}}}) == [])
+    for absurde in (None, [], "texte", {"fichiers": "pas un dict"}):
+        verifier(f"charge absurde ignoree : {type(absurde).__name__}",
+                 bot_mod.appliquer_sauvegarde(absurde) == [])
+
+    # 3. Le contenu : ce qu'on depose est bien ce qu'on a sur le disque.
+    ancien = bot_mod.DATA_DIR
+    try:
+        with tempfile.TemporaryDirectory() as volume:
+            bot_mod.DATA_DIR = volume
+            bot_mod.jsave(bot_mod.chemin_donnees("config.json"),
+                          {"42": {"captcha_enabled": True}})
+            charge = bot_mod.construire_sauvegarde()
+            verifier("la sauvegarde emporte la configuration",
+                     charge["fichiers"]["config.json"] ==
+                     {"42": {"captcha_enabled": True}}, str(charge["fichiers"]))
+            verifier("elle ne contient que des fichiers autorises",
+                     set(charge["fichiers"]).issubset(set(liste)))
+
+            # Le disque est efface, comme apres un redeploiement.
+            os.remove(bot_mod.chemin_donnees("config.json"))
+            verifier("un disque efface est bien vu comme vide",
+                     bot_mod._config_est_vide() is True)
+            repris = bot_mod.appliquer_sauvegarde(charge)
+            verifier("la configuration revient telle quelle",
+                     _json.load(io.open(bot_mod.chemin_donnees("config.json"),
+                                        encoding="utf-8")) ==
+                     {"42": {"captcha_enabled": True}}, str(repris))
+
+            # 4. Des reglages vivants ne doivent jamais etre ecrases.
+            bot_mod.jsave(bot_mod.chemin_donnees("config.json"),
+                          {"42": {"captcha_enabled": False}})
+            verifier("une configuration presente n'est pas vue comme vide",
+                     bot_mod._config_est_vide() is False)
+
+            # 5. Ecrire marque bien la sauvegarde a refaire, et seulement
+            #    pour les fichiers suivis.
+            bot_mod._sauvegarde_a_faire = False
+            bot_mod.jsave(bot_mod.chemin_donnees("config.json"), {"7": {}})
+            verifier("modifier la configuration declenche une sauvegarde",
+                     bot_mod._sauvegarde_a_faire is True)
+            bot_mod._sauvegarde_a_faire = False
+            bot_mod.jsave(bot_mod.chemin_donnees("dashboard_sessions.json"),
+                          {"jeton": "secret"})
+            verifier("ecrire les sessions ne declenche rien",
+                     bot_mod._sauvegarde_a_faire is False)
+    finally:
+        bot_mod.DATA_DIR = ancien
+        bot_mod._sauvegarde_a_faire = False
+
+
 async def verifier_sauvegarde_reglages(session):
     """L'export et l'import des reglages, par l'API reelle."""
     print("\n--- Sauvegarde des reglages (export / import) ---")
@@ -969,6 +1053,7 @@ async def main():
     verifier_commandes()
     verifier_aide()
     verifier_persistance()
+    verifier_filet_discord()
     verifier_role_verification()
     await verifier_image_bienvenue()
     await verifier_carte_bienvenue()

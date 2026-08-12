@@ -2473,3 +2473,67 @@ La leçon est toujours la même, et c'est la troisième fois qu'on l'écrit ici 
 un test de régression qu'on n'a pas vu échouer ne prouve rien.
 
 202/202 côté API, 11/11 sur la sauvegarde au navigateur.
+
+## 37. Livré le 12 août 2026 — un filet de secours quand Railway est hors d'atteinte
+
+### Le blocage
+
+Le volume persistant de §36 reste la bonne solution. Mais son interface Railway
+n'existe que par **clic droit sur le canvas** ou par **`⌘K`** — les deux chemins
+documentés supposent une souris ou un clavier. Depuis un téléphone, il n'y a
+aucun accès. Buffl est sur téléphone.
+
+Noté au passage, parce que je l'ai mal fait : j'ai d'abord affirmé qu'un menu
+`…` existait sur la vignette du service. Cette information venait d'un résumé
+de recherche généré automatiquement, pas de la documentation — que le proxy
+réseau bloque. Je l'ai donnée comme un fait vérifié. Elle ne l'était pas.
+**Une source que je n'ai pas lue n'est pas une source.**
+
+### Ce qui a été construit
+
+Le bot dépose sa configuration en pièce jointe dans sa **conversation privée
+avec le propriétaire de l'application**, et la reprend au démarrage si le
+disque est vide. Discord conserve les messages : le conteneur peut être
+reconstruit autant de fois qu'il veut.
+
+Aucune infrastructure, aucun clic Railway — le bot a déjà son token Discord.
+
+### Le point qui demandait de la prudence
+
+Une sauvegarde qui part dans un message ne doit emporter **aucun secret**.
+`dashboard_sessions.json` contient les jetons OAuth Discord des personnes
+connectées au dashboard : le poster reviendrait à publier les identifiants des
+utilisateurs.
+
+D'où une **liste blanche**, et surtout pas une liste noire. Les deux semblent
+équivalentes ; elles ne le sont pas du tout dans leur mode de défaillance :
+
+| | Ce qui arrive quand on oublie d'y penser |
+|---|---|
+| liste noire | un nouveau fichier **fuite** |
+| liste blanche | un nouveau fichier **n'est pas sauvegardé** |
+
+L'une des deux erreurs se répare, l'autre non. La liste blanche protège aussi
+des noms fabriqués (`../config.json`, `/etc/passwd`) sans code de garde
+supplémentaire : ils ne sont simplement pas dans la liste.
+
+### Deux invariants, et ce qui les tient
+
+- **On n'écrase jamais des réglages vivants.** La reprise ne se déclenche que
+  si la configuration est vide — le cas du disque effacé, pas celui d'une
+  configuration en place.
+- **Ce qui revient est revalidé**, pas cru sur parole : numéro de format, type
+  de la charge, et appartenance à la liste blanche.
+
+Les écritures sont marquées via `jsave`, donc **un seul point d'accroche**
+couvre tous les appels du fichier ; et la boucle groupe les changements pour
+que cocher cinq modules d'affilée ne produise pas cinq messages.
+
+### Contrôles négatifs
+
+| Défaut réinjecté | Ce qui tombe |
+|---|---|
+| `dashboard_sessions.json` ajouté à la liste blanche | 3 vérifications, dont « le fichier de sessions n'est pas sauvegardé » |
+| la configuration est toujours vue comme vide | « une configuration présente n'est pas vue comme vide » |
+
+219/219.
