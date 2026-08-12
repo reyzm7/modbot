@@ -2024,3 +2024,42 @@ ce qui ressemble à une mesure sans en être une.
   d'un balisage à quatre enfants ; il n'en a que trois, et son libellé tombait
   dans une colonne de 34 px. Hauteur de la barre : 242 → 199 px sur téléphone.
 - Le wiki ne mentionne plus les tournois IFC.
+
+## 29. Livré le 12 août 2026 — l'espace d'administration, mis d'aplomb
+
+L'espace « donnait l'impression d'être mal fait ». Quatre causes, toutes
+mesurables plutôt qu'affaire de goût :
+
+| Ce qu'on voyait | Ce qui le causait |
+|---|---|
+| Un grand vide sous « Logs globaux » | `min-height: 520px` réservés pour cinq entrées, soit **219 px** de vide |
+| La carte « Sécurité » flottant au milieu d'un cadre trop grand | la grille l'étirait à la hauteur de sa voisine — **322 px pour 121 px** de contenu — et son texte se centrait dans ce vide |
+| Une carte à demi-largeur avec un trou à sa droite | « Modèle économique », seule dans une grille à deux colonnes |
+| Une pastille **verte** annonçant « Verrouillé » | une seule couleur pour les deux états |
+
+Le dernier point est le plus gênant : la couleur disait le contraire du texte.
+La pastille reste ambre tant que l'espace est fermé, et ne vire au vert qu'au
+déverrouillage.
+
+Deux détails de la même veine : la note sous le champ d'identifiant était
+encadrée et centrée comme un avertissement technique alors que c'est du texte
+d'aide, et les tuiles de chiffres étaient si aérées que le nombre et son
+libellé paraissaient sans rapport. Sous 620 px, les grilles à deux colonnes
+passent désormais à une seule.
+
+### Ce que les tests retiennent
+
+Pas « la marge vaut 16 px » — une valeur d'apparence ne se teste pas
+utilement. Ils comparent chaque bloc à **ce qu'il contient** :
+
+- la hauteur du menu par rapport à sa dernière entrée (moins de 24 px
+  d'écart) ;
+- la hauteur d'une carte par rapport à son propre contenu, pour qu'aucune ne
+  soit étirée par sa voisine ;
+- la largeur d'une carte seule par rapport à sa grille ;
+- la couleur de la pastille dans les **deux** états ;
+- l'absence de débordement à 390, 768 et 1440 px.
+
+Contrôle négatif : en réinjectant `min-height: 520px` et
+`align-items: stretch`, les deux vérifications correspondantes tombent, avec
+les mesures exactes du défaut (219 px de vide, carte à 322 px).
