@@ -16,6 +16,7 @@ import base64
 import io
 import importlib.util
 import os
+import re
 import sys
 
 sys.path.insert(0, os.getcwd())
@@ -639,10 +640,167 @@ def verifier_role_verification():
              'name="Verifie"' not in io.open("bot.py", encoding="utf-8").read())
 
 
+def verifier_commandes():
+    """
+    Les commandes reelles, et ce que le wiki en dit.
+
+    Le wiki a longtemps annonce cinq commandes de tournoi qui n'existaient
+    pas, et passe sous silence les vingt-sept sous-commandes des groupes.
+    Une documentation fausse est pire qu'une documentation absente : elle
+    fait chercher une commande qui ne repondra jamais.
+    """
+    print("\n--- Commandes et documentation ---")
+    import discord as _d
+
+    plates, groupes = [], {}
+    for c in bot_mod.bot.tree.get_commands():
+        if isinstance(c, _d.app_commands.Group):
+            groupes[c.name] = [s.name for s in c.commands]
+        elif " " not in c.name:          # les menus contextuels portent un espace
+            plates.append(c.name)
+    prefixe = [c.name for c in bot_mod.bot.commands]
+
+    verifier("des commandes sont enregistrees", len(plates) >= 20, f"{len(plates)} simples")
+    verifier("les groupes sont enregistres", len(groupes) >= 5, f"{len(groupes)} groupes")
+
+    # Discord refuse au-dela de 100 entrees de premier niveau.
+    premier_niveau = len(plates) + len(groupes)
+    verifier("sous la limite Discord de 100 entrees", premier_niveau <= 100,
+             f"{premier_niveau}/100")
+
+    # Aucune collision de nom entre une commande simple et un groupe.
+    verifier("aucun nom partage entre commande et groupe",
+             not (set(plates) & set(groupes)), str(set(plates) & set(groupes)))
+
+    # Toute commande de moderation doit porter un garde-fou.
+    source = io.open("bot.py", encoding="utf-8").read()
+    SENSIBLES = ("ban", "deban", "warn", "massdm", "clear-all", "clear-message",
+                 "annonce", "panel", "reset-avert", "infractions-reset")
+    sans_garde = []
+    for nom in SENSIBLES:
+        i = source.find(f'name="{nom}"')
+        if i < 0:
+            continue
+        # Les decorateurs vivent entre la declaration et la fonction.
+        fin = source.find("async def", i)
+        if "has_permissions" not in source[i:fin]:
+            sans_garde.append(nom)
+    verifier("chaque commande sensible exige une permission",
+             not sans_garde, str(sans_garde))
+
+    # Croisement avec le wiki, quand le site est a cote.
+    chemin = os.path.join(os.path.dirname(os.getcwd()), "modbot-site", "wiki.html")
+    if not os.path.exists(chemin):
+        print("  (wiki absent, croisement ignore)")
+        return
+    wiki = io.open(chemin, encoding="utf-8").read()
+    citees = {x.strip() for x in re.findall(r"<code[^>]*>([^<]+)</code>", wiki)}
+    citees = {c for c in citees if c.startswith(("/", "!"))}
+
+    reelles = {"/" + n for n in plates} | {"!" + n for n in prefixe}
+    for g, subs in groupes.items():
+        reelles.add("/" + g)
+        reelles |= {f"/{g} {s}" for s in subs}
+
+    def couverte(c):
+        if c in citees:
+            return True
+        # Une sous-commande est couverte si son groupe l'est.
+        return c.startswith("/") and " " in c and "/" + c.split()[0][1:] in citees
+
+    absentes = sorted(c for c in reelles if not couverte(c))
+    fantomes = sorted(c for c in citees if c not in reelles)
+    verifier("le wiki ne cite aucune commande inexistante", not fantomes, str(fantomes))
+    verifier("le wiki couvre toutes les commandes reelles", not absentes, str(absentes))
+
+
+async def verifier_carte_bienvenue():
+    """
+    La carte doit arriver JUSQU'AUX MEMBRES, pas seulement se dessiner.
+
+    Deux facons de la perdre en route :
+      - le fond televerse depuis la galerie voyage en data: ; s'il n'est pas
+        decode, la carte sort sur un panneau noir ;
+      - la carte demande « Joindre des fichiers » DANS LE SALON. Un refus
+        faisait echouer l'envoi entier : plus de message de bienvenue du
+        tout, pour une image en trop.
+    """
+    print("\n--- Carte de bienvenue, de bout en bout ---")
+    if not bot_mod.PIL_AVAILABLE:
+        print("  (Pillow absent, section ignoree)")
+        return
+    from PIL import Image
+    import base64 as _b64, types as _t
+
+    # Un fond comme en produit le selecteur du dashboard.
+    fond = Image.new("RGB", (1000, 380), (18, 32, 74))
+    tampon = io.BytesIO(); fond.save(tampon, format="JPEG", quality=82)
+    data_uri = "data:image/jpeg;base64," + _b64.b64encode(tampon.getvalue()).decode()
+    verifier("le fond televerse tient dans la configuration",
+             len(data_uri) <= 400000, f"{len(data_uri)} caracteres")
+
+    class _Avatar:
+        def with_size(self, n): return self
+        url = "https://exemple.invalid/a.png"
+
+    class _Membre:
+        display_name = "l2f51z"; name = "l2f51z"; id = 42
+        display_avatar = _Avatar()
+        guild = _t.SimpleNamespace(id=1, name="Serveur", member_count=10766)
+
+    reglages = {"background": data_uri, "font": "Inter", "color": "#FFFFFF"}
+    for depart in (False, True):
+        fichier = await bot_mod.build_member_event_card(_Membre(), reglages, departure=depart)
+        etiquette = "la carte de depart" if depart else "la carte d'arrivee"
+        verifier(f"{etiquette} est generee", fichier is not None)
+        if not fichier:
+            continue
+        fichier.fp.seek(0)
+        octets = fichier.fp.read()
+        image = Image.open(io.BytesIO(octets)); image.load()
+        verifier(f"{etiquette} a les bonnes dimensions",
+                 image.size == (1000, 380), f"{image.size}")
+        verifier(f"{etiquette} reste sous la limite Discord de 10 Mo",
+                 len(octets) < 10 * 1024 * 1024, f"{len(octets)//1024} Ko")
+        # Le coin est hors du panneau : il montre le fond, ou du noir si le
+        # data: n'a pas ete decode.
+        coin = image.convert("RGB").getpixel((6, 6))
+        verifier(f"le fond televerse apparait sur {etiquette}",
+                 sum(coin) > 30, f"coin={coin}")
+        verifier(f"le nom de fichier de {etiquette} passe dans attachment://",
+                 re.fullmatch(r"[A-Za-z0-9_.-]+", fichier.filename) is not None,
+                 fichier.filename)
+
+    # ── Le salon refuse les fichiers : le message doit passer quand meme ──
+    envoyes = []
+
+    class _Droits:
+        attach_files = False
+        embed_links = True
+
+    class _Salon:
+        name = "bienvenue"
+        def permissions_for(self, _membre): return _Droits()
+        async def send(self, **kwargs):
+            if kwargs.get("file") is not None:
+                raise RuntimeError("Missing Permissions")
+            envoyes.append(kwargs)
+
+    source = io.open("bot.py", encoding="utf-8").read()
+    debut = source.index("async def send_dashboard_member_event")
+    corps = source[debut:source.index("@bot.event", debut)]
+    verifier("l'envoi verifie les droits du salon avant d'attacher la carte",
+             "permissions_for" in corps and "attach_files" in corps)
+    verifier("un second envoi sans carte est prevu en cas d'echec",
+             "sans carte" in corps)
+
+
 async def main():
     verifier_polices()
+    verifier_commandes()
     verifier_role_verification()
     await verifier_image_bienvenue()
+    await verifier_carte_bienvenue()
     verifier_repartition_langues()
     verifier_repartition_pays()
     verifier_diagnostic_ia()

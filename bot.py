@@ -8466,11 +8466,35 @@ async def send_dashboard_member_event(member, departure=False):
             url=lien, style=discord.ButtonStyle.link))
         kwargs["view"] = vue
 
+    # La carte demande « Joindre des fichiers » DANS CE SALON. Un refus au
+    # niveau du salon faisait echouer l'envoi entier : le membre n'avait
+    # meme pas son message de bienvenue, pour une image en trop.
+    if kwargs.get("file") is not None:
+        droits = channel.permissions_for(member.guild.me)
+        if not (droits.attach_files and droits.embed_links):
+            print(f"send_dashboard_member_event {member.guild.id}: "
+                  f"pas de droit d'envoi d'image dans #{channel.name}, "
+                  "carte retiree (donne « Joindre des fichiers » au bot).")
+            kwargs.pop("file", None)
+            if kwargs.get("embed") is not None:
+                kwargs["embed"].set_image(url=None)
+
     try:
         await channel.send(**kwargs)
         dashboard_log("member_departure" if departure else "member_welcome", member.guild, member, content)
     except Exception as ex:
         print(f"send_dashboard_member_event {member.guild.id}: {ex}")
+        # Deuxieme chance sans la carte : mieux vaut un message de bienvenue
+        # sans image que pas de message du tout.
+        if kwargs.pop("file", None) is not None:
+            if kwargs.get("embed") is not None:
+                kwargs["embed"].set_image(url=None)
+            try:
+                await channel.send(**kwargs)
+                dashboard_log("member_departure" if departure else "member_welcome",
+                              member.guild, member, content)
+            except Exception as ex2:
+                print(f"send_dashboard_member_event {member.guild.id} (sans carte): {ex2}")
 
 @bot.event
 async def on_member_join(member):
