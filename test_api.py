@@ -886,10 +886,12 @@ def verifier_persistance():
 
     # Le vrai comportement : un volume ailleurs, et la reprise de l'existant.
     import subprocess, tempfile, json as _json
-    with tempfile.TemporaryDirectory() as volume:
+
+    def demarrer_avec(env, ecrire=False):
+        """Charge bot.py dans un sous-processus, avec cet environnement."""
         code = (
             "import os, sys, json, importlib.util\n"
-            f"os.environ['MODBOT_DATA_DIR'] = {volume!r}\n"
+            f"for c, v in {env!r}.items(): os.environ[c] = v\n"
             "os.environ.setdefault('TOKEN', 'faux-token')\n"
             "sys.path.insert(0, os.getcwd())\n"
             "import discord.ext.commands as c\n"
@@ -897,13 +899,16 @@ def verifier_persistance():
             "sp = importlib.util.spec_from_file_location('b', 'bot.py')\n"
             "m = importlib.util.module_from_spec(sp); sys.modules['b'] = m\n"
             "sp.loader.exec_module(m)\n"
-            "m.jsave(m.F_CONFIG, {'42': {'captcha_enabled': True}})\n"
-            "print(json.dumps({'dir': m.DATA_DIR, 'config': m.F_CONFIG}))\n"
+            + ("m.jsave(m.F_CONFIG, {'42': {'captcha_enabled': True}})\n" if ecrire else "")
+            + "print(json.dumps({'dir': m.DATA_DIR, 'config': m.F_CONFIG}))\n"
         )
         sortie = subprocess.run([sys.executable, "-c", code], capture_output=True,
                                 text=True, cwd=os.getcwd(), timeout=180)
-        derniere = [l for l in sortie.stdout.strip().split("\n") if l.startswith("{")]
-        infos = _json.loads(derniere[-1]) if derniere else {}
+        lignes = [l for l in sortie.stdout.strip().split("\n") if l.startswith("{")]
+        return _json.loads(lignes[-1]) if lignes else {}
+
+    with tempfile.TemporaryDirectory() as volume:
+        infos = demarrer_avec({"MODBOT_DATA_DIR": volume}, ecrire=True)
         verifier("MODBOT_DATA_DIR deplace bien les donnees",
                  infos.get("dir") == volume, str(infos.get("dir")))
         ecrit = os.path.join(volume, "config.json")
@@ -912,6 +917,22 @@ def verifier_persistance():
             relu = _json.load(io.open(ecrit, encoding="utf-8"))
             verifier("le module coche est bien enregistre",
                      relu.get("42", {}).get("captcha_enabled") is True, str(relu))
+
+    # Railway renseigne RAILWAY_VOLUME_MOUNT_PATH des qu'un volume est attache.
+    # S'en servir evite a l'hebergeur d'avoir a declarer une variable de plus,
+    # donc une occasion de moins de se tromper.
+    with tempfile.TemporaryDirectory() as monte:
+        infos = demarrer_avec({"RAILWAY_VOLUME_MOUNT_PATH": monte})
+        verifier("un volume Railway suffit, sans declarer de variable",
+                 infos.get("dir") == monte, str(infos.get("dir")))
+
+    # ... mais il ne doit jamais primer sur un reglage explicite : si les deux
+    # sont la, c'est le choix de l'humain qui gagne.
+    with tempfile.TemporaryDirectory() as choisi, tempfile.TemporaryDirectory() as monte:
+        infos = demarrer_avec({"MODBOT_DATA_DIR": choisi,
+                               "RAILWAY_VOLUME_MOUNT_PATH": monte})
+        verifier("le reglage explicite prime sur le volume detecte",
+                 infos.get("dir") == choisi, str(infos.get("dir")))
 
 
 async def verifier_sauvegarde_reglages(session):

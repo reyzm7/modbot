@@ -2425,10 +2425,20 @@ démarrage avec un volume : on ne perd pas l'existant en migrant.
 ### ⚠️ Ce que le code ne peut pas faire tout seul
 
 Le code sait désormais écrire dans un volume, **mais il faut lui en donner
-un**. Dans Railway : créer un *Volume*, puis régler `MODBOT_DATA_DIR` sur son
-point de montage (par exemple `/data`). Sans cette étape, `DATA_DIR` retombe
-sur le dossier du code — c'est-à-dire exactement le disque jetable d'avant, et
-le symptôme revient à l'identique.
+un**. Dans Railway, le volume ne se crée pas depuis un onglet du service mais
+depuis le canvas du projet : clic droit sur une zone vide → *Volume*, ou
+`Cmd/Ctrl + K` → *Create Volume*. On choisit le service à qui l'attacher, puis
+le point de montage (`/data`).
+
+Sans volume, `DATA_DIR` retombe sur le dossier du code — c'est-à-dire
+exactement le disque jetable d'avant, et le symptôme revient à l'identique.
+
+En revanche il n'y a **pas de variable à déclarer** : Railway renseigne
+`RAILWAY_VOLUME_MOUNT_PATH` dès qu'un volume est rattaché, et on s'en sert en
+second choix. Attacher le volume suffit donc. `MODBOT_DATA_DIR` reste
+prioritaire quand il est réglé — le choix explicite d'un humain ne se fait
+jamais doubler par une détection automatique — et reste la voie sûre si
+l'hébergeur renomme sa variable un jour.
 
 ### Une ceinture en plus des bretelles
 
@@ -2456,8 +2466,10 @@ Trois défauts réinjectés, trois échecs constatés :
 | `chemin_donnees` renvoie un chemin relatif | « les chemins sont absolus », « la configuration s'écrit dans le volume » |
 | `MODBOT_DATA_DIR` ignoré | « MODBOT_DATA_DIR déplace bien les données », et l'écriture dans le volume |
 | l'export ne vérifie plus la session | « l'export exige une connexion » |
+| le volume détecté passe devant le réglage explicite | « le réglage explicite prime » |
+| `RAILWAY_VOLUME_MOUNT_PATH` ignoré | « un volume Railway suffit » |
 
 La leçon est toujours la même, et c'est la troisième fois qu'on l'écrit ici :
 un test de régression qu'on n'a pas vu échouer ne prouve rien.
 
-200/200 côté API, 11/11 sur la sauvegarde au navigateur.
+202/202 côté API, 11/11 sur la sauvegarde au navigateur.

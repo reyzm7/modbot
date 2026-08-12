@@ -266,11 +266,21 @@ SLASH_DESCRIPTIONS = {
 #
 # MODBOT_DATA_DIR pointe vers un volume persistant. Sans lui, on retombe sur
 # le dossier du code : le comportement d'avant, valable en local.
-DATA_DIR = os.environ.get("MODBOT_DATA_DIR", "").strip() or BASE_DIR
+#
+# Railway renseigne RAILWAY_VOLUME_MOUNT_PATH des qu'un volume est rattache au
+# service. On s'en sert en second choix : attacher le volume suffit alors, sans
+# avoir a declarer de variable — une etape de moins pour se tromper. Le reglage
+# explicite reste prioritaire, et reste la voie sure si l'hebergeur change de
+# nom de variable.
+DATA_DIR = (
+    os.environ.get("MODBOT_DATA_DIR", "").strip()
+    or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    or BASE_DIR
+)
 try:
     os.makedirs(DATA_DIR, exist_ok=True)
 except Exception as _ex:
-    print(f"ModBot: MODBOT_DATA_DIR inutilisable ({_ex}), repli sur {BASE_DIR}")
+    print(f"ModBot: dossier de donnees inutilisable ({_ex}), repli sur {BASE_DIR}")
     DATA_DIR = BASE_DIR
 
 
