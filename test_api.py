@@ -858,10 +858,96 @@ def verifier_aide():
              corps.count("`/") <= 2, f"{corps.count('`/')} commandes citees")
 
 
+def verifier_persistance():
+    """
+    Ou vivent les reglages, et pourquoi cela decidait de leur survie.
+
+    Les fichiers portaient des chemins RELATIFS : ils atterrissaient dans le
+    dossier de travail du conteneur. Railway reconstruit celui-ci a chaque
+    deploiement, donc chaque mise a jour effacait la configuration de tous
+    les serveurs — les modules coches se retrouvaient decoches.
+
+    Tout passe maintenant par MODBOT_DATA_DIR, qu'on fait pointer vers un
+    volume. Sans la variable, on retombe sur le dossier du code.
+    """
+    print("\n--- Persistance des reglages ---")
+
+    verifier("les chemins de donnees sont absolus",
+             all(os.path.isabs(getattr(bot_mod, n)) for n in
+                 ("F_CONFIG", "F_DATA", "F_TICKETS", "F_GIVEAWAYS",
+                  "F_INFRACTIONS", "F_DATABASE")))
+    verifier("ils vivent tous dans le meme dossier",
+             len({os.path.dirname(getattr(bot_mod, n)) for n in
+                  ("F_CONFIG", "F_DATA", "F_TICKETS", "F_GIVEAWAYS",
+                   "F_INFRACTIONS")}) == 1)
+    verifier("sans variable d'environnement, on garde le dossier du code",
+             bot_mod.DATA_DIR == bot_mod.BASE_DIR,
+             bot_mod.DATA_DIR)
+
+    # Le vrai comportement : un volume ailleurs, et la reprise de l'existant.
+    import subprocess, tempfile, json as _json
+    with tempfile.TemporaryDirectory() as volume:
+        code = (
+            "import os, sys, json, importlib.util\n"
+            f"os.environ['MODBOT_DATA_DIR'] = {volume!r}\n"
+            "os.environ.setdefault('TOKEN', 'faux-token')\n"
+            "sys.path.insert(0, os.getcwd())\n"
+            "import discord.ext.commands as c\n"
+            "c.Bot.run = lambda self, *a, **k: None\n"
+            "sp = importlib.util.spec_from_file_location('b', 'bot.py')\n"
+            "m = importlib.util.module_from_spec(sp); sys.modules['b'] = m\n"
+            "sp.loader.exec_module(m)\n"
+            "m.jsave(m.F_CONFIG, {'42': {'captcha_enabled': True}})\n"
+            "print(json.dumps({'dir': m.DATA_DIR, 'config': m.F_CONFIG}))\n"
+        )
+        sortie = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                                text=True, cwd=os.getcwd(), timeout=180)
+        derniere = [l for l in sortie.stdout.strip().split("\n") if l.startswith("{")]
+        infos = _json.loads(derniere[-1]) if derniere else {}
+        verifier("MODBOT_DATA_DIR deplace bien les donnees",
+                 infos.get("dir") == volume, str(infos.get("dir")))
+        ecrit = os.path.join(volume, "config.json")
+        verifier("la configuration s'ecrit dans le volume", os.path.exists(ecrit))
+        if os.path.exists(ecrit):
+            relu = _json.load(io.open(ecrit, encoding="utf-8"))
+            verifier("le module coche est bien enregistre",
+                     relu.get("42", {}).get("captcha_enabled") is True, str(relu))
+
+
+async def verifier_sauvegarde_reglages(session):
+    """L'export et l'import des reglages, par l'API reelle."""
+    print("\n--- Sauvegarde des reglages (export / import) ---")
+    routes = {r.resource.canonical for r in bot_mod._dashboard_api_runner.app.router.routes()
+              if getattr(r, "resource", None)}
+    verifier("la route d'export existe",
+             "/api/guilds/{guild_id}/config/export" in routes)
+    verifier("la route d'import existe",
+             "/api/guilds/{guild_id}/config/import" in routes)
+
+    # Sans jeton, les deux doivent refuser.
+    async with session.get(f"{BASE}/api/guilds/1/config/export") as r:
+        verifier("l'export exige une connexion", r.status in (401, 403),
+                 f"status={r.status}")
+    async with session.post(f"{BASE}/api/guilds/1/config/import", json={}) as r:
+        verifier("l'import exige une connexion", r.status in (401, 403),
+                 f"status={r.status}")
+
+    # Le format est verifie avant tout traitement.
+    source = io.open("bot.py", encoding="utf-8").read()
+    corps = source[source.index("async def api_import_config"):]
+    corps = corps[:corps.index("\n\nasync def ")] if "\n\nasync def " in corps else corps[:4000]
+    verifier("le numero de format est controle", "FORMAT_SAUVEGARDE" in corps)
+    verifier("le fichier repasse par la validation habituelle",
+             "apply_dashboard_config" in corps)
+    verifier("les salons d'un autre serveur sont ecartes",
+             "meme" in corps.lower() and "channels" in corps)
+
+
 async def main():
     verifier_polices()
     verifier_commandes()
     verifier_aide()
+    verifier_persistance()
     verifier_role_verification()
     await verifier_image_bienvenue()
     await verifier_carte_bienvenue()
@@ -989,6 +1075,8 @@ async def main():
             corps = await r.text()
             verifier("pas de traceback expose", "Traceback" not in corps and "File \"" not in corps)
             verifier("reponse JSON structuree", corps.strip().startswith("{"), corps[:60])
+
+        await verifier_sauvegarde_reglages(s)
 
         print("\n--- Service du site par le bot ---")
         dossier = bot_mod.resolve_site_directory()

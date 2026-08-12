@@ -257,19 +257,68 @@ SLASH_DESCRIPTIONS = {
     "clear-all": {"fr": "Supprimer tous les messages du salon", "en": "Delete every channel message"},
 }
 
-F_DATA    = "data.json"
-F_BANS    = "bans.json"
-F_TICKETS = "tickets.json"
-F_CONFIG  = "config.json"
-F_STATS   = "stats.json"
-F_MODS    = "mod_stats.json"
-F_RATINGS = "ratings.json"
-F_DASHBOARD_SESSIONS = "dashboard_sessions.json"
-F_BLACKLIST = "blacklist.json"
-F_DASHBOARD_LOGS = "dashboard_logs.json"
-F_CAPTCHA = "captcha_pending.json"
-F_GIVEAWAYS = "giveaways.json"
-F_DATABASE = os.environ.get("MODBOT_DATABASE", os.path.join(BASE_DIR, "modbot_dashboard.db"))
+# ── Ou vivent les donnees ────────────────────────────────────────────────
+# Ces fichiers portaient des chemins RELATIFS, donc resolus dans le dossier
+# de travail du conteneur. Sur un hebergeur qui reconstruit a chaque
+# deploiement — Railway, Render, Fly — ce dossier repart de zero : toute la
+# configuration des serveurs disparaissait a chaque mise a jour, et les
+# modules coches se retrouvaient decoches.
+#
+# MODBOT_DATA_DIR pointe vers un volume persistant. Sans lui, on retombe sur
+# le dossier du code : le comportement d'avant, valable en local.
+DATA_DIR = os.environ.get("MODBOT_DATA_DIR", "").strip() or BASE_DIR
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception as _ex:
+    print(f"ModBot: MODBOT_DATA_DIR inutilisable ({_ex}), repli sur {BASE_DIR}")
+    DATA_DIR = BASE_DIR
+
+
+def chemin_donnees(nom):
+    """Chemin d'un fichier de donnees, dans le volume s'il y en a un."""
+    return os.path.join(DATA_DIR, nom)
+
+
+F_DATA    = chemin_donnees("data.json")
+F_BANS    = chemin_donnees("bans.json")
+F_TICKETS = chemin_donnees("tickets.json")
+F_CONFIG  = chemin_donnees("config.json")
+F_STATS   = chemin_donnees("stats.json")
+F_MODS    = chemin_donnees("mod_stats.json")
+F_RATINGS = chemin_donnees("ratings.json")
+F_DASHBOARD_SESSIONS = chemin_donnees("dashboard_sessions.json")
+F_BLACKLIST = chemin_donnees("blacklist.json")
+F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
+F_CAPTCHA = chemin_donnees("captcha_pending.json")
+F_GIVEAWAYS = chemin_donnees("giveaways.json")
+F_DATABASE = os.environ.get("MODBOT_DATABASE", chemin_donnees("modbot_dashboard.db"))
+
+
+def _reprendre_donnees_locales():
+    """
+    Recupere les fichiers restes a cote du code quand un volume vient
+    d'etre monte.
+
+    Sans cela, brancher MODBOT_DATA_DIR reviendrait a repartir d'une
+    configuration vide — exactement ce qu'on cherche a eviter.
+    """
+    if DATA_DIR == BASE_DIR:
+        return
+    for nom in ("data.json", "bans.json", "tickets.json", "config.json",
+                "stats.json", "mod_stats.json", "ratings.json",
+                "blacklist.json", "dashboard_logs.json", "giveaways.json",
+                "infractions.json", "modbot_dashboard.db"):
+        ancien, nouveau = os.path.join(BASE_DIR, nom), os.path.join(DATA_DIR, nom)
+        if os.path.exists(ancien) and not os.path.exists(nouveau):
+            try:
+                with open(ancien, "rb") as source, open(nouveau, "wb") as cible:
+                    cible.write(source.read())
+                print(f"ModBot: {nom} repris depuis le dossier du code vers {DATA_DIR}")
+            except Exception as ex:
+                print(f"ModBot: reprise de {nom} impossible ({ex})")
+
+
+_reprendre_donnees_locales()
 LINK_RE = re.compile(
     r'(?:https?://[^\s<>()]+|www\.[^\s<>()]+|(?:canary\.|ptb\.)?discord(?:app)?\.com/invite/[A-Za-z0-9-]+|discord\.gg/[A-Za-z0-9-]+|discord\.me/[A-Za-z0-9-]+|dsc\.gg/[A-Za-z0-9-]+|invite\.gg/[A-Za-z0-9-]+)',
     re.I
@@ -3974,6 +4023,10 @@ def apply_cors(response, request=None):
             response.headers["Vary"] = "Origin"
     response.headers["Access-Control-Allow-Headers"] = "Authorization, X-ModBot-Api-Token, Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    # Sans cela, un navigateur ne LIT pas Content-Disposition d'une reponse
+    # d'une autre origine : le site est sur Vercel, le bot sur Railway, et le
+    # fichier exporte perdait le nom que le bot lui avait donne.
+    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition"
     response.headers["Access-Control-Max-Age"] = "600"
     # Durcissement generique
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -5337,6 +5390,86 @@ async def api_save_guild_security(request):
                     severity="warning")
     return api_json({"ok": True, "security": serialize_security_config(guild)}, request=request)
 
+# ── Sauvegarde des REGLAGES (distincte de celle de la structure) ─────────
+# La sauvegarde ci-dessous copie les salons et les roles du serveur. Celle-ci
+# copie ce que ModBot, lui, a retenu : modules actifs, seuils, textes de
+# bienvenue, salons choisis. C'est ce qui disparaissait a chaque deploiement
+# quand les fichiers vivaient dans le conteneur.
+
+FORMAT_SAUVEGARDE = 1
+
+
+async def api_export_config(request):
+    """Renvoie les reglages du serveur, en fichier telechargeable."""
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    contenu = {
+        "format": FORMAT_SAUVEGARDE,
+        "exporte_le": now().isoformat(),
+        "serveur": {"id": str(guild.id), "nom": guild.name},
+        "reglages": serialize_dashboard_config(guild),
+    }
+    dashboard_log("config_export", guild, identity.get("username"),
+                  "Export des reglages")
+    corps = json.dumps(contenu, ensure_ascii=False, indent=2)
+    nom = f"modbot-{guild.id}-{now().strftime('%Y%m%d-%H%M')}.json"
+    reponse = web.Response(
+        text=corps,
+        content_type="application/json",
+        charset="utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{nom}"'},
+    )
+    # Meme traitement CORS que les autres reponses : le site vit sur une
+    # autre origine que le bot.
+    return apply_cors(reponse, request)
+
+
+async def api_import_config(request):
+    """
+    Reapplique des reglages exportes.
+
+    On passe par apply_dashboard_config() plutot que d'ecrire le fichier
+    directement : le contenu du fichier vient de l'utilisateur, il doit
+    franchir les memes validations qu'une modification faite a la main.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    charge = await request.json()
+
+    if not isinstance(charge, dict):
+        raise web.HTTPBadRequest(text="Fichier de sauvegarde illisible.")
+    if int(charge.get("format") or 0) != FORMAT_SAUVEGARDE:
+        raise web.HTTPBadRequest(
+            text="Ce fichier vient d'une autre version de ModBot.")
+    reglages = charge.get("reglages")
+    if not isinstance(reglages, dict):
+        raise web.HTTPBadRequest(text="Aucun reglage dans ce fichier.")
+
+    # Les identifiants de salons et de roles n'ont de sens que sur le serveur
+    # d'origine. Les rejouer ailleurs pointerait vers le vide : on ne garde
+    # que ce qui se transpose.
+    origine = str((charge.get("serveur") or {}).get("id") or "")
+    memeserveur = origine == str(guild.id)
+    if not memeserveur:
+        for clef in ("channels", "tickets", "reaction_roles",
+                     "reaction_roles_channel_id", "reaction_roles_message_id"):
+            reglages.pop(clef, None)
+        for sysconf in ("welcome_system",):
+            if isinstance(reglages.get(sysconf), dict):
+                for clef in ("channel_id", "departure_channel_id"):
+                    reglages[sysconf].pop(clef, None)
+
+    reglages["actor"] = identity.get("username") or identity.get("user_id")
+    await apply_dashboard_config(guild, reglages)
+    dashboard_log("config_import", guild, identity.get("username"),
+                  f"Import des reglages (origine {origine or 'inconnue'})")
+    return api_json({
+        "ok": True,
+        "meme_serveur": memeserveur,
+        "config": serialize_dashboard_config(guild),
+    }, request=request)
+
+
 async def api_guild_backups(request):
     identity = await api_identity(request)
     guild = await api_guild_from_request(request, identity)
@@ -6506,6 +6639,8 @@ async def start_dashboard_api():
     app.router.add_post("/api/guilds/{guild_id}/assistant", api_assistant)
 
     # Sauvegardes
+    app.router.add_get("/api/guilds/{guild_id}/config/export", api_export_config)
+    app.router.add_post("/api/guilds/{guild_id}/config/import", api_import_config)
     app.router.add_get("/api/guilds/{guild_id}/backups", api_guild_backups)
     app.router.add_post("/api/guilds/{guild_id}/backups", api_create_backup)
     app.router.add_post("/api/guilds/{guild_id}/backups/{backup_id}/restore", api_restore_backup)
@@ -8665,7 +8800,7 @@ def init_security_database():
 init_security_database()
 
 # --- instances partagees ------------------------------------------------------
-F_INFRACTIONS = os.path.join(BASE_DIR, "infractions.json")
+F_INFRACTIONS = chemin_donnees("infractions.json")
 D_BACKUPS = os.environ.get("MODBOT_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
 
 INFRACTIONS = sc.InfractionStore(F_INFRACTIONS, retention_days=180)

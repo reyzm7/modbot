@@ -2381,3 +2381,83 @@ Unicode. Quand le besoin réel est « est-ce le début d'une phrase française �
 c'est cela qu'il faut écrire, pas une approximation.
 
 187/187.
+
+## 36. Livré le 12 août 2026 — les réglages survivent enfin aux mises à jour
+
+### Le symptôme, et sa vraie cause
+
+« Quand je coche un module et que tu fais des mises à jour, il se décoche. »
+
+Le dashboard n'y était pour rien : il enregistrait correctement. Le défaut
+était d'un cran plus bas, dans une ligne qui n'avait jamais l'air suspecte :
+
+```python
+F_CONFIG = "config.json"        # chemin RELATIF
+```
+
+Un chemin relatif se résout dans le **dossier de travail du conteneur**.
+Railway reconstruit ce conteneur à chaque déploiement — Nixpacks repart d'une
+image neuve. Le fichier était donc écrit dans un disque jetable : chaque mise
+à jour repartait d'une configuration vide, pour **tous** les serveurs à la
+fois. Le module ne se « décochait » pas, il n'avait plus rien à quoi se
+raccrocher.
+
+C'est pour cela que le symptôme paraissait aléatoire : il ne dépendait pas de
+ce qu'on cochait, mais de la date du dernier déploiement.
+
+### La correction
+
+Tous les fichiers de données passent par un dossier unique :
+
+```python
+DATA_DIR = os.environ.get("MODBOT_DATA_DIR", "").strip() or BASE_DIR
+def chemin_donnees(nom):
+    return os.path.join(DATA_DIR, nom)
+```
+
+Douze `F_*` — configuration, données, tickets, giveaways, infractions, base
+SQLite, sessions… — sont devenus **absolus**. Sans la variable, on retombe sur
+le dossier du code : le comportement local ne change pas.
+
+Les fichiers laissés à côté du code sont **repris automatiquement** au premier
+démarrage avec un volume : on ne perd pas l'existant en migrant.
+
+### ⚠️ Ce que le code ne peut pas faire tout seul
+
+Le code sait désormais écrire dans un volume, **mais il faut lui en donner
+un**. Dans Railway : créer un *Volume*, puis régler `MODBOT_DATA_DIR` sur son
+point de montage (par exemple `/data`). Sans cette étape, `DATA_DIR` retombe
+sur le dossier du code — c'est-à-dire exactement le disque jetable d'avant, et
+le symptôme revient à l'identique.
+
+### Une ceinture en plus des bretelles
+
+Un volume protège des déploiements, pas d'une fausse manœuvre. Le dashboard
+gagne donc un panneau **« 🧷 Sauvegarde des réglages »** : un bouton télécharge
+tous les réglages du serveur en un fichier JSON daté, un autre les restaure.
+
+Deux garde-fous à la restauration :
+
+- le **numéro de format** est contrôlé avant tout traitement — un fichier
+  étranger est refusé avec un message clair, jamais appliqué à moitié ;
+- restaurer la sauvegarde d'**un autre serveur** écarte les identifiants de
+  salons et de rôles, qui n'y voudraient rien dire. Les réglages transposables
+  passent, le reste est ignoré plutôt que d'écrire des références mortes.
+
+Le fichier repasse par `apply_dashboard_config` : la même validation que le
+dashboard, pas un chemin de confiance parallèle.
+
+### Contrôles négatifs
+
+Trois défauts réinjectés, trois échecs constatés :
+
+| Défaut réinjecté | Ce qui tombe |
+|---|---|
+| `chemin_donnees` renvoie un chemin relatif | « les chemins sont absolus », « la configuration s'écrit dans le volume » |
+| `MODBOT_DATA_DIR` ignoré | « MODBOT_DATA_DIR déplace bien les données », et l'écriture dans le volume |
+| l'export ne vérifie plus la session | « l'export exige une connexion » |
+
+La leçon est toujours la même, et c'est la troisième fois qu'on l'écrit ici :
+un test de régression qu'on n'a pas vu échouer ne prouve rien.
+
+200/200 côté API, 11/11 sur la sauvegarde au navigateur.
