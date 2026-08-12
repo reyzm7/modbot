@@ -2326,3 +2326,58 @@ les éléments hors écran.
 **La leçon, deuxième fois qu'elle se présente** (voir §27) : un test de
 régression qu'on n'a pas vu échouer ne prouve rien. Ici il était pire
 qu'inutile — il donnait l'assurance d'avoir vérifié.
+
+## 35. Livré le 12 août 2026 — l'aide se génère, elle ne se recopie plus
+
+### Le décalage
+
+`/aide` énumérait **vingt-cinq commandes** recopiées à la main. Le bot en
+expose **cinquante**. Manquaient en entier `/securite`, `/captcha`, `/backup`,
+`/giveaway` et `/ia` — vingt-six sous-commandes — plus `/infractions` et
+`/infractions-reset`.
+
+C'est le même défaut que le wiki en §33, et il a la même cause : une liste
+écrite une fois, jamais relue. Une aide fausse est doublement nuisible — elle
+envoie chercher ce qui n'existe pas, et cache ce qui existe.
+
+### La correction, et sa garantie
+
+L'aide est **générée depuis `bot.tree`** à chaque appel. Elle ne peut plus se
+périmer : ajouter une commande la fait apparaître sans qu'on y pense.
+
+Le rangement par catégorie reste explicite — c'est un choix éditorial, pas une
+donnée technique — mais toute commande absente de la table tombe dans
+« Divers », et **un test refuse ce cas**. Ajouter une commande oblige donc à
+lui choisir une place, au lieu de la laisser disparaître dans une aide que
+plus personne ne relit. Contrôle négatif fait : en retirant `/insultes` de la
+table, le test la voit tomber.
+
+### `/info-bot` répond enfin à la bonne question
+
+Il récitait un catalogue de commandes en dur. Il montre maintenant ce que le
+serveur a **réellement d'actif** — anti-lien, anti-raid, captcha, bienvenue,
+assistant IA — ce qui répond à « qu'est-ce qui tourne chez moi » plutôt qu'à
+« que sait faire ce bot », déjà couvert par `/aide`. S'y ajoutent la durée de
+fonctionnement, la latence, les membres protégés et les versions.
+
+### Design
+
+Intitulés accentués, sous-titres en petit avec `-#`, description de commande
+nettoyée de son emoji de tête (l'intitulé le porte déjà), et trois boutons
+Dashboard / Wiki / Support sur les deux messages.
+
+### Une curiosité Unicode, notée pour la prochaine fois
+
+Retirer l'emoji de tête a demandé trois essais :
+
+| Tentative | Pourquoi elle échoue |
+|---|---|
+| `isalnum()` | « ℹ » (U+2139) porte la propriété Unicode **Alphabetic** et passe pour une lettre |
+| catégorie Unicode | elle le classe carrément **Ll**, lettre minuscule |
+| lettre **latine** | correct : `ℹ` est hors des plages latines, `É` et `(` sont préservés |
+
+La leçon générale : « est-ce une lettre ? » n'a pas de réponse simple en
+Unicode. Quand le besoin réel est « est-ce le début d'une phrase française »,
+c'est cela qu'il faut écrire, pas une approximation.
+
+187/187.
