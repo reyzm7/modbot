@@ -2063,3 +2063,58 @@ utilement. Ils comparent chaque bloc à **ce qu'il contient** :
 Contrôle négatif : en réinjectant `min-height: 520px` et
 `align-items: stretch`, les deux vérifications correspondantes tombent, avec
 les mesures exactes du défaut (219 px de vide, carte à 322 px).
+
+## 30. Livré le 12 août 2026 — politique de confidentialité et conditions d'utilisation
+
+Les deux pages manquaient, et leur absence bloque le référencement sur l'App
+Directory de Discord. Elles sont en ligne :
+
+- `confidentialite.html`
+- `conditions.html`
+
+liées depuis le pied de la page d'accueil, et traduites en anglais et en arabe
+comme le reste du site (1176 clefs par langue).
+
+### Écrites d'après le code, pas d'après un modèle
+
+Une politique de confidentialité qui décrit un fonctionnement imaginaire ne
+protège personne. Chaque affirmation vient d'une lecture de `bot.py`. Ce que
+l'audit a mis au jour, et qu'il fallait dire :
+
+| Constat | Pourquoi ça compte |
+|---|---|
+| Le contenu des messages est **lu** par l'automodération mais **jamais écrit sur disque** | c'est la question que se pose tout membre d'un serveur modéré |
+| Quand un message est supprimé, l'extrait republié vit dans le salon de logs, **côté Discord** | la donnée n'est pas chez ModBot, la nuance change qui en répond |
+| La traduction passe par **Google Traduction**, puis MyMemory en secours — pas par Mistral | deux destinataires que personne n'aurait devinés |
+| L'assistant IA ne reçoit la question, les échanges récents et le pseudo **que lorsqu'on l'interpelle** | la limite est nette, autant l'écrire |
+| La session du dashboard contient le **jeton OAuth Discord**, 7 jours au plus | c'est la donnée la plus sensible du lot |
+| Aucune mesure d'audience du site | déjà affiché dans l'espace admin depuis §28, cohérent partout |
+
+Le tableau des données indique pour chaque élément **pourquoi** il est traité et
+**où** il vit. Celui des destinataires nomme les cinq prestataires et ce que
+chacun reçoit. Une phrase referme le sujet : sans assistant IA ni commande de
+traduction, rien ne sort de Discord, Railway et Vercel.
+
+### Les conditions
+
+Objet, âge minimum, gratuité (**un don ne débloque rien et n'est pas
+remboursable**), permissions demandées et la fonction qui justifie chacune, ce
+qui reste à la charge de l'administrateur du serveur, usages interdits, absence
+de garantie, suspension, responsabilité, et comment arrêter.
+
+Le ton reste celui du reste du site : direct, sans formules creuses. Le fait que
+le service soit gratuit et maintenu sur du temps personnel est dit — non pour
+excuser les défauts, mais pour poser le cadre.
+
+### Vérifications
+
+47 contrôles sur les deux pages : sommaires sans lien mort, titres corrects dans
+les trois langues, aucune cellule de tableau vide, mises en gras préservées à la
+traduction, aucun débordement horizontal à 390 et 1280 px. Les suites du menu et
+de la bascule de langue les couvrent désormais aussi.
+
+Deux ajustements d'outillage au passage : les tableaux à trois colonnes défilent
+dans leur propre cadre pour que la **page** ne défile jamais, et le motif
+`INTRADUISIBLE` du test accueille les noms d'hébergeurs (Railway, Vercel,
+Mistral AI, MyMemory) — des noms propres qui ne se traduisent pas, au même titre
+que « Discord » qui y figurait déjà.
