@@ -414,6 +414,22 @@ def db_recent_events(limit=80):
     except Exception:
         return []
 
+def db_count(table):
+    """
+    Nombre total de lignes d'une table du tableau de bord.
+
+    Les listes recentes sont plafonnees a 80 ou 120 lignes : compter dessus
+    donnerait « 80 » des que le serveur depasse ce seuil, ce qui ressemble a
+    une vraie mesure sans en etre une.
+    """
+    if table not in ("dashboard_events", "moderation_sanctions"):
+        return 0
+    try:
+        with db_connect() as conn:
+            return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    except Exception:
+        return 0
+
 def db_recent_sanctions(limit=80):
     try:
         with db_connect() as conn:
@@ -2942,6 +2958,36 @@ async def _construire_defi(interaction, role_id):
 
 
 NOM_ROLE_VERIFIE = "Verifier"
+# Anciens noms deja crees sur des serveurs. Ils doivent etre REUTILISES, jamais
+# doublonnes : c'est a eux que les salons ont ete ouverts au verrouillage.
+NOMS_ROLE_VERIFIE_CONNUS = ("Verifier", "Verifie", "Vérifié", "Verified")
+
+
+def trouver_role_verifie(guild):
+    """
+    Role de verification deja present sur le serveur, quel que soit son nom.
+
+    Un serveur peut en porter DEUX, sequelle de la periode ou deux fonctions
+    creaient chacune le sien. On retient alors celui auquel les salons sont
+    reellement ouverts : c'est lui qui donne acces, l'autre ne sert a rien.
+    """
+    connus = [n.lower() for n in NOMS_ROLE_VERIFIE_CONNUS]
+    candidats = [r for r in guild.roles if r.name.lower() in connus]
+    if not candidats:
+        return None
+    if len(candidats) > 1:
+        ouvrant = {}
+        for salon in guild.channels:
+            for cible, regle in getattr(salon, "overwrites", {}).items():
+                # `cible in candidats` suffit : la cible d'une permission est
+                # un role ou un membre, et seuls nos roles candidats peuvent
+                # s'y trouver. Tester le type en plus n'apporte rien.
+                if cible in candidats and getattr(regle, "view_channel", None):
+                    ouvrant[cible] = ouvrant.get(cible, 0) + 1
+        if ouvrant:
+            return max(ouvrant, key=ouvrant.get)
+    # A defaut, l'ordre de preference des noms connus.
+    return min(candidats, key=lambda r: connus.index(r.name.lower()))
 
 
 async def role_de_verification(guild, role_id=""):
@@ -2950,17 +2996,22 @@ async def role_de_verification(guild, role_id=""):
 
     La configuration prime toujours. Sans configuration, le captcha ne
     servait a rien : le membre repondait juste, et rien ne changeait. On
-    reprend donc un role nomme « Verifier » s'il existe deja, sinon on le
-    cree — puis on le memorise, pour que le serveur garde le meme role
-    aux verifications suivantes.
+    reprend donc le role de verification deja present, sinon on le cree —
+    puis on le memorise, pour que le serveur garde le meme role aux
+    verifications suivantes.
+
+    Le point critique est de REPRENDRE le role existant. `/captcha activer`
+    en creait un nomme « Verifie » et n'ouvrait les salons qu'a celui-la ;
+    chercher exactement « Verifier » en creait un SECOND, vierge de toute
+    permission. Le membre validait son captcha, recevait ce role sans
+    pouvoir, et ne voyait plus aucun salon.
     """
     if str(role_id).isdigit():
         existant = guild.get_role(int(role_id))
         if existant:
             return existant, ""
 
-    deja = discord.utils.find(
-        lambda r: r.name.lower() == NOM_ROLE_VERIFIE.lower(), guild.roles)
+    deja = trouver_role_verifie(guild)
     if deja:
         update_cfg(guild.id, "captcha_role", str(deja.id))
         return deja, ""
@@ -6299,6 +6350,9 @@ async def api_admin_stats(request):
         "installs": len(bot.guilds),
         "servers": len(bot.guilds),
         "members": sum(g.member_count or 0 for g in bot.guilds),
+        # Totaux reels, pas la taille des listes recentes qui sont plafonnees.
+        "events_total": db_count("dashboard_events"),
+        "sanctions_total": db_count("moderation_sanctions"),
         "guilds": [serialize_guild(g) for g in bot.guilds],
         "blacklist": jload(F_BLACKLIST),
         "logs": db_recent_events(80) or jload(F_DASHBOARD_LOGS)[:80],
@@ -10528,14 +10582,20 @@ captcha_group = app_commands.Group(
 
 
 async def _assurer_role_verifie(guild):
-    """Retourne le role de verification, en le creant au besoin."""
-    existant = discord.utils.get(guild.roles, name="Verifie")
-    if existant:
-        return existant, False
-    role = await guild.create_role(
-        name="Verifie", colour=discord.Colour(0x43B581),
-        reason="Captcha ModBot — role accorde apres verification")
-    return role, True
+    """
+    Retourne (role de verification, vient d'etre cree).
+
+    Delegue a role_de_verification() : deux fonctions creaient chacune leur
+    role, sous deux noms differents (« Verifie » ici, « Verifier » la-bas).
+    Un serveur pouvait donc se retrouver avec deux roles, les salons ouverts
+    a l'un et le captcha accordant l'autre.
+    """
+    avant = trouver_role_verifie(guild)
+    role, erreur = await role_de_verification(guild, get_cfg(guild.id).get("captcha_role") or "")
+    if erreur or not role:
+        # L'appelant attrape Exception et affiche le message tel quel.
+        raise RuntimeError(erreur or "Role de verification indisponible.")
+    return role, avant is None
 
 
 async def _assurer_salon_verification(guild, role_verifie):

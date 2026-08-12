@@ -13,6 +13,7 @@ avant de lancer ce test.
 """
 import asyncio
 import base64
+import io
 import importlib.util
 import os
 import sys
@@ -562,8 +563,85 @@ async def verifier_image_bienvenue():
                  {"background": "javascript:alert(1)"}).get("background") == "")
 
 
+class FauxRole:
+    def __init__(self, rid, nom):
+        self.id, self.name = rid, nom
+    def __repr__(self):
+        return f"<{self.name}>"
+
+
+class FauxRegle:
+    def __init__(self, view): self.view_channel = view
+
+
+class FauxSalon:
+    def __init__(self, overwrites=None): self.overwrites = overwrites or {}
+
+
+class FauxServeurRoles:
+    def __init__(self, roles, channels=()):
+        self.roles = list(roles)
+        self.channels = list(channels)
+
+
+def verifier_role_verification():
+    """
+    Le defaut livre : DEUX fonctions creaient chacune leur role de
+    verification, sous deux noms differents — « Verifie » pour
+    /captcha activer, « Verifier » pour l'attribution apres captcha.
+
+    Consequence sur un vrai serveur : les salons n'etaient ouverts qu'a
+    « Verifie », le membre validait son captcha, recevait « Verifier »
+    — un role vierge de toute permission — et ne voyait plus AUCUN salon.
+
+    Ce que ces controles verrouillent : on REPREND toujours le role
+    existant, et quand il y en a deux on garde celui auquel les salons
+    sont reellement ouverts.
+    """
+    print("\n--- Role de verification (captcha) ---")
+    trouver = bot_mod.trouver_role_verifie
+
+    verifier("aucun role : rien a reprendre",
+             trouver(FauxServeurRoles([FauxRole(1, "Membre")])) is None)
+
+    for nom in ("Verifier", "Verifie", "Vérifié", "Verified"):
+        role = FauxRole(7, nom)
+        verifier(f"le role existant « {nom} » est repris",
+                 trouver(FauxServeurRoles([FauxRole(1, "Membre"), role])) is role)
+
+    verifier("la casse n'empeche pas de le reprendre",
+             trouver(FauxServeurRoles([FauxRole(8, "VERIFIE")])) is not None)
+
+    # Deux roles, sequelle de la periode a deux fonctions : celui auquel les
+    # salons sont ouverts doit gagner, meme si l'autre vient en premier.
+    ancien = FauxRole(10, "Verifie")      # celui du verrouillage
+    doublon = FauxRole(11, "Verifier")    # cree par erreur, sans acces
+    salons = [FauxSalon({ancien: FauxRegle(True)}),
+              FauxSalon({ancien: FauxRegle(True)})]
+    choisi = trouver(FauxServeurRoles([doublon, ancien], salons))
+    verifier("entre deux roles, celui qui ouvre les salons gagne",
+             choisi is ancien, f"choisi={choisi}")
+
+    # Et dans l'autre sens : l'ordre des roles ne doit rien changer.
+    choisi = trouver(FauxServeurRoles([ancien, doublon], salons))
+    verifier("le resultat ne depend pas de l'ordre des roles",
+             choisi is ancien, f"choisi={choisi}")
+
+    # Aucun indice dans les salons : l'ordre de preference des noms tranche,
+    # de facon deterministe.
+    sans_indice = FauxServeurRoles([FauxRole(20, "Verifie"), FauxRole(21, "Verifier")])
+    verifier("sans indice, le choix reste deterministe",
+             trouver(sans_indice).name == "Verifier", trouver(sans_indice).name)
+
+    verifier("les deux chemins de creation partagent le meme nom",
+             bot_mod.NOM_ROLE_VERIFIE in bot_mod.NOMS_ROLE_VERIFIE_CONNUS)
+    verifier("aucun second nom de role en dur ne subsiste",
+             'name="Verifie"' not in io.open("bot.py", encoding="utf-8").read())
+
+
 async def main():
     verifier_polices()
+    verifier_role_verification()
     await verifier_image_bienvenue()
     verifier_repartition_langues()
     verifier_repartition_pays()

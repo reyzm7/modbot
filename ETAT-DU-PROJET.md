@@ -1938,3 +1938,89 @@ croisement wiki ↔ `bot.py` ne laisse plus aucun écart.
 Une regle qui se confirme : quand un test devient rouge apres un changement de
 contenu, la premiere question n'est pas « comment le faire passer » mais « que
 verifiait-il exactement, et le verifie-t-il encore apres ma correction ».
+
+## 28. Livré le 12 août 2026 — le captcha coupait l'accès, et l'espace admin ne chargeait rien
+
+### « Dès que la vérification est faite, on ne voit plus les salons »
+
+Deux fonctions créaient chacune leur rôle de vérification, sous **deux noms
+différents** :
+
+| Fonction | Rôle créé | Utilisée par |
+|---|---|---|
+| `_assurer_role_verifie()` | **Verifie** | `/captcha activer`, qui ouvre ensuite les salons à ce rôle |
+| `role_de_verification()` | **Verifier** | l'attribution après un captcha réussi |
+
+Tant que la configuration contenait l'identifiant du rôle, les deux chemins
+tombaient d'accord. Dès qu'elle ne l'avait pas — captcha activé depuis le
+dashboard, configuration réinitialisée — le second chemin créait un **second
+rôle**, vierge de toute permission. Le membre validait son captcha, recevait ce
+rôle sans pouvoir, et se retrouvait devant un serveur vide : les salons
+n'étaient ouverts qu'à l'autre.
+
+Le nom « Verifier » vient de la demande initiale ; le tort a été de le chercher
+**exactement**, sans regarder ce que le serveur portait déjà.
+
+Désormais une seule fonction, qui **reprend** le rôle existant quel que soit son
+nom (`Verifier`, `Verifie`, `Vérifié`, `Verified`). Et si un serveur porte les
+deux — séquelle de la période à deux fonctions — c'est celui auquel les salons
+sont réellement ouverts qui est retenu, en lisant les permissions de salon.
+Onze vérifications couvrent ces cas, dont le fait que le résultat ne dépend pas
+de l'ordre des rôles.
+
+### L'espace admin ne chargeait rien du tout
+
+Trois symptômes rapportés — pas de serveurs, pas de statistiques, des logs
+faux — et **une seule cause** :
+
+```
+unlockAdmin()
+  ├── ferme la porte, affiche l'espace protégé   ✅
+  ├── adminStatus.innerHTML = … escapeHtml(…)    💥 ReferenceError
+  └── loadAdminStats()                            ← jamais atteint
+```
+
+`escapeHtml` est définie dans une autre portée du fichier ; le bloc admin se
+termine avant. L'appel était donc une erreur latente, déclenchée exactement au
+moment où quelqu'un déverrouillait l'espace. Seize appels étaient concernés :
+l'ajout d'un administrateur et l'ajout à la blacklist plantaient aussi. Tous
+utilisent maintenant `escapeHtmlValue`, la fonction globale équivalente.
+
+Comme `loadAdminStats()` n'était jamais atteint, **le HTML de démonstration
+restait affiché** : « Serveur test », « VPG Belgique », des horaires inventés.
+D'où « les logs ne sont pas bons » — ils n'étaient pas mauvais, ils étaient
+faux. Ce sont ces lignes qui rendaient la panne invisible : un panneau vide
+aurait alerté, un panneau plein de fausses données rassurait.
+
+Corrigé au-delà de l'erreur elle-même :
+
+- **les logs sont affichés** — `data.logs` était renvoyé par l'API et n'était
+  lu nulle part ;
+- **les serveurs** portent leur nombre de membres, et « Rafraîchir » relit
+  vraiment le bot, au lieu de réécrire le sous-titre des lignes déjà là ;
+- **les statistiques** montrent ce que le bot sait réellement : serveurs,
+  membres protégés, actions enregistrées, sanctions. Les anciens compteurs
+  (visites, aujourd'hui, ouvertures) venaient du `localStorage` du navigateur :
+  ils affichaient zéro pour tout visiteur, et n'auraient de toute façon mesuré
+  qu'un seul navigateur. Une note dit franchement que les visites ne sont pas
+  mesurées ;
+- **en cas d'échec, la raison s'affiche** à la place des données : session
+  Discord absente, compte non administrateur, ou bot injoignable. Plus jamais
+  de fausses lignes qui font croire à des données réelles.
+
+Deux totaux ont été ajoutés à l'API (`events_total`, `sanctions_total`) :
+compter les listes récentes aurait donné « 80 » dès le dépassement du plafond,
+ce qui ressemble à une mesure sans en être une.
+
+### Au passage
+
+- `formatStat("—")` renvoyait `NaN` : `Number("—")` ne vaut pas zéro, il ne
+  vaut rien. Les compteurs affichent maintenant un tiret.
+- La barre de l'espace admin avait été désorganisée par le correctif de la
+  section 27 : les règles d'ordre ne nommaient que les classes du dashboard,
+  et `.dashboard-server` restait donc à l'ordre 0, **avant le logo**. Les deux
+  barres partagent maintenant les mêmes règles.
+- Le bandeau « Espace actif » portait une grille de quatre colonnes héritée
+  d'un balisage à quatre enfants ; il n'en a que trois, et son libellé tombait
+  dans une colonne de 34 px. Hauteur de la barre : 242 → 199 px sur téléphone.
+- Le wiki ne mentionne plus les tournois IFC.
