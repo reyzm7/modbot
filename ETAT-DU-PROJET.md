@@ -2166,3 +2166,43 @@ Trente vérifications sur cinq largeurs, de 320 à 1440 px :
 
 Contrôle négatif : en rétablissant la largeur bridée, deux vérifications tombent
 en affichant les mesures exactes (« menu 320px pour un bouton de 362px »).
+
+## 32. Livré le 12 août 2026 — les barres du haut, à la taille du doigt
+
+La section 31 avait élargi les menus *déroulants*. Restait ce qui les ouvre :
+la pastille du compte sur le dashboard, et toute la barre du panel admin.
+
+### Mesures avant correction, à 390 px
+
+| | Constaté | Autour |
+|---|---|---|
+| Pastille du compte (dashboard) | **106 × 40 px**, avatar 28 px, chevron 10 × 7 | le sélecteur de serveur juste en dessous fait 46 px de haut |
+| Barre de l'admin | **358 px** de large sur un écran de 390 | le dashboard occupe les 390 |
+| Boutons de l'admin | **36 px** de haut, libellés à **13,6 px** | 46 px et 16 px ailleurs |
+
+### Ce qui les causait
+
+La barre de l'admin porte `width: min(100% - 32px, 1480px)` — un retrait pensé
+pour le bureau, où il donne une barre flottante élégante. Sur un téléphone, il
+ronge 32 px d'un écran déjà étroit. Elle prend maintenant toute la largeur sous
+760 px, et se retrouve **plus compacte au passage** : 199 → 169 px, parce que
+ses éléments cessent de se replier faute de place.
+
+Le reste tenait à `.compact`, une classe qui réduit à 38 px et 0,86 rem. Juste
+sur un écran large, contre-productif sur un téléphone où c'est précisément là
+qu'il faut viser juste.
+
+Toutes les cibles des deux barres sont désormais à **44 px** — le seuil sous
+lequel on rate le bouton au doigt — logo compris, puisque c'est un lien vers
+l'accueil. Les libellés remontent à 15,2 px, l'avatar du compte de 28 à 34 px,
+son chevron de 10 à 14.
+
+### Ce que le test mesure
+
+Pas une valeur d'apparence, mais deux seuils d'usage : **aucune cible sous
+40 px**, **aucun libellé sous 15 px**. Plus l'avatar (≥ 32 px) et le fait que la
+barre de l'admin occupe **exactement** la largeur de la fenêtre. Vingt-quatre
+vérifications, de 320 à 760 px.
+
+Le test parcourt tous les `button`, `a` et `select` de la barre plutôt qu'une
+liste nommée : un élément ajouté demain y passera sans qu'on ait à y penser.
