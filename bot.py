@@ -26,6 +26,10 @@ except Exception:
     Image = ImageDraw = ImageFont = ImageOps = None
     PIL_AVAILABLE = False
 
+# Instant du demarrage, pour afficher la duree de fonctionnement dans
+# /info-bot. Pose ici : c'est la premiere ligne executee du module.
+DEMARRE_LE = time.time()
+
 # Polices livrees avec le depot. Elles suivent le code partout, y compris sur
 # un hebergeur dont l'image systeme ne contient aucune police — le cas de
 # Railway. Voir _welcome_font() pour ce que coutait leur absence.
@@ -5928,7 +5932,7 @@ DASHBOARD_PANELS = {
     "ratings": "Avis — notes et commentaires laissés par les membres",
     "channels": "Salons — salons utilisés par ModBot",
     "socials": "Réseaux — annonces automatiques Twitch, YouTube, X",
-    "language": "Langue — langue des messages du bot",
+    "language": "Langue — langue des messages du bot, et pays du serveur affiché sur la carte publique",
 }
 
 ASSISTANT_MAX_QUESTION = 1200
@@ -12412,78 +12416,192 @@ async def cmd_reset(i: discord.Interaction, membre: discord.Member):
     le.add_field(name="👮 Par", value=str(i.user), inline=True)
     await send_log(i.guild, le)
 
+# ════════════════════════════════════════════════
+#  AIDE ET INFORMATIONS
+# ════════════════════════════════════════════════
+
+# Rangement des commandes simples. Les GROUPES (/securite, /captcha…) sont
+# classes automatiquement : ils forment deja une categorie a eux seuls.
+#
+# Toute commande absente de cette table tombe dans « Divers » — et une
+# verification du test suite refuse ce cas. Ajouter une commande oblige donc
+# a choisir sa place, au lieu de la voir disparaitre en silence d'une aide
+# que plus personne ne relit.
+CATEGORIES_COMMANDES = [
+    ("🛡️", "Protection", ["securite", "captcha"]),
+    ("🔨", "Modération", ["warn", "ban", "deban", "ban-list", "avert-count",
+                          "reset-avert", "infractions", "infractions-reset", "insultes"]),
+    ("🧹", "Messages", ["clear-message", "clear-all", "annonce", "patchnotes", "massdm"]),
+    ("🎫", "Support", ["addticket", "report", "suggest"]),
+    ("🎉", "Communauté", ["giveaway", "translate"]),
+    ("💾", "Sauvegardes", ["backup"]),
+    ("🤖", "Assistant IA", ["ia"]),
+    ("📊", "Statistiques", ["serverstats", "modstats", "profilestats"]),
+    ("🧰", "Outils", ["panel", "aide", "info-bot"]),
+]
+
+# Commandes a prefixe, qui ne vivent pas dans l'arbre des slash.
+COMMANDES_TEXTE = [
+    ("!addroles", "donner un role a un membre"),
+    ("!deleteroles", "retirer un role"),
+    ("!addchannel", "ouvrir un salon a un membre"),
+    ("!deletechannel", "lui en retirer l'acces"),
+]
+
+
+def inventaire_commandes():
+    """
+    Les commandes REELLES, rangees par categorie.
+
+    Lue depuis `bot.tree` a chaque appel : c'est ce qui empeche l'aide de
+    se perimer. L'ancienne version recopiait une liste a la main — elle
+    annoncait vingt-cinq commandes quand le bot en exposait cinquante-cinq,
+    et ignorait /securite, /captcha, /backup, /giveaway et /ia en entier.
+    """
+    par_nom = {}
+    for commande in bot.tree.get_commands():
+        if isinstance(commande, app_commands.Group):
+            sous = ", ".join(sorted(s.name for s in commande.commands))
+            par_nom[commande.name] = (f"/{commande.name}", sous)
+        elif " " not in commande.name:      # les menus contextuels portent un espace
+            par_nom[commande.name] = (f"/{commande.name}", commande.description or "")
+
+    rangees, prises = [], set()
+    for emoji, titre, noms in CATEGORIES_COMMANDES:
+        lignes = []
+        for nom in noms:
+            if nom in par_nom:
+                prises.add(nom)
+                libelle, detail = par_nom[nom]
+                lignes.append((libelle, detail))
+        if lignes:
+            rangees.append((emoji, titre, lignes))
+
+    restantes = [(v[0], v[1]) for k, v in sorted(par_nom.items()) if k not in prises]
+    if restantes:
+        rangees.append(("📦", "Divers", restantes))
+    return rangees
+
+
+# Un vrai debut de phrase commence par une lettre LATINE, un chiffre ou une
+# parenthese. Ni `isalnum()` ni la categorie Unicode ne suffisent : « ℹ »
+# (U+2139) est classe « lettre minuscule » par Unicode, si bien que l'emoji
+# de /info-bot survivait aux deux tests.
+_AVANT_LE_TEXTE = re.compile(r"^[^A-Za-zÀ-ÖØ-öø-ÿ0-9(\[]+")
+
+
+def _nettoyer_description(texte):
+    """Retire l'emoji de tete des descriptions : l'intitule le porte deja."""
+    return _AVANT_LE_TEXTE.sub("", (texte or "").strip()).strip()
+
+
+def vue_liens_modbot():
+    """Boutons vers le site, le wiki et le support."""
+    racine = site_base_url()
+    vue = discord.ui.View()
+    for libelle, emoji, url in (
+        ("Dashboard", "📊", DASHBOARD_SITE_URL),
+        ("Wiki", "📚", f"{racine}/wiki.html"),
+        ("Support", "💬", "https://discord.gg/CK8CbFtYuv"),
+    ):
+        vue.add_item(discord.ui.Button(label=libelle, emoji=emoji,
+                                       url=url, style=discord.ButtonStyle.link))
+    return vue
+
+
 @bot.tree.command(name="aide", description="📚 Aide et liste des commandes ModBot")
 async def cmd_aide(i: discord.Interaction):
     gid = str(i.guild.id)
-    e = EG("📚 Aide ModBot", "Recapitulatif complet des commandes disponibles.", 0x5865F2, gid)
-    e.add_field(name="🌐 Site", value="[Ouvrir le site ModBot](https://modbot-website.vercel.app/)", inline=False)
-    e.add_field(name="🛠️ Administration", value=(
-        "`Dashboard web` - configurer le bot, les tickets, les salons et les modules\n"
-        "`/panel` - ouvrir le panel Discord d'outils rapides\n"
-        "`/annonce` - publier une annonce dans un salon par ID\n"
-        "`/patchnotes` - publier des patch notes dans le salon actuel\n"
-        "`/massdm` - envoyer un message prive en masse\n"
-        "`/aide` - afficher cette aide\n"
-        "`/info-bot` - informations techniques du bot"
-    ), inline=False)
-    e.add_field(name="🔨 Moderation", value=(
-        "`/warn` - avertir un membre\n"
-        "`/ban` - bannir un membre\n"
-        "`/deban` - debannir par ID\n"
-        "`/avert-count` - voir les avertissements d'un membre\n"
-        "`/reset-avert` - remettre les avertissements a zero\n"
-        "`/ban-list` - voir les bannissements\n"
-        "`/insultes` - voir les mots filtres"
-    ), inline=False)
-    e.add_field(name="🧹 Messages", value=(
-        "`/clear-message` - supprimer 1 a 100 messages\n"
-        "`/clear-all` - supprimer tous les messages du salon"
-    ), inline=False)
-    e.add_field(name="🎫 Tickets", value=(
-        "`/addticket` - ajouter un membre au ticket actuel"
-    ), inline=False)
-    e.add_field(name="🌍 Communautaire & outils", value=(
-        "`/translate` - traduire par langue avec ID/lien optionnel\n"
-        "`/suggest` - envoyer une suggestion\n"
-        "`/report` - signaler un bug ou joueur"
-    ), inline=False)
-    e.add_field(name="📊 Statistiques", value=(
-        "`/profilestats` - stats d'un membre\n"
-        "`/serverstats` - stats du serveur\n"
-        "`/modstats` - stats de moderation"
-    ), inline=False)
-    e.add_field(name="⌨️ Commandes texte", value=(
-        "`!addroles @membre @role` - ajouter un role\n"
-        "`!deleteroles @membre @role` - retirer un role\n"
-        "`!addchannel @membre #salon` - donner acces a un salon\n"
-        "`!deletechannel @membre #salon` - retirer l'acces special au salon"
-    ), inline=False)
-    await i.response.send_message(embed=e, ephemeral=True)
+    rangees = inventaire_commandes()
+    # On compte les commandes REELLEMENT utilisables : un groupe en vaut
+    # autant que ses sous-commandes, pas une.
+    total = 0
+    for commande in bot.tree.get_commands():
+        if isinstance(commande, app_commands.Group):
+            total += len(commande.commands)
+        elif " " not in commande.name:
+            total += 1
+
+    e = EG("📚 Aide ModBot", couleur=0x5865F2, gid=gid)
+    e.description = (
+        f"**{total}** commandes, rangées par usage.\n"
+        "-# Les commandes de modération n'apparaissent qu'aux membres qui y ont droit.\n"
+        "-# Un nom suivi de plusieurs mots est un groupe : tape-le pour voir ses options."
+    )
+    for emoji, titre, lignes in rangees:
+        valeur = "\n".join(
+            f"`{libelle}` — {_nettoyer_description(detail)}" if detail else f"`{libelle}`"
+            for libelle, detail in lignes)
+        e.add_field(name=f"{emoji} {titre}", value=valeur[:1024], inline=False)
+
+    e.add_field(name="⌨️ Commandes texte", value="\n".join(
+        f"`{nom}` — {detail}" for nom, detail in COMMANDES_TEXTE), inline=False)
+    e.add_field(name="🧭 Tout le reste", value=(
+        "Le **dashboard** règle ce qui ne se fait pas en commande : bienvenue, "
+        "tickets, rôles-réactions, logs, réseaux."), inline=False)
+
+    await i.response.send_message(embed=e, view=vue_liens_modbot(), ephemeral=True)
+
 
 @bot.tree.command(name="info-bot", description="ℹ️ Informations sur ModBot")
 async def cmd_info(i: discord.Interaction):
     gid = str(i.guild.id)
+    cfg = get_cfg(gid)
     custom = get_custom(gid)
-    e = EG("👮 ModBot — Informations", gid=gid)
-    e.description = "Bot de modération automatique pour protéger ta communauté."
-    e.add_field(name="🤖 Nom", value=str(bot.user), inline=True)
-    e.add_field(name="🆔 ID", value=f"`{bot.user.id}`", inline=True)
+
+    membres = sum(g.member_count or 0 for g in bot.guilds)
+    latence = round(bot.latency * 1000)
+    depuis = int(time.time() - DEMARRE_LE)
+    jours, reste = divmod(depuis, 86400)
+    heures, reste = divmod(reste, 3600)
+    minutes = reste // 60
+    duree = (f"{jours} j {heures} h" if jours else
+             f"{heures} h {minutes} min" if heures else f"{minutes} min")
+
+    e = EG("👮 ModBot", couleur=0x5865F2, gid=gid)
+    e.description = (
+        "Modération, sécurité et animation pour ta communauté.\n"
+        f"-# En ligne depuis {duree} · latence {latence} ms"
+    )
     e.add_field(name="🌐 Serveurs", value=f"`{len(bot.guilds)}`", inline=True)
-    e.add_field(name="🚫 Mots filtrés", value=f"`{len(INSULTES_BASE)+len(custom)}`", inline=True)
-    e.add_field(name="⚠️ Seuil ban", value=f"`{MAX_AVERT} avert.`", inline=True)
+    e.add_field(name="👥 Membres protégés", value=f"`{membres:,}`".replace(",", " "), inline=True)
+    e.add_field(name="🗣️ Langue du serveur", value=f"`{format_lang(gid)}`", inline=True)
+
+    # Ce qui est reellement actif ICI : plus parlant qu'une liste figee.
+    actifs = []
+    if anti_link_enabled(cfg):
+        actifs.append("anti-lien")
+    if cfg.get("anti_spam"):
+        actifs.append("anti-spam")
+    if (cfg.get("securite") or {}).get("antiraid"):
+        actifs.append("anti-raid")
+    if (cfg.get("securite") or {}).get("antinuke"):
+        actifs.append("anti-nuke")
+    if captcha_cfg(gid)["enabled"]:
+        actifs.append("captcha")
+    if (cfg.get("welcome_system") or {}).get("enabled"):
+        actifs.append("bienvenue")
+    if cfg.get("ia_enabled"):
+        actifs.append("assistant IA")
+    e.add_field(name="🛡️ Actifs sur ce serveur",
+                value=("• " + "\n• ".join(actifs)) if actifs else
+                      "_Aucun module activé — tout se règle au dashboard._",
+                inline=False)
+
+    e.add_field(name="🚫 Mots filtrés", value=f"`{len(INSULTES_BASE) + len(custom)}`", inline=True)
+    e.add_field(name="⚠️ Seuil de bannissement", value=f"`{MAX_AVERT} avertissements`", inline=True)
     e.add_field(name="⏱️ Expiration", value="`5 mois`", inline=True)
-    e.add_field(name="⚡ Sanctions", value="1→warn • 2→mute4h • 3→mute24h • 4→ban", inline=False)
-    e.add_field(name="📋 Commandes", value=(
-        "`/panel` `/insultes` `/suggest` `/report` `/warn` `/ban` `/deban`\n"
-        "`/annonce` `/massdm` `/translate` `/patchnotes`\n"
-        "`/clear-message` `/clear-all` `/addticket`\n"
-        "`/avert-count` `/ban-list` `/reset-avert` `/profilestats`\n"
-        "`/serverstats` `/modstats` `/aide` `/info-bot`\n"
-        "`!addroles` `!deleteroles` `!addchannel` `!deletechannel`"
-    ), inline=False)
-    e.add_field(name="⚙️ Développé par", value="**gimskh.**", inline=False)
-    try: await i.response.send_message(embed=e)
-    except Exception: pass
+    e.add_field(name="⚡ Progression des sanctions",
+                value="1️⃣ avertissement → 2️⃣ mute 4 h → 3️⃣ mute 24 h → 4️⃣ bannissement",
+                inline=False)
+    e.set_footer(text=f"discord.py {discord.__version__} · Python "
+                      f"{sys.version_info.major}.{sys.version_info.minor}")
+
+    try:
+        await i.response.send_message(embed=e, view=vue_liens_modbot())
+    except Exception:
+        pass
+
 
 # ════════════════════════════════════════════════
 #  LANCEMENT

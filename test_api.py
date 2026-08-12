@@ -795,9 +795,73 @@ async def verifier_carte_bienvenue():
              "sans carte" in corps)
 
 
+def verifier_aide():
+    """
+    L'aide doit se construire depuis l'arbre des commandes, pas depuis une
+    liste recopiee a la main.
+
+    L'ancienne version enumerait vingt-cinq commandes quand le bot en
+    exposait cinquante : /securite, /captcha, /backup, /giveaway et /ia
+    n'y figuraient pas du tout. Une aide fausse envoie chercher des
+    commandes qui n'existent pas, et cache celles qui existent.
+    """
+    print("\n--- Aide et informations ---")
+    import discord as _d
+
+    rangees = bot_mod.inventaire_commandes()
+    classees = {libelle for _, _, lignes in rangees for libelle, _ in lignes}
+
+    attendues = set()
+    for commande in bot_mod.bot.tree.get_commands():
+        if isinstance(commande, _d.app_commands.Group) or " " not in commande.name:
+            attendues.add("/" + commande.name)
+
+    verifier("l'aide couvre toutes les commandes de l'arbre",
+             classees == attendues, str(sorted(attendues - classees)))
+
+    # Le fourre-tout doit rester vide : une commande ajoutee sans categorie
+    # y tomberait, et personne ne s'en apercevrait.
+    verifier("aucune commande ne tombe dans « Divers »",
+             not any(titre == "Divers" for _, titre, _ in rangees))
+
+    # Limites de Discord : 25 champs, 1024 caracteres par champ.
+    verifier("le nombre de champs reste sous la limite de Discord",
+             len(rangees) + 2 <= 25, f"{len(rangees) + 2}/25")
+    trop_longs = []
+    for _, titre, lignes in rangees:
+        valeur = "\n".join(
+            f"`{a}` — {bot_mod._nettoyer_description(b)}" if b else f"`{a}`"
+            for a, b in lignes)
+        if len(valeur) > 1024:
+            trop_longs.append(f"{titre}={len(valeur)}")
+    verifier("aucun champ ne depasse 1024 caracteres", not trop_longs, str(trop_longs))
+
+    # Le nettoyage des descriptions : « ℹ » est classe LETTRE par Unicode,
+    # d'ou deux tentatives ratees avant de retenir un critere latin.
+    nettoyer = bot_mod._nettoyer_description
+    verifier("l'emoji de tete est retire",
+             nettoyer("ℹ️ Informations sur ModBot") == "Informations sur ModBot",
+             nettoyer("ℹ️ Informations sur ModBot"))
+    verifier("un accent en tete est conserve",
+             nettoyer("Élever un membre") == "Élever un membre")
+    verifier("une parenthese en tete est conservee",
+             nettoyer("(beta) essai") == "(beta) essai")
+    verifier("une description deja propre n'est pas touchee",
+             nettoyer("Traduire un message") == "Traduire un message")
+
+    # /info-bot ne doit plus recopier de liste de commandes en dur : c'est
+    # ce qui l'avait laissee derriere l'arbre reel.
+    source = io.open("bot.py", encoding="utf-8").read()
+    corps = source[source.index('name="info-bot"'):]
+    corps = corps[:corps.index("\n@") if "\n@" in corps else 3000]
+    verifier("/info-bot n'enumere plus les commandes en dur",
+             corps.count("`/") <= 2, f"{corps.count('`/')} commandes citees")
+
+
 async def main():
     verifier_polices()
     verifier_commandes()
+    verifier_aide()
     verifier_role_verification()
     await verifier_image_bienvenue()
     await verifier_carte_bienvenue()
