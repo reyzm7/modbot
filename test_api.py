@@ -17,6 +17,7 @@ import io
 import importlib.util
 import os
 import re
+import time
 import sys
 
 sys.path.insert(0, os.getcwd())
@@ -1014,6 +1015,26 @@ def verifier_filet_discord():
                           {"jeton": "secret"})
             verifier("ecrire les sessions ne declenche rien",
                      bot_mod._sauvegarde_a_faire is False)
+
+            # 6. L'empreinte : elle sert a ne pas reposter un message
+            #    identique a chaque demarrage. Elle doit donc suivre le
+            #    contenu, et ignorer l'horodatage qui change tout seul.
+            bot_mod.jsave(bot_mod.chemin_donnees("config.json"), {"9": {"a": 1}})
+            un = bot_mod.construire_sauvegarde()
+            time.sleep(1.05)
+            deux = bot_mod.construire_sauvegarde()
+            verifier("deux sauvegardes du meme contenu ont bien un horodatage different",
+                     un["sauvegarde_le"] != deux["sauvegarde_le"])
+            verifier("l'empreinte ignore l'horodatage",
+                     bot_mod.empreinte_sauvegarde(un) ==
+                     bot_mod.empreinte_sauvegarde(deux))
+            bot_mod.jsave(bot_mod.chemin_donnees("config.json"), {"9": {"a": 2}})
+            trois = bot_mod.construire_sauvegarde()
+            verifier("un reglage modifie change l'empreinte",
+                     bot_mod.empreinte_sauvegarde(un) !=
+                     bot_mod.empreinte_sauvegarde(trois))
+            verifier("une charge illisible n'a pas d'empreinte",
+                     bot_mod.empreinte_sauvegarde("pas un dict") is None)
     finally:
         bot_mod.DATA_DIR = ancien
         bot_mod._sauvegarde_a_faire = False

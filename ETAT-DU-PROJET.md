@@ -2529,11 +2529,33 @@ Les écritures sont marquées via `jsave`, donc **un seul point d'accroche**
 couvre tous les appels du fichier ; et la boucle groupe les changements pour
 que cocher cinq modules d'affilée ne produise pas cinq messages.
 
-### Contrôles négatifs
+### Le trou repéré en relisant, et bouché
+
+La sauvegarde ne partait **que lorsqu'un réglage changeait**. Une installation
+qui tourne sans qu'on y touche n'était donc jamais sauvegardée — et le
+redéploiement suivant l'effaçait sans filet. Le mécanisme ne protégeait que
+les serveurs actifs, c'est-à-dire pas ceux qui en avaient le plus besoin.
+
+Corrigé en marquant une sauvegarde à faire **au démarrage**. Mais poster à
+chaque démarrage remplirait la conversation de messages identiques : la
+décision passe donc par une **empreinte du contenu**, horodatage exclu — sans
+cette exclusion, deux sauvegardes identiques paraîtraient différentes et on
+reposterait à chaque fois.
+
+Le démarrage lit désormais l'historique **systématiquement**, pour deux
+besoins qu'il ne faut pas confondre : appliquer la sauvegarde (seulement si la
+configuration est vide) et connaître l'empreinte de ce qui est déjà déposé
+(toujours).
+
+Le test qui compare deux empreintes est doublé d'un **contrôle positif** : il
+vérifie d'abord que les deux horodatages diffèrent réellement. Sans lui,
+« l'empreinte ignore l'horodatage » passerait tout seul si les deux
+sauvegardes tombaient dans la même seconde — un test vert qui ne prouve rien.
 
 | Défaut réinjecté | Ce qui tombe |
 |---|---|
 | `dashboard_sessions.json` ajouté à la liste blanche | 3 vérifications, dont « le fichier de sessions n'est pas sauvegardé » |
 | la configuration est toujours vue comme vide | « une configuration présente n'est pas vue comme vide » |
+| l'horodatage entre dans l'empreinte | « l'empreinte ignore l'horodatage » |
 
-219/219.
+223/223.

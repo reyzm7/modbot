@@ -401,6 +401,9 @@ FICHIERS_SAUVEGARDES = (
 
 _sauvegarde_a_faire = False
 _sauvegarde_derniere = None
+# Empreinte du dernier contenu qu'on sait depose. Sert a ne pas reposter un
+# message identique a chaque redemarrage.
+_sauvegarde_empreinte = None
 
 
 def _marquer_a_sauvegarder(chemin):
@@ -408,6 +411,23 @@ def _marquer_a_sauvegarder(chemin):
     global _sauvegarde_a_faire
     if os.path.basename(chemin) in FICHIERS_SAUVEGARDES:
         _sauvegarde_a_faire = True
+
+
+def empreinte_sauvegarde(charge):
+    """
+    Empreinte du CONTENU d'une sauvegarde, horodatage exclu.
+
+    L'horodatage change a chaque appel : l'inclure ferait paraitre differentes
+    deux sauvegardes identiques, et on reposterait un message a chaque
+    demarrage.
+    """
+    if not isinstance(charge, dict):
+        return None
+    fichiers = charge.get("fichiers")
+    if not isinstance(fichiers, dict):
+        return None
+    tel_quel = json.dumps(fichiers, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(tel_quel.encode("utf-8")).hexdigest()
 
 
 def construire_sauvegarde():
@@ -457,10 +477,19 @@ async def _chercher_utilisateur(uid):
 
 async def deposer_sauvegarde_discord():
     """Depose la configuration courante en piece jointe. Silencieux si echec."""
+    global _sauvegarde_empreinte
     destinataire = await _destinataire_sauvegarde()
     if destinataire is None:
         return False
-    contenu = json.dumps(construire_sauvegarde(), ensure_ascii=False, indent=2)
+    charge = construire_sauvegarde()
+    if not charge.get("fichiers"):
+        # Rien a sauvegarder : inutile d'envoyer un fichier vide qui
+        # remplacerait une sauvegarde valable dans l'historique.
+        return False
+    empreinte = empreinte_sauvegarde(charge)
+    if empreinte is not None and empreinte == _sauvegarde_empreinte:
+        return False
+    contenu = json.dumps(charge, ensure_ascii=False, indent=2)
     brut = contenu.encode("utf-8")
     if len(brut) > TAILLE_MAX_SAUVEGARDE:
         print(f"ModBot: sauvegarde Discord ignoree, {len(brut)} octets")
@@ -473,6 +502,7 @@ async def deposer_sauvegarde_discord():
                      "configuration après une mise à jour ; ne le supprime pas."),
             file=fichier,
         )
+        _sauvegarde_empreinte = empreinte
         return True
     except Exception as err:
         print(f"ModBot: sauvegarde Discord impossible ({err})")
@@ -522,14 +552,17 @@ def appliquer_sauvegarde(charge):
 
 async def reprendre_sauvegarde_discord():
     """
-    Au demarrage : si la configuration est vide, on va rechercher la
-    derniere piece jointe deposee.
+    Au demarrage : on lit toujours la derniere piece jointe deposee, mais on
+    ne l'applique que si la configuration est vide.
 
-    La condition « vide » est essentielle — une sauvegarde ne doit jamais
-    ecraser des reglages vivants, seulement combler un disque efface.
+    Deux besoins distincts, d'ou la lecture systematique :
+
+    - combler un disque efface par un redeploiement — c'est la reprise, et
+      elle ne doit jamais ecraser des reglages vivants ;
+    - connaitre l'empreinte de ce qui est deja sauvegarde, pour ne pas
+      reposter un message identique a chaque demarrage.
     """
-    if not _config_est_vide():
-        return []
+    global _sauvegarde_empreinte, _sauvegarde_a_faire
     destinataire = await _destinataire_sauvegarde()
     if destinataire is None:
         return []
@@ -537,6 +570,7 @@ async def reprendre_sauvegarde_discord():
         salon = destinataire.dm_channel or await destinataire.create_dm()
     except Exception:
         return []
+    vide = _config_est_vide()
     try:
         async for message in salon.history(limit=60):
             if message.author.id != bot.user.id:
@@ -548,9 +582,18 @@ async def reprendre_sauvegarde_discord():
                     continue
                 brut = await piece.read()
                 charge = json.loads(brut.decode("utf-8"))
+                _sauvegarde_empreinte = empreinte_sauvegarde(charge)
+                if not vide:
+                    # Des reglages sont en place : on ne touche a rien, on
+                    # retient seulement ce qui est deja sauvegarde.
+                    return []
                 repris = appliquer_sauvegarde(charge)
                 if repris:
                     print(f"ModBot: reglages repris depuis Discord ({', '.join(repris)})")
+                    # La reprise vient de reecrire les fichiers, donc de lever
+                    # le drapeau. Or on vient d'ecrire exactement ce qui est
+                    # deja sauvegarde : inutile de reposter.
+                    _sauvegarde_a_faire = False
                 return repris
     except Exception as err:
         print(f"ModBot: reprise Discord impossible ({err})")
@@ -12057,6 +12100,7 @@ async def sync_guild_command_language(guild):
 async def on_ready():
     global _dashboard_recurring_task, _dashboard_social_task
     global _security_task, _autobackup_task, _giveaway_task, _sauvegarde_task
+    global _sauvegarde_a_faire
     BOT_STATUS.update({"state": "connecte", "detail": ""})
     # Avant tout le reste : si le disque a ete efface par un redeploiement,
     # on recupere les reglages dans Discord. Tout ce qui suit lit la
@@ -12065,6 +12109,10 @@ async def on_ready():
         await reprendre_sauvegarde_discord()
     except Exception as err:
         print(f"reprise des reglages : {err}")
+    # Sans cela, une installation qui ne change aucun reglage ne serait jamais
+    # sauvegardee — et le redeploiement suivant l'effacerait sans filet. La
+    # comparaison d'empreinte se charge de ne rien poster si c'est deja fait.
+    _sauvegarde_a_faire = True
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher(),
