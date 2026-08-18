@@ -1,0 +1,275 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 234 50% 4%;
+    --foreground: 224 70% 95%;
+
+    --card: 229 51% 8%;
+    --card-foreground: 224 70% 95%;
+
+    --popover: 230 45% 7%;
+    --popover-foreground: 224 70% 95%;
+
+    --primary: 223 100% 59%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 229 30% 14%;
+    --secondary-foreground: 224 40% 88%;
+
+    --muted: 229 28% 13%;
+    --muted-foreground: 222 20% 64%;
+
+    --accent: 258 90% 66%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 351 80% 58%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 226 28% 18%;
+    --input: 226 28% 18%;
+    --ring: 223 100% 59%;
+
+    --champagne: 45 73% 66%;
+    --mint: 160 64% 51%;
+    --rose: 351 95% 72%;
+
+    --radius: 0.9rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    min-height: 100dvh;
+  }
+
+  /*
+   * Grain de pellicule. Sur un fond sombre et plat, les dégradés se voient par
+   * bandes ; un bruit très léger casse ces paliers et donne de la matière.
+   * C'est ce qui sépare un fond « écran éteint » d'un fond qui a de la texture.
+   */
+  html::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    pointer-events: none;
+    opacity: 0.05;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.35);
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* Numbers must never jitter: this app is full of live scores. */
+  table,
+  input[type="number"],
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(226 28% 22%);
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(226 28% 32%);
+    background-clip: content-box;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply relative rounded-lg border border-white/10 bg-white/[0.035] backdrop-blur-xl shadow-glass;
+  }
+
+  .glass-strong {
+    @apply relative rounded-lg border border-white/12 bg-white/[0.06] backdrop-blur-2xl shadow-glass;
+  }
+
+  /* Broadcast-style label: the app's typographic signature. */
+  .eyebrow {
+    @apply font-display text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground;
+  }
+
+  .surface-sheen::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), transparent 42%);
+  }
+
+  .text-gradient {
+    @apply bg-gradient-to-br from-white via-white to-primary/70 bg-clip-text text-transparent;
+  }
+
+  .text-gradient-trophy {
+    background: linear-gradient(180deg, #fff6d8 0%, hsl(var(--champagne)) 55%, #b9903a 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Figer sur la première image plutôt que sur un décalage arbitraire. */
+  .ambient-layer {
+    animation: none !important;
+    transform: none !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@layer components {
+  /* Faisceau de projecteur derrière un titre. */
+  .hero-beam {
+    background: conic-gradient(
+      from 200deg at 50% 0%,
+      transparent 0deg,
+      hsl(223 100% 59% / 0.26) 52deg,
+      hsl(258 90% 66% / 0.16) 96deg,
+      transparent 148deg
+    );
+    filter: blur(30px);
+  }
+
+  /* Les cartes cliquables se soulèvent : l'interface répond au survol. */
+  .card-lift {
+    transition:
+      transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 240ms ease,
+      box-shadow 240ms ease;
+  }
+
+  .card-lift:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 20px 44px -20px hsl(223 100% 42% / 0.6);
+  }
+
+  .card-lift:active {
+    transform: translateY(-1px);
+  }
+}
+
+@layer components {
+  .ambient {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .ambient-layer {
+    position: absolute;
+    inset: -25%;
+    display: block;
+    will-change: transform, opacity;
+  }
+
+  .ambient-a {
+    background:
+      radial-gradient(980px 560px at 18% 4%, hsl(223 100% 59% / 0.34), transparent 62%),
+      radial-gradient(760px 480px at 84% 12%, hsl(258 90% 66% / 0.24), transparent 60%);
+    animation:
+      ambient-drift-a 47s ease-in-out infinite alternate,
+      ambient-pulse-a 31s ease-in-out infinite;
+  }
+
+  .ambient-b {
+    background:
+      radial-gradient(900px 620px at 78% 68%, hsl(268 92% 62% / 0.26), transparent 63%),
+      radial-gradient(700px 460px at 12% 82%, hsl(206 100% 55% / 0.20), transparent 62%);
+    animation:
+      ambient-drift-b 73s ease-in-out infinite alternate,
+      ambient-pulse-b 43s ease-in-out infinite;
+  }
+
+  .ambient-c {
+    background:
+      radial-gradient(1150px 720px at 50% 96%, hsl(223 90% 46% / 0.22), transparent 66%),
+      radial-gradient(560px 400px at 66% 22%, hsl(174 72% 50% / 0.10), transparent 62%);
+    animation:
+      ambient-drift-c 59s ease-in-out infinite alternate,
+      ambient-pulse-c 37s ease-in-out infinite;
+  }
+
+  @keyframes ambient-drift-a {
+    0% { transform: translate3d(0, 0, 0) scale(1); }
+    50% { transform: translate3d(3%, 2%, 0) scale(1.08); }
+    100% { transform: translate3d(-2%, 3%, 0) scale(1.03); }
+  }
+
+  @keyframes ambient-drift-b {
+    0% { transform: translate3d(0, 0, 0) scale(1.06); }
+    50% { transform: translate3d(-4%, -2.5%, 0) scale(1); }
+    100% { transform: translate3d(3%, -3%, 0) scale(1.07); }
+  }
+
+  @keyframes ambient-drift-c {
+    0% { transform: translate3d(-2%, 1%, 0) scale(1.02); }
+    50% { transform: translate3d(2.5%, -2%, 0) scale(1.09); }
+    100% { transform: translate3d(-1%, 2.5%, 0) scale(1.01); }
+  }
+
+  @keyframes ambient-pulse-a {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+
+  @keyframes ambient-pulse-b {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
+  }
+
+  @keyframes ambient-pulse-c {
+    0%, 100% { opacity: 0.75; }
+    40% { opacity: 1; }
+    70% { opacity: 0.45; }
+  }
+}
