@@ -1069,12 +1069,169 @@ async def verifier_sauvegarde_reglages(session):
              "meme" in corps.lower() and "channels" in corps)
 
 
+async def verifier_cloture_alerte():
+    """
+    Une alerte tranchee doit rester lisible.
+
+    L'ancienne cloture remplacait l'embed entier par une ligne « Alerte
+    cloturee » : le detail de l'attaque, la sanction appliquee et le membre
+    concerne disparaissaient. C'est pourtant apres coup qu'on en a besoin —
+    pour comprendre, ou pour rattraper une sanction injuste.
+    """
+    print("\n--- Cloture d'une alerte ---")
+    import discord as d
+
+    verifier("les deux verdicts sont prevus",
+             set(bot_mod.VERDICTS_ALERTE) == {"fausse alerte", "attaque confirmee"},
+             str(sorted(bot_mod.VERDICTS_ALERTE)))
+
+    # On rejoue la transformation sur un embed d'alerte realiste.
+    origine = d.Embed(title="🚨 Suppression massive de salons", colour=0xED4245)
+    origine.description = "**Serveur : Test**\n\n7 salons supprimes en 12 secondes."
+    origine.add_field(name="👤 Acteur", value="@pirate (1189681599965573131)", inline=False)
+    origine.add_field(name="🔨 Sanction", value="bannissement", inline=False)
+    origine.add_field(name="⏳ Sans reponse",
+                      value="La protection reste en place.", inline=False)
+
+    for decision, attendu in (("fausse alerte", "✋"), ("attaque confirmee", "🚨")):
+        message = _FauxMessage(origine)
+        alerte = {"messages": [message], "decision": decision, "decide_par": "Buffl#0001"}
+        bot_mod.ALERTES_ACTIVES["essai"] = alerte
+        await bot_mod._cloturer_alerte("essai")
+
+        edite = message.dernier
+        texte = str(edite.to_dict())
+        verifier(f"[{decision}] le detail de l'attaque est conserve",
+                 "7 salons supprimes" in texte)
+        verifier(f"[{decision}] l'acteur reste identifiable",
+                 "1189681599965573131" in texte)
+        verifier(f"[{decision}] la sanction reste visible", "bannissement" in texte)
+        verifier(f"[{decision}] le verdict est affiche",
+                 "Buffl#0001" in texte and decision in texte)
+        verifier(f"[{decision}] le bandeau porte le bon symbole",
+                 (edite.title or "").startswith(attendu), edite.title)
+        verifier(f"[{decision}] le champ d'attente a disparu",
+                 all("sans reponse" not in (c.name or "").lower() for c in edite.fields))
+        verifier(f"[{decision}] les boutons sont retires", message.vue_retiree)
+
+
+class _FauxMessage:
+    """Le minimum pour observer ce que _cloturer_alerte ecrit."""
+
+    def __init__(self, embed):
+        self.embeds = [embed]
+        self.dernier = None
+        self.vue_retiree = False
+
+    async def edit(self, embed=None, view="absent", **_):
+        self.dernier = embed
+        if view is None:
+            self.vue_retiree = True
+
+
+def verifier_statut_presence():
+    """Le statut du profil : de vrais chiffres, et jamais « 0 serveur »."""
+    print("\n--- Statut du profil ---")
+    phrases = bot_mod.statuts_possibles()
+    verifier("des statuts sont proposes", len(phrases) >= 3, str(len(phrases)))
+    verifier("aucun ne dit « votre serveur »",
+             all("votre serveur" not in p for p in phrases))
+    # Sans serveur connecte, annoncer « veille sur 0 serveur » ferait peur.
+    verifier("aucun compteur a zero n'est affiche",
+             all("0 serveur" not in p and "0 membres" not in p for p in phrases),
+             str(phrases))
+    verifier("les commandes sont mises en avant",
+             any("/aide" in p for p in phrases))
+
+
+class _FauxDestinataire:
+    """Compte ce qui est envoye, pour distinguer un envoi d'une modification."""
+
+    def __init__(self):
+        self.envois = 0
+        self.editions = 0
+        self.silencieux = []
+        self.dm_channel = None
+
+    async def send(self, content=None, file=None, silent=False, **_):
+        self.envois += 1
+        self.silencieux.append(silent)
+        return _FauxMessagePJ(self)
+
+
+class _FauxMessagePJ:
+    def __init__(self, parent):
+        self.parent = parent
+        self.embeds = []
+
+    async def edit(self, content=None, attachments=None, **_):
+        self.parent.editions += 1
+
+
+async def verifier_pas_de_spam_mp():
+    """
+    Un seul message dans les MP, quoi qu'il arrive.
+
+    La premiere version envoyait un message par changement. Or tickets.json,
+    giveaways.json et infractions.json bougent avec l'activite normale du
+    serveur : cela faisait un message par jour. Buffl l'a signale, et c'est
+    exactement le genre de detail qu'un test ne voyait pas parce qu'il
+    verifiait le contenu de la sauvegarde, jamais sa frequence.
+    """
+    print("\n--- Pas de spam en messages prives ---")
+    import tempfile
+
+    faux = _FauxDestinataire()
+    vrai_destinataire = bot_mod._destinataire_sauvegarde
+    ancien_dir, ancien_msg, ancienne_emp = (
+        bot_mod.DATA_DIR, bot_mod._sauvegarde_message, bot_mod._sauvegarde_empreinte)
+    bot_mod._destinataire_sauvegarde = lambda: _resoudre(faux)
+    bot_mod._sauvegarde_message = None
+    bot_mod._sauvegarde_empreinte = None
+    try:
+        with tempfile.TemporaryDirectory() as volume:
+            bot_mod.DATA_DIR = volume
+            bot_mod.jsave(bot_mod.chemin_donnees("config.json"), {"1": {"a": 1}})
+            verifier("le premier depot cree le message",
+                     await bot_mod.deposer_sauvegarde_discord() is True
+                     and faux.envois == 1, f"envois={faux.envois}")
+            verifier("il ne fait pas sonner le telephone",
+                     faux.silencieux == [True], str(faux.silencieux))
+
+            # Un contenu identique ne doit rien produire du tout.
+            verifier("un contenu inchange n'ecrit rien",
+                     await bot_mod.deposer_sauvegarde_discord() is False
+                     and faux.editions == 0, f"editions={faux.editions}")
+
+            # Trois changements d'affilee, comme trois jours d'activite.
+            for n in range(3):
+                bot_mod.jsave(bot_mod.chemin_donnees("tickets.json"), {"t": n})
+                await bot_mod.deposer_sauvegarde_discord()
+            verifier("les changements suivants modifient le meme message",
+                     faux.envois == 1 and faux.editions == 3,
+                     f"envois={faux.envois} editions={faux.editions}")
+            verifier("aucun second message n'apparait dans les MP",
+                     faux.envois == 1, f"envois={faux.envois}")
+    finally:
+        bot_mod._destinataire_sauvegarde = vrai_destinataire
+        bot_mod.DATA_DIR = ancien_dir
+        bot_mod._sauvegarde_message = ancien_msg
+        bot_mod._sauvegarde_empreinte = ancienne_emp
+
+
+async def _resoudre(valeur):
+    return valeur
+
+
 async def main():
     verifier_polices()
     verifier_commandes()
     verifier_aide()
     verifier_persistance()
     verifier_filet_discord()
+    await verifier_cloture_alerte()
+    await verifier_pas_de_spam_mp()
+    verifier_statut_presence()
     verifier_role_verification()
     await verifier_image_bienvenue()
     await verifier_carte_bienvenue()

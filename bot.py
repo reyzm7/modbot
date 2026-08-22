@@ -404,6 +404,8 @@ _sauvegarde_derniere = None
 # Empreinte du dernier contenu qu'on sait depose. Sert a ne pas reposter un
 # message identique a chaque redemarrage.
 _sauvegarde_empreinte = None
+# Le message unique qu'on met a jour, au lieu d'en empiler un par changement.
+_sauvegarde_message = None
 
 
 def _marquer_a_sauvegarder(chemin):
@@ -477,7 +479,7 @@ async def _chercher_utilisateur(uid):
 
 async def deposer_sauvegarde_discord():
     """Depose la configuration courante en piece jointe. Silencieux si echec."""
-    global _sauvegarde_empreinte
+    global _sauvegarde_empreinte, _sauvegarde_message
     destinataire = await _destinataire_sauvegarde()
     if destinataire is None:
         return False
@@ -494,14 +496,35 @@ async def deposer_sauvegarde_discord():
     if len(brut) > TAILLE_MAX_SAUVEGARDE:
         print(f"ModBot: sauvegarde Discord ignoree, {len(brut)} octets")
         return False
+    texte = ("🧷 **Sauvegarde des réglages ModBot** — mise à jour le "
+             f"{fmt()}.\nCe message est modifié à chaque changement ; garde-le, "
+             "c'est lui que le bot relit après une mise à jour.")
+
+    # UN seul message, modifie sur place.
+    #
+    # La premiere version envoyait un message par changement. Or les fichiers
+    # suivis (tickets, giveaways, infractions) bougent avec l'activite normale
+    # du serveur : cela faisait un message par jour dans les MP. Modifier
+    # l'existant supprime le probleme quelle que soit la frequence.
+    if _sauvegarde_message is not None:
+        try:
+            fichier = discord.File(io.BytesIO(brut), filename=NOM_SAUVEGARDE)
+            await _sauvegarde_message.edit(content=texte, attachments=[fichier])
+            _sauvegarde_empreinte = empreinte
+            return True
+        except discord.NotFound:
+            # Message supprime : on en recree un plus bas.
+            _sauvegarde_message = None
+        except Exception as err:
+            print(f"ModBot: mise a jour de la sauvegarde impossible ({err})")
+            return False
+
     try:
         fichier = discord.File(io.BytesIO(brut), filename=NOM_SAUVEGARDE)
-        await destinataire.send(
-            content=("🧷 Sauvegarde automatique des réglages ModBot — "
-                     f"{fmt()}. Ce message permet au bot de retrouver ta "
-                     "configuration après une mise à jour ; ne le supprime pas."),
-            file=fichier,
-        )
+        # silent=True : pas de notification. Une sauvegarde automatique n'a
+        # aucune raison de faire sonner un telephone.
+        _sauvegarde_message = await destinataire.send(
+            content=texte, file=fichier, silent=True)
         _sauvegarde_empreinte = empreinte
         return True
     except Exception as err:
@@ -562,7 +585,7 @@ async def reprendre_sauvegarde_discord():
     - connaitre l'empreinte de ce qui est deja sauvegarde, pour ne pas
       reposter un message identique a chaque demarrage.
     """
-    global _sauvegarde_empreinte, _sauvegarde_a_faire
+    global _sauvegarde_empreinte, _sauvegarde_a_faire, _sauvegarde_message
     destinataire = await _destinataire_sauvegarde()
     if destinataire is None:
         return []
@@ -583,6 +606,7 @@ async def reprendre_sauvegarde_discord():
                 brut = await piece.read()
                 charge = json.loads(brut.decode("utf-8"))
                 _sauvegarde_empreinte = empreinte_sauvegarde(charge)
+                _sauvegarde_message = message
                 if not vide:
                     # Des reglages sont en place : on ne touche a rien, on
                     # retient seulement ce qui est deja sauvegarde.
@@ -9077,6 +9101,7 @@ _security_task = None
 _autobackup_task = None
 _giveaway_task = None
 _sauvegarde_task = None
+_presence_task = None
 # Cache des objets supprimes pour la restauration automatique anti-nuke
 _deleted_cache: dict = {}
 
@@ -9562,17 +9587,61 @@ class VueAlerteAttaque(discord.ui.View):
         await _cloturer_alerte(self.alerte_id)
 
 
+# Ce que devient une alerte selon la reponse donnee.
+VERDICTS_ALERTE = {
+    "fausse alerte":    ("✋ Fausse alerte", 0x43B581,
+                         "La protection a ete levee et les sanctions annulees."),
+    "attaque confirmee": ("🚨 Attaque confirmee", 0xED4245,
+                          "La protection reste en place."),
+}
+
+
 async def _cloturer_alerte(alerte_id):
-    """Neutralise les MP des autres administrateurs et oublie l'alerte."""
+    """
+    Marque l'alerte comme tranchee sur tous les MP, sans effacer son contenu.
+
+    L'ancienne version remplacait l'embed entier par une ligne « Alerte
+    cloturee ». Tout disparaissait : qui a agi, ce qui a ete detecte, ce qui
+    a ete sanctionne. Or c'est precisement apres coup qu'on a besoin de ces
+    informations — pour comprendre ce qui s'est passe, ou pour retrouver un
+    membre sanctionne a tort. Une alerte tranchee reste une trace.
+
+    On conserve donc l'embed d'origine et on n'y touche que trois choses :
+    le bandeau de titre, la couleur, et le champ d'attente remplace par le
+    verdict.
+    """
     alerte = ALERTES_ACTIVES.pop(alerte_id, None)
     if not alerte:
         return
-    resume = E("Alerte cloturee",
-               f"**{alerte.get('decide_par', 'Un administrateur')}** a repondu : "
-               f"*{alerte.get('decision', 'traitee')}*.",
-               0x747F8D)
+
+    decision = alerte.get("decision") or "traitee"
+    decideur = alerte.get("decide_par") or "Un administrateur"
+    intitule, couleur, consequence = VERDICTS_ALERTE.get(
+        decision, ("✅ Alerte traitee", 0x747F8D, ""))
+
     for message in alerte.get("messages", []):
         try:
+            origine = message.embeds[0] if message.embeds else None
+            if origine is None:
+                continue
+            resume = discord.Embed.from_dict(origine.to_dict())
+            resume.colour = discord.Colour(couleur)
+            titre = origine.title or ""
+            # Le titre portait « 🚨 » tant que l'alerte etait en cours.
+            resume.title = f"{intitule} — {titre.lstrip('🚨 ').strip()}"
+
+            # Le champ « Sans reponse » n'a plus de sens : quelqu'un a repondu.
+            champs = [c for c in resume.fields if "sans reponse" not in (c.name or "").lower()]
+            resume.clear_fields()
+            for champ in champs:
+                resume.add_field(name=champ.name, value=champ.value, inline=champ.inline)
+            resume.add_field(
+                name="🧑‍⚖️ Tranchee par",
+                value=f"**{decideur}** — *{decision}*"
+                      + (f"\n{consequence}" if consequence else ""),
+                inline=False)
+            resume.set_footer(text=f"Alerte cloturee le {fmt()}")
+
             await message.edit(embed=resume, view=None)
         except Exception:
             pass
@@ -12096,10 +12165,70 @@ async def sync_guild_command_language(guild):
     except Exception as ex:
         return False, str(ex)
 
+# ════════════════════════════════════════════════
+#  STATUT DU PROFIL
+# ════════════════════════════════════════════════
+#
+# Le statut etait fige sur « Regarde votre serveur » — une formule vague, qui
+# ne disait rien de ce que le bot fait ni de ce qu'il protege.
+#
+# On affiche maintenant de vrais chiffres, en rotation. Un statut personnalise
+# n'affiche aucun verbe impose (« Regarde », « Joue a »), donc la phrase se lit
+# telle qu'on l'ecrit ; si Discord le refuse, on retombe sur « Regarde ».
+
+def _chiffres_presence():
+    serveurs = len(bot.guilds)
+    membres = sum(g.member_count or 0 for g in bot.guilds)
+    return serveurs, membres
+
+
+def statuts_possibles():
+    """Les phrases affichees, avec les chiffres du moment."""
+    serveurs, membres = _chiffres_presence()
+    phrases = [
+        f"🛡️ veille sur {serveurs} serveur{'s' if serveurs > 1 else ''}",
+        f"👥 {membres:,} membres protégés".replace(",", " "),
+        "⚡ /aide — toutes les commandes",
+        "🧠 anti-raid et anti-nuke actifs",
+        "🎛️ dashboard : modbot-website.vercel.app",
+    ]
+    # Un serveur tout neuf n'a pas de chiffres a montrer : on evite
+    # « veille sur 0 serveur », qui fait plus peur qu'autre chose.
+    if serveurs == 0:
+        phrases = phrases[2:]
+    return phrases
+
+
+async def presence_loop():
+    """Fait tourner le statut. Discord tolere largement ce rythme."""
+    await bot.wait_until_ready()
+    index = 0
+    replier_sur_watching = False
+    while not bot.is_closed():
+        phrases = statuts_possibles()
+        if phrases:
+            texte = phrases[index % len(phrases)]
+            index += 1
+            try:
+                if replier_sur_watching:
+                    await bot.change_presence(activity=discord.Activity(
+                        type=discord.ActivityType.watching, name=texte))
+                else:
+                    await bot.change_presence(activity=discord.CustomActivity(name=texte))
+            except Exception as err:
+                if not replier_sur_watching:
+                    print(f"ModBot: statut personnalise refuse ({err}), repli sur « Regarde »")
+                    replier_sur_watching = True
+                else:
+                    print(f"ModBot: statut impossible ({err})")
+        await asyncio.sleep(150)
+
+
 @bot.event
 async def on_ready():
     global _dashboard_recurring_task, _dashboard_social_task
     global _security_task, _autobackup_task, _giveaway_task, _sauvegarde_task
+    global _presence_task
     global _sauvegarde_a_faire
     BOT_STATUS.update({"state": "connecte", "detail": ""})
     # Avant tout le reste : si le disque a ete efface par un redeploiement,
@@ -12152,8 +12281,8 @@ async def on_ready():
         print(f"{len(synced)} commandes synchronisees")
     except Exception as e:
         print(f"Erreur sync : {e}")
-    await bot.change_presence(
-        activity=discord.Activity(type=discord.ActivityType.watching, name="votre serveur"))
+    if not _presence_task or _presence_task.done():
+        _presence_task = asyncio.create_task(presence_loop())
 
 _en_cours: set = set()
 

@@ -2559,3 +2559,62 @@ sauvegardes tombaient dans la même seconde — un test vert qui ne prouve rien.
 | l'horodatage entre dans l'empreinte | « l'empreinte ignore l'horodatage » |
 
 223/223.
+
+## 38. Livré le 22 août 2026 — trois retours d'usage
+
+### L'alerte tranchée effaçait tout ce qu'elle disait
+
+Quand un administrateur répondait « fausse alerte » ou « attaque confirmée »,
+`_cloturer_alerte` remplaçait l'embed entier par une ligne :
+
+> **Alerte clôturée** — *Buffl a répondu : fausse alerte.*
+
+Disparaissaient avec lui : ce qui avait été détecté, le membre concerné, la
+sanction appliquée. Or c'est **après coup** qu'on a besoin de ces
+informations — pour comprendre l'incident, ou pour rattraper quelqu'un
+sanctionné à tort. Une alerte tranchée n'est pas une alerte finie, c'est une
+trace.
+
+L'embed d'origine est désormais conservé. Trois choses seulement changent :
+le bandeau de titre (`✋ Fausse alerte` / `🚨 Attaque confirmée`), la couleur,
+et le champ « Sans réponse » remplacé par le verdict et son auteur.
+
+### Le filet de secours envoyait un message par jour
+
+Signalé par Buffl, et entièrement de mon fait. La sauvegarde Discord de §37
+envoyait **un message par changement de contenu**. J'avais raisonné sur
+`config.json`, qui ne bouge que si on modifie un réglage — mais la liste
+surveille aussi `tickets.json`, `giveaways.json` et `infractions.json`, qui
+bougent avec l'activité normale du serveur. D'où un message par jour.
+
+Corrigé en gardant **un seul message, modifié sur place** — la fréquence
+n'a alors plus aucune importance. Le message est retrouvé et réadopté au
+démarrage, sans quoi chaque redéploiement en aurait laissé un de plus. Et
+l'envoi initial est `silent=True` : une sauvegarde automatique n'a aucune
+raison de faire sonner un téléphone.
+
+Ce que cet épisode montre : mes tests vérifiaient le **contenu** de la
+sauvegarde — rien ne fuite, rien n'est écrasé, tout revient intact — et pas
+une seule fois sa **fréquence**. Un invariant qu'on n'a pas pensé à écrire ne
+se teste pas tout seul. Le test ajouté compte maintenant les envois et les
+modifications séparément.
+
+### Le statut du profil ne disait rien
+
+« Regarde votre serveur » était figé et vague. Le statut tourne maintenant
+sur de vrais chiffres — serveurs surveillés, membres protégés — plus un rappel
+de `/aide` et du dashboard. Un statut personnalisé n'impose aucun verbe, donc
+la phrase se lit telle qu'on l'écrit ; si Discord le refuse, on retombe
+automatiquement sur « Regarde ». Un serveur tout neuf n'affiche pas
+« veille sur 0 serveur ».
+
+### Contrôles négatifs
+
+| Défaut réinjecté | Ce qui tombe |
+|---|---|
+| la clôture repart d'un embed vide | 6 vérifications : détail, acteur, sanction |
+| chaque changement renvoie un message | « aucun second message n'apparaît » — 4 envois vus au lieu d'1 |
+| retour de « votre serveur » | 2 vérifications sur le statut |
+
+247/247.
+
