@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import json, os, re, sys, asyncio, io, aiohttp, random, string, html, unicodedata, base64, hashlib, sqlite3, time
+import copy
 import secrets
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -2842,6 +2843,173 @@ def extract_translatable_text(msg):
             if field.value:
                 parts.append(field.value)
     return "\n".join(parts).strip()
+
+# ════════════════════════════════════════════════
+#  BOUTON DE TRADUCTION
+# ════════════════════════════════════════════════
+#
+# Le bot ecrit en francais et en anglais, mais un serveur accueille des gens
+# qui ne lisent ni l'un ni l'autre. Chaque embed peut donc etre traduit a la
+# demande, sans quitter Discord.
+#
+# La vue est SANS ETAT : au clic, elle relit le message sur lequel elle est
+# posee. Rien n'est stocke, donc rien ne se perd au redemarrage — un bouton
+# vieux de six mois marche encore. C'est aussi ce qui permet d'en faire une
+# vue persistante avec un custom_id fixe.
+#
+# La reponse est ephemere : traduire pour soi ne doit pas remplir le salon
+# pour les autres.
+
+LANGUES_TRADUCTION = [
+    ("Français", "fr", "🇫🇷"), ("English", "en", "🇬🇧"),
+    ("Español", "es", "🇪🇸"), ("Deutsch", "de", "🇩🇪"),
+    ("Italiano", "it", "🇮🇹"), ("Português", "pt", "🇵🇹"),
+    ("Nederlands", "nl", "🇳🇱"), ("Polski", "pl", "🇵🇱"),
+    ("Română", "ro", "🇷🇴"), ("Türkçe", "tr", "🇹🇷"),
+    ("Русский", "ru", "🇷🇺"), ("العربية", "ar", "🇸🇦"),
+    ("日本語", "ja", "🇯🇵"), ("中文", "zh-CN", "🇨🇳"),
+]
+
+# Au-dela, on tronque : un embed Discord plafonne de toute facon a 25 champs,
+# et traduire cinquante fragments ferait attendre pour rien.
+MAX_FRAGMENTS_TRADUCTION = 14
+
+
+def copier_embed(source):
+    """
+    Copie independante d'un embed.
+
+    `Embed.to_dict()` renvoie la liste interne des champs SANS la copier, et
+    `clear_fields()` la vide en place : construire une copie puis la nettoyer
+    effacait donc les champs de l'original. Le piege est silencieux — le
+    nombre de champs finit identique, seules les VALEURS ont ete remplacees —
+    et c'est ce qui l'avait fait passer inapercu.
+    """
+    return discord.Embed.from_dict(copy.deepcopy(source.to_dict()))
+
+
+def _fragments_traduisibles(message):
+    """
+    Les morceaux a traduire, reperes par leur place.
+
+    On rend une liste de (chemin, texte) pour pouvoir reconstruire un embed
+    identique a l'original, et pas un bloc de texte a plat : garder la mise
+    en forme est tout l'interet par rapport a un copier-coller.
+    """
+    fragments = []
+    if message.content and message.content.strip():
+        fragments.append((("contenu",), message.content.strip()))
+    for i, emb in enumerate(message.embeds):
+        if emb.title:
+            fragments.append((("titre", i), emb.title))
+        if emb.description:
+            fragments.append((("description", i), emb.description))
+        for j, champ in enumerate(emb.fields):
+            if champ.value:
+                fragments.append((("champ", i, j), champ.value))
+    return fragments[:MAX_FRAGMENTS_TRADUCTION]
+
+
+async def traduire_message(message, langue):
+    """
+    Traduit un message en gardant sa structure.
+
+    Les fragments partent en parallele : un embed a facilement dix morceaux,
+    et les enchainer ferait dix fois le temps d'attente.
+    """
+    fragments = _fragments_traduisibles(message)
+    if not fragments:
+        return None, "Ce message ne contient aucun texte a traduire."
+
+    resultats = await asyncio.gather(
+        *(translate_text(texte, langue) for _, texte in fragments),
+        return_exceptions=True)
+
+    traduits = {}
+    reussis = 0
+    for (chemin, origine), resultat in zip(fragments, resultats):
+        if isinstance(resultat, dict) and resultat.get("ok") and resultat.get("text"):
+            traduits[chemin] = resultat["text"]
+            reussis += 1
+        else:
+            # Un fragment qui echoue garde sa version d'origine : mieux vaut
+            # une traduction partielle qu'un trou dans le message.
+            traduits[chemin] = origine
+
+    if reussis == 0:
+        return None, "Le service de traduction n'a pas repondu. Reessaie dans un instant."
+
+    if message.embeds:
+        source = message.embeds[0]
+        copie = copier_embed(source)
+        if ("titre", 0) in traduits:
+            copie.title = traduits[("titre", 0)][:256]
+        if ("description", 0) in traduits:
+            copie.description = traduits[("description", 0)][:4096]
+        champs = list(source.fields)
+        copie.clear_fields()
+        for j, champ in enumerate(champs):
+            valeur = traduits.get(("champ", 0, j), champ.value)
+            copie.add_field(name=champ.name, value=str(valeur)[:1024], inline=champ.inline)
+        return copie, None
+
+    texte = traduits.get(("contenu",), "")
+    return E("🌍 Traduction", texte[:4000], Palette.INFO), None
+
+
+class SelecteurTraduction(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="🌍 Traduire ce message…",
+            custom_id="modbot:traduire",
+            min_values=1, max_values=1,
+            options=[discord.SelectOption(label=nom, value=code, emoji=drapeau)
+                     for nom, code, drapeau in LANGUES_TRADUCTION],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        langue = self.values[0]
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            return
+        embed, erreur = await traduire_message(interaction.message, langue)
+        if erreur:
+            return await interaction.followup.send(
+                embed=E("Traduction impossible", erreur, Palette.WARN), ephemeral=True)
+        nom = next((n for n, c, _ in LANGUES_TRADUCTION if c == langue), langue)
+        embed.set_footer(text=f"🌍 Traduit en {nom} — traduction automatique")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class VueTraduction(discord.ui.View):
+    """Vue persistante : un seul selecteur, aucun etat a retenir."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(SelecteurTraduction())
+
+
+def avec_traduction(vue=None):
+    """
+    Ajoute le selecteur de traduction a une vue, s'il y a la place.
+
+    Discord limite une vue a cinq rangees, et un selecteur en occupe une
+    entiere. Plutot que de lever une exception au moment de l'envoi — donc de
+    faire disparaitre le message — on rend la vue inchangee quand elle est
+    pleine.
+    """
+    if vue is None:
+        return VueTraduction()
+    try:
+        rangees = {getattr(item, "row", None) for item in vue.children}
+        if len(vue.children) >= 20 or len([r for r in rangees if r is not None]) >= 5:
+            return vue
+        vue.add_item(SelecteurTraduction())
+    except Exception:
+        pass
+    return vue
+
 
 async def fetch_message_for_translate(interaction, message_ref, salon=None):
     msg_id, channel_id = parse_message_reference(message_ref)
@@ -9384,7 +9552,8 @@ async def log_event(guild, category, title, description="", fields=None, color=N
         except Exception:
             pass
     try:
-        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(embed=embed, view=VueTraduction(),
+                           allowed_mentions=discord.AllowedMentions.none())
     except Exception:
         pass
 
@@ -9624,7 +9793,7 @@ async def _cloturer_alerte(alerte_id):
             origine = message.embeds[0] if message.embeds else None
             if origine is None:
                 continue
-            resume = discord.Embed.from_dict(origine.to_dict())
+            resume = copier_embed(origine)
             resume.colour = discord.Colour(couleur)
             titre = origine.title or ""
             # Le titre portait « 🚨 » tant que l'alerte etait en cours.
@@ -12245,7 +12414,7 @@ async def on_ready():
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher(),
-              VueCaptchaPanel(), VueGiveaway()]:
+              VueCaptchaPanel(), VueGiveaway(), VueTraduction()]:
         try:
             bot.add_view(v)
         except Exception as err:
@@ -12283,6 +12452,57 @@ async def on_ready():
         print(f"Erreur sync : {e}")
     if not _presence_task or _presence_task.done():
         _presence_task = asyncio.create_task(presence_loop())
+
+
+@bot.tree.context_menu(name="🌍 Traduire")
+async def traduire_ce_message(interaction: discord.Interaction, message: discord.Message):
+    """
+    Clic droit sur n'importe quel message → Applications → Traduire.
+
+    Le bouton pose sur les embeds ne couvre que les messages du bot, et une
+    vue Discord est limitee a cinq rangees : certains embeds n'ont pas la
+    place. Ce menu, lui, marche partout — y compris sur les messages des
+    membres.
+    """
+    await interaction.response.send_message(
+        embed=E("🌍 Choisis une langue",
+                "Sélectionne la langue dans laquelle traduire ce message.",
+                Palette.INFO),
+        view=VueTraduireMessage(message),
+        ephemeral=True)
+
+
+class VueTraduireMessage(discord.ui.View):
+    """Selecteur pour un message precis, quand on passe par le menu contextuel."""
+
+    def __init__(self, message):
+        super().__init__(timeout=300)
+        self.message_cible = message
+        self.add_item(_SelecteurTraductionCiblee(message))
+
+
+class _SelecteurTraductionCiblee(discord.ui.Select):
+    def __init__(self, message):
+        self.message_cible = message
+        super().__init__(
+            placeholder="🌍 Traduire en…", min_values=1, max_values=1,
+            options=[discord.SelectOption(label=nom, value=code, emoji=drapeau)
+                     for nom, code, drapeau in LANGUES_TRADUCTION])
+
+    async def callback(self, interaction: discord.Interaction):
+        langue = self.values[0]
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            return
+        embed, erreur = await traduire_message(self.message_cible, langue)
+        if erreur:
+            return await interaction.followup.send(
+                embed=E("Traduction impossible", erreur, Palette.WARN), ephemeral=True)
+        nom = next((n for n, c, _ in LANGUES_TRADUCTION if c == langue), langue)
+        embed.set_footer(text=f"🌍 Traduit en {nom} — traduction automatique")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 _en_cours: set = set()
 
@@ -13084,7 +13304,7 @@ async def cmd_aide(i: discord.Interaction):
         "Le **dashboard** règle ce qui ne se fait pas en commande : bienvenue, "
         "tickets, rôles-réactions, logs, réseaux."), inline=False)
 
-    await i.response.send_message(embed=e, view=vue_liens_modbot(), ephemeral=True)
+    await i.response.send_message(embed=e, view=avec_traduction(vue_liens_modbot()), ephemeral=True)
 
 
 @bot.tree.command(name="info-bot", description="ℹ️ Informations sur ModBot")
@@ -13142,7 +13362,7 @@ async def cmd_info(i: discord.Interaction):
                       f"{sys.version_info.major}.{sys.version_info.minor}")
 
     try:
-        await i.response.send_message(embed=e, view=vue_liens_modbot())
+        await i.response.send_message(embed=e, view=avec_traduction(vue_liens_modbot()))
     except Exception:
         pass
 

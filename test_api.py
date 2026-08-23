@@ -1223,6 +1223,151 @@ async def _resoudre(valeur):
     return valeur
 
 
+class _FauxChamp:
+    def __init__(self, name, value, inline=False):
+        self.name, self.value, self.inline = name, value, inline
+
+
+async def verifier_traduction():
+    """
+    Le bouton de traduction : structure gardee, et jamais de message vide.
+
+    Le point delicat n'est pas de traduire — c'est de ne rien casser quand la
+    traduction echoue. Un service gratuit tombe reguliermement ; un embed a
+    moitie vide serait pire que pas de traduction du tout.
+    """
+    print("\n--- Traduction des embeds ---")
+    import discord as d
+
+    verifier("plusieurs langues sont proposees",
+             len(bot_mod.LANGUES_TRADUCTION) >= 10,
+             str(len(bot_mod.LANGUES_TRADUCTION)))
+    codes = [c for _, c, _ in bot_mod.LANGUES_TRADUCTION]
+    for attendu in ("de", "es", "en", "fr"):
+        verifier(f"la langue « {attendu} » est proposee", attendu in codes)
+    verifier("aucun code de langue en double", len(codes) == len(set(codes)))
+    verifier("Discord accepte le nombre d'options", len(codes) <= 25)
+
+    # La vue doit etre persistante, sinon les boutons meurent au redemarrage.
+    vue = bot_mod.VueTraduction()
+    verifier("la vue est persistante", vue.timeout is None)
+    verifier("le selecteur porte un custom_id fixe",
+             any(getattr(i, "custom_id", None) == "modbot:traduire" for i in vue.children))
+
+    # Une vue pleine ne doit pas faire echouer l'envoi.
+    pleine = d.ui.View(timeout=None)
+    for rangee in range(5):
+        pleine.add_item(d.ui.Button(label=f"b{rangee}", row=rangee,
+                                    custom_id=f"essai:{rangee}"))
+    avant = len(pleine.children)
+    rendue = bot_mod.avec_traduction(pleine)
+    verifier("une vue deja pleine est rendue inchangee",
+             len(rendue.children) == avant, f"{avant} -> {len(rendue.children)}")
+
+    creuse = d.ui.View(timeout=None)
+    creuse.add_item(d.ui.Button(label="un", row=0, custom_id="essai:un"))
+    verifier("une vue avec de la place recoit le selecteur",
+             len(bot_mod.avec_traduction(creuse).children) == 2)
+    verifier("sans vue, on en cree une",
+             isinstance(bot_mod.avec_traduction(None), bot_mod.VueTraduction))
+
+    # La structure de l'embed doit survivre a la traduction.
+    origine = d.Embed(title="Membre banni", description="La sanction est enregistree.")
+    origine.add_field(name="👤 Membre", value="@pirate", inline=True)
+    origine.add_field(name="🔨 Sanction", value="bannissement", inline=False)
+    message = _FauxMessageTraduction(origine)
+
+    vrai = bot_mod.translate_text
+    bot_mod.translate_text = lambda texte, langue: _resoudre(
+        {"ok": True, "text": f"[{langue}] {texte}"})
+    try:
+        embed, erreur = await bot_mod.traduire_message(message, "de")
+        verifier("la traduction aboutit", erreur is None, str(erreur))
+        verifier("le titre est traduit", embed.title == "[de] Membre banni", embed.title)
+        verifier("le nombre de champs est conserve", len(embed.fields) == 2,
+                 str(len(embed.fields)))
+        verifier("les valeurs des champs sont traduites",
+                 embed.fields[0].value == "[de] @pirate", embed.fields[0].value)
+        verifier("les intitules de champ gardent leur emoji",
+                 embed.fields[0].name == "👤 Membre", embed.fields[0].name)
+        verifier("l'alignement des champs est conserve",
+                 [c.inline for c in embed.fields] == [True, False])
+
+        # Le service tombe : on garde le texte d'origine, on ne vide rien.
+        bot_mod.translate_text = lambda texte, langue: _resoudre({"ok": False})
+        embed, erreur = await bot_mod.traduire_message(message, "de")
+        verifier("un service muet donne une erreur claire, pas un embed vide",
+                 embed is None and erreur, str(erreur))
+
+        # Panne partielle : seul le titre passe.
+        async def partiel(texte, langue):
+            return {"ok": True, "text": "UBERSETZT"} if texte == "Membre banni" else {"ok": False}
+        bot_mod.translate_text = partiel
+        embed, erreur = await bot_mod.traduire_message(
+            _FauxMessageTraduction(_embed_essai()), "de")
+        verifier("une panne partielle garde le texte d'origine",
+                 erreur is None and embed.title == "UBERSETZT"
+                 and embed.fields[0].value == "@pirate",
+                 f"titre={embed.title if embed else None}")
+
+        # Un message sans texte ne doit pas produire un embed vide.
+        embed, erreur = await bot_mod.traduire_message(_FauxMessageTraduction(None), "de")
+        verifier("un message sans texte est refuse proprement",
+                 embed is None and erreur, str(erreur))
+    finally:
+        bot_mod.translate_text = vrai
+
+    # L'embed d'origine ne doit pas bouger. Ce test regarde les VALEURS :
+    # une premiere version ne comparait que le nombre de champs et le titre,
+    # et passait alors que les valeurs avaient ete remplacees en place.
+    # `Embed.to_dict()` partage la liste interne des champs, et
+    # `clear_fields()` la vide : la copie et l'original etaient le meme objet.
+    intact = d.Embed(title="Titre origine", description="Description origine")
+    intact.add_field(name="A", value="valeur-A", inline=True)
+    intact.add_field(name="B", value="valeur-B", inline=False)
+    avant_champs = [(c.name, c.value, c.inline) for c in intact.fields]
+    avant_titre, avant_desc = intact.title, intact.description
+
+    bot_mod.translate_text = lambda texte, langue: _resoudre(
+        {"ok": True, "text": "TRADUIT"})
+    try:
+        await bot_mod.traduire_message(_FauxMessageTraduction(intact), "de")
+        await bot_mod.traduire_message(_FauxMessageTraduction(intact), "es")
+    finally:
+        bot_mod.translate_text = vrai
+
+    verifier("traduire ne touche pas au titre d'origine",
+             intact.title == avant_titre, intact.title)
+    verifier("traduire ne touche pas a la description d'origine",
+             intact.description == avant_desc, intact.description)
+    verifier("traduire ne touche pas aux VALEURS des champs d'origine",
+             [(c.name, c.value, c.inline) for c in intact.fields] == avant_champs,
+             str([(c.name, c.value) for c in intact.fields]))
+
+    # Le nombre de fragments est borne : un embed de 25 champs ne doit pas
+    # declencher cinquante appels reseau.
+    gros = d.Embed(title="T", description="D")
+    for n in range(25):
+        gros.add_field(name=f"n{n}", value=f"v{n}", inline=False)
+    verifier("le nombre de fragments traduits est borne",
+             len(bot_mod._fragments_traduisibles(_FauxMessageTraduction(gros)))
+             <= bot_mod.MAX_FRAGMENTS_TRADUCTION)
+
+
+def _embed_essai():
+    import discord as d
+    e = d.Embed(title="Membre banni", description="La sanction est enregistree.")
+    e.add_field(name="👤 Membre", value="@pirate", inline=True)
+    e.add_field(name="🔨 Sanction", value="bannissement", inline=False)
+    return e
+
+
+class _FauxMessageTraduction:
+    def __init__(self, embed):
+        self.embeds = [embed] if embed is not None else []
+        self.content = ""
+
+
 async def main():
     verifier_polices()
     verifier_commandes()
@@ -1231,6 +1376,7 @@ async def main():
     verifier_filet_discord()
     await verifier_cloture_alerte()
     await verifier_pas_de_spam_mp()
+    await verifier_traduction()
     verifier_statut_presence()
     verifier_role_verification()
     await verifier_image_bienvenue()
