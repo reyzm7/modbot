@@ -2788,32 +2788,141 @@ _voice: dict = {}  # {gid: {uid: join_ts}}
 #  TRADUCTION
 # ════════════════════════════════════════════════
 
-async def translate_text(text: str, to_lang: str) -> dict:
+# Mots tres frequents, par langue. Sert a deviner la langue SOURCE d'un texte.
+#
+# MyMemory — le service de secours — refuse « auto » comme langue de depart :
+# il exige un vrai code ISO. Il faut donc lui en donner un.
+_MOTS_COURANTS = {
+    "fr": ("le", "la", "les", "de", "des", "et", "est", "un", "une", "pour",
+           "dans", "vous", "pas", "sur", "que", "qui", "avec", "membre"),
+    "en": ("the", "and", "is", "of", "to", "in", "for", "you", "not", "with",
+           "this", "that", "are", "member", "server", "has"),
+    "es": ("el", "la", "los", "las", "de", "que", "en", "para", "con", "una",
+           "por", "del", "miembro", "servidor", "no"),
+    "de": ("der", "die", "das", "und", "ist", "nicht", "auf", "für", "mit",
+           "ein", "eine", "wird", "wurde", "mitglied", "server"),
+    "it": ("il", "lo", "la", "che", "di", "per", "con", "non", "una", "del",
+           "membro", "server"),
+    "pt": ("o", "a", "os", "as", "de", "que", "em", "para", "com", "uma",
+           "não", "membro", "servidor"),
+    "nl": ("de", "het", "een", "en", "is", "van", "voor", "niet", "met",
+           "lid", "server"),
+    "pl": ("nie", "jest", "sie", "na", "do", "wsz", "oraz", "przez"),
+    "ro": ("este", "sunt", "pentru", "care", "din", "membru"),
+    "tr": ("ve", "bir", "için", "bu", "ile", "değil", "üye", "sunucu"),
+}
+
+# Blocs d'ecriture non latins : la langue s'y lit sans dictionnaire.
+_ECRITURES = (
+    ("ar", 0x0600, 0x06FF), ("he", 0x0590, 0x05FF), ("ru", 0x0400, 0x04FF),
+    ("el", 0x0370, 0x03FF), ("ja", 0x3040, 0x30FF), ("ko", 0xAC00, 0xD7AF),
+    ("zh-CN", 0x4E00, 0x9FFF),
+)
+
+
+def deviner_langue(texte, defaut="en"):
+    """
+    Devine la langue d'un texte. Approximatif, et c'est suffisant.
+
+    Ce n'est pas un detecteur serieux : il sert uniquement a donner une
+    langue de depart plausible au service de secours. Se tromper degrade la
+    traduction ; ne rien donner du tout la rend impossible.
+    """
+    texte = (texte or "").strip()
+    if not texte:
+        return defaut
+
+    # Une ecriture non latine tranche tout de suite.
+    for code, debut, fin in _ECRITURES:
+        if sum(1 for c in texte if debut <= ord(c) <= fin) >= 3:
+            return code
+
+    mots = re.findall(r"[a-zà-öø-ÿ']+", texte.lower())
+    if not mots:
+        return defaut
+    scores = {code: sum(1 for m in mots if m in liste)
+              for code, liste in _MOTS_COURANTS.items()}
+    meilleur = max(scores, key=scores.get)
+    return meilleur if scores[meilleur] > 0 else defaut
+
+
+# Reponses que MyMemory renvoie en HTTP 200 alors que la traduction a echoue.
+# Sans ce garde-fou, le message d'erreur du service s'affiche a la place du
+# texte traduit — c'est exactement ce qui est arrive avec « auto ».
+# Volontairement des formules SPECIFIQUES au service. « NO CONTENT » ou
+# « PLEASE CONTACT », qui figurent aussi dans son message, sont trop banales :
+# une vraie traduction vers l'anglais pourrait les contenir et se ferait
+# rejeter. Le vrai garde-fou reste responseStatus ; ceci n'est qu'un filet.
+_ERREURS_MYMEMORY = (
+    "INVALID SOURCE LANGUAGE", "INVALID TARGET LANGUAGE",
+    "IS AN INVALID SOURCE", "IS AN INVALID TARGET",
+    "MYMEMORY WARNING", "QUERY LENGTH LIMIT", "TOO MANY REQUESTS",
+)
+
+
+def _reponse_de_traduction_valable(texte):
+    """Vrai si le texte rendu est une traduction, et pas un message d'erreur."""
+    if not texte or not texte.strip():
+        return False
+    majuscules = texte.upper()
+    return not any(motif in majuscules for motif in _ERREURS_MYMEMORY)
+
+
+async def translate_text(text: str, to_lang: str, from_lang: str = None) -> dict:
+    """
+    Traduit un texte. Google d'abord, MyMemory en secours.
+
+    `from_lang` est facultatif : Google detecte seul, MyMemory non. Quand il
+    n'est pas fourni, on le devine avant de passer au secours.
+    """
     text = (text or "").strip()
     if not text:
         return {"ok": False}
     text = text[:4500]
     timeout = aiohttp.ClientTimeout(total=12)
+
+    source = (from_lang or "").strip() or None
+
     try:
         async with aiohttp.ClientSession(timeout=timeout) as s:
-            params = {"client": "gtx", "sl": "auto", "tl": to_lang, "dt": "t", "q": text}
+            params = {"client": "gtx", "sl": source or "auto", "tl": to_lang,
+                      "dt": "t", "q": text}
             async with s.get("https://translate.googleapis.com/translate_a/single", params=params) as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     translated = "".join(part[0] for part in data[0] if part and part[0]).strip()
                     if translated:
-                        return {"ok": True, "text": html.unescape(translated), "details": f"Source: {data[2]}" if len(data) > 2 else ""}
+                        detectee = data[2] if len(data) > 2 else None
+                        if detectee and not source:
+                            source = detectee
+                        return {"ok": True, "text": html.unescape(translated),
+                                "source": source,
+                                "details": f"Source: {detectee}" if detectee else ""}
     except Exception:
         pass
+
+    # Secours. Il lui faut une vraie langue de depart, jamais « auto ».
+    depart = (source or deviner_langue(text)).split("-")[0].lower()
+    if depart == (to_lang or "").split("-")[0].lower():
+        # Deja dans la bonne langue : renvoyer le texte tel quel vaut mieux
+        # qu'un aller-retour qui l'abimerait.
+        return {"ok": True, "text": text, "source": depart, "details": "meme langue"}
+
     try:
         async with aiohttp.ClientSession(timeout=timeout) as s:
-            params = {"q": text[:500], "langpair": f"auto|{to_lang}"}
+            params = {"q": text[:500], "langpair": f"{depart}|{to_lang}"}
             async with s.get("https://api.mymemory.translated.net/get", params=params) as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
-                    translated = data.get("responseData", {}).get("translatedText", "")
-                    if translated:
-                        return {"ok": True, "text": html.unescape(translated), "details": data.get("responseDetails", "")}
+                    # MyMemory repond 200 meme quand il refuse : le vrai code
+                    # est dans responseStatus, et le message d'erreur se
+                    # trouve la ou devrait etre la traduction.
+                    etat = str(data.get("responseStatus", "")).strip()
+                    translated = (data.get("responseData") or {}).get("translatedText", "")
+                    if etat in ("200", "") and _reponse_de_traduction_valable(translated):
+                        return {"ok": True, "text": html.unescape(translated),
+                                "source": depart,
+                                "details": data.get("responseDetails", "")}
     except Exception:
         pass
     return {"ok": False}
@@ -2921,8 +3030,13 @@ async def traduire_message(message, langue):
     if not fragments:
         return None, "Ce message ne contient aucun texte a traduire."
 
+    # La langue de depart se devine sur l'ENSEMBLE du message, pas fragment
+    # par fragment : « @pirate », « 24 » ou « #general » ne portent aucun
+    # indice, et chacun serait devine separement — donc mal.
+    origine = deviner_langue(" ".join(t for _, t in fragments))
+
     resultats = await asyncio.gather(
-        *(translate_text(texte, langue) for _, texte in fragments),
+        *(translate_text(texte, langue, from_lang=origine) for _, texte in fragments),
         return_exceptions=True)
 
     traduits = {}

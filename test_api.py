@@ -1278,7 +1278,7 @@ async def verifier_traduction():
     message = _FauxMessageTraduction(origine)
 
     vrai = bot_mod.translate_text
-    bot_mod.translate_text = lambda texte, langue: _resoudre(
+    bot_mod.translate_text = lambda texte, langue, **_: _resoudre(
         {"ok": True, "text": f"[{langue}] {texte}"})
     try:
         embed, erreur = await bot_mod.traduire_message(message, "de")
@@ -1294,13 +1294,13 @@ async def verifier_traduction():
                  [c.inline for c in embed.fields] == [True, False])
 
         # Le service tombe : on garde le texte d'origine, on ne vide rien.
-        bot_mod.translate_text = lambda texte, langue: _resoudre({"ok": False})
+        bot_mod.translate_text = lambda texte, langue, **_: _resoudre({"ok": False})
         embed, erreur = await bot_mod.traduire_message(message, "de")
         verifier("un service muet donne une erreur claire, pas un embed vide",
                  embed is None and erreur, str(erreur))
 
         # Panne partielle : seul le titre passe.
-        async def partiel(texte, langue):
+        async def partiel(texte, langue, **_):
             return {"ok": True, "text": "UBERSETZT"} if texte == "Membre banni" else {"ok": False}
         bot_mod.translate_text = partiel
         embed, erreur = await bot_mod.traduire_message(
@@ -1328,7 +1328,7 @@ async def verifier_traduction():
     avant_champs = [(c.name, c.value, c.inline) for c in intact.fields]
     avant_titre, avant_desc = intact.title, intact.description
 
-    bot_mod.translate_text = lambda texte, langue: _resoudre(
+    bot_mod.translate_text = lambda texte, langue, **_: _resoudre(
         {"ok": True, "text": "TRADUIT"})
     try:
         await bot_mod.traduire_message(_FauxMessageTraduction(intact), "de")
@@ -1343,6 +1343,20 @@ async def verifier_traduction():
     verifier("traduire ne touche pas aux VALEURS des champs d'origine",
              [(c.name, c.value, c.inline) for c in intact.fields] == avant_champs,
              str([(c.name, c.value) for c in intact.fields]))
+
+    # La langue de depart doit etre devinee sur l'ensemble du message : un
+    # fragment comme « @pirate » ou « 24 » ne porte aucun indice.
+    entier = d.Embed(title="Le membre a ete banni du serveur",
+                     description="La sanction est enregistree pour publicite.")
+    entier.add_field(name="Membre", value="@pirate", inline=True)
+    entier.add_field(name="Duree", value="24", inline=True)
+    fragments = bot_mod._fragments_traduisibles(_FauxMessageTraduction(entier))
+    ensemble = bot_mod.deviner_langue(" ".join(t for _, t in fragments))
+    verifier("la langue est devinee sur le message entier",
+             ensemble == "fr", ensemble)
+    verifier("un fragment isole sans indice aurait echoue",
+             bot_mod.deviner_langue("@pirate") != "fr",
+             bot_mod.deviner_langue("@pirate"))
 
     # Le nombre de fragments est borne : un embed de 25 champs ne doit pas
     # declencher cinquante appels reseau.
@@ -1368,6 +1382,139 @@ class _FauxMessageTraduction:
         self.content = ""
 
 
+async def verifier_secours_traduction():
+    """
+    Le service de secours, et l'erreur qu'il affichait a la place du texte.
+
+    Buffl a vu s'afficher, en guise de traduction :
+
+        'AUTO' IS AN INVALID SOURCE LANGUAGE. EXAMPLE: LANGPAIR=EN|IT ...
+
+    Deux defauts se cumulaient. MyMemory refuse « auto » comme langue de
+    depart — il exige un vrai code ISO. Et surtout il repond **HTTP 200**
+    quand il refuse : le vrai code est dans responseStatus, et son message
+    d'erreur occupe le champ ou devrait se trouver la traduction. Le code
+    prenait donc ce message pour une traduction reussie.
+
+    Le second defaut est le plus grave : sans lui, n'importe quelle panne du
+    service (quota depasse, texte trop long) se serait affichee de la meme
+    facon.
+    """
+    print("\n--- Traduction : le service de secours ---")
+
+    # La reponse EXACTE de MyMemory, telle qu'elle a produit le bug.
+    reponse_reelle = {
+        "responseData": {
+            "translatedText": "'AUTO' IS AN INVALID SOURCE LANGUAGE . EXAMPLE: "
+                              "LANGPAIR=EN|IT USING 2 LETTER ISO OR RFC3066 LIKE "
+                              "ZH-CN. ALMOST ALL LANGUAGES SUPPORTED BUT SOME MAY "
+                              "HAVE NO CONTENT",
+            "match": 0,
+        },
+        "responseStatus": 403,
+    }
+    verifier("le message d'erreur de MyMemory est reconnu comme tel",
+             bot_mod._reponse_de_traduction_valable(
+                 reponse_reelle["responseData"]["translatedText"]) is False)
+    verifier("une vraie traduction reste acceptee",
+             bot_mod._reponse_de_traduction_valable("Mitglied gebannt") is True)
+    verifier("un texte anglais parlant de contenu n'est pas rejete a tort",
+             bot_mod._reponse_de_traduction_valable(
+                 "There is no content in this channel") is True)
+    verifier("un texte vide n'est pas une traduction",
+             bot_mod._reponse_de_traduction_valable("   ") is False)
+
+    # La langue de depart : plus jamais « auto ».
+    verifier("le francais est reconnu",
+             bot_mod.deviner_langue("Le membre a ete banni pour publicite") == "fr")
+    verifier("l'anglais est reconnu",
+             bot_mod.deviner_langue("The member has been banned for advertising") == "en")
+    verifier("l'allemand est reconnu",
+             bot_mod.deviner_langue("Das Mitglied wurde für Werbung gebannt") == "de")
+    verifier("l'espagnol est reconnu",
+             bot_mod.deviner_langue("El miembro ha sido baneado por publicidad") == "es")
+    verifier("l'arabe est reconnu a son ecriture",
+             bot_mod.deviner_langue("تم حظر العضو بسبب الإعلان") == "ar")
+    verifier("le russe est reconnu a son ecriture",
+             bot_mod.deviner_langue("Участник был заблокирован") == "ru")
+    verifier("un texte sans indice retombe sur un defaut utilisable",
+             bot_mod.deviner_langue("42 :: 1189681599965573131") == "en")
+    verifier("la langue devinee n'est jamais « auto »",
+             all(bot_mod.deviner_langue(t) != "auto" for t in
+                 ("", "   ", "!!!", "Le membre", "The member")))
+
+    # Le bout a bout, avec les deux services simules.
+    import aiohttp as _a
+
+    class _FausseReponse:
+        def __init__(self, charge, status=200):
+            self._charge, self.status = charge, status
+        async def json(self, **_):
+            return self._charge
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_):
+            return False
+
+    class _FausseSession:
+        """Google tombe, MyMemory repond ce qu'on lui dit."""
+        def __init__(self, reponse_mymemory, **_):
+            self.reponse = reponse_mymemory
+            self.vus = []
+        def get(self, url, params=None, **_):
+            self.vus.append((url, params or {}))
+            if "googleapis" in url:
+                return _FausseReponse(None, status=500)
+            return _FausseReponse(self.reponse)
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_):
+            return False
+
+    vraie_session = _a.ClientSession
+    derniere = {}
+    try:
+        _a.ClientSession = lambda **k: derniere.setdefault(
+            "s", _FausseSession(reponse_reelle))
+        resultat = await bot_mod.translate_text("Le membre a ete banni", "de")
+        verifier("une erreur du service ne passe jamais pour une traduction",
+                 resultat.get("ok") is not True, str(resultat)[:90])
+
+        appels = derniere["s"].vus
+        paires = [p.get("langpair") for _, p in appels if "langpair" in p]
+        verifier("« auto » n'est plus envoye comme langue de depart",
+                 all("auto" not in (p or "") for p in paires), str(paires))
+        verifier("une vraie paire de langues est envoyee",
+                 paires and paires[0] == "fr|de", str(paires))
+    finally:
+        _a.ClientSession = vraie_session
+        derniere.clear()
+
+    # Et quand le secours repond correctement, la traduction passe.
+    bonne = {"responseData": {"translatedText": "Das Mitglied wurde gebannt"},
+             "responseStatus": 200}
+    try:
+        _a.ClientSession = lambda **k: _FausseSession(bonne)
+        resultat = await bot_mod.translate_text("Le membre a ete banni", "de")
+        verifier("une reponse correcte du secours est bien rendue",
+                 resultat.get("ok") is True
+                 and resultat.get("text") == "Das Mitglied wurde gebannt",
+                 str(resultat)[:90])
+    finally:
+        _a.ClientSession = vraie_session
+
+    # Traduire vers la langue deja parlee ne doit rien casser.
+    try:
+        _a.ClientSession = lambda **k: _FausseSession(reponse_reelle)
+        resultat = await bot_mod.translate_text("Le membre a ete banni", "fr")
+        verifier("traduire vers la meme langue rend le texte intact",
+                 resultat.get("ok") is True
+                 and resultat.get("text") == "Le membre a ete banni",
+                 str(resultat)[:90])
+    finally:
+        _a.ClientSession = vraie_session
+
+
 async def main():
     verifier_polices()
     verifier_commandes()
@@ -1377,6 +1524,7 @@ async def main():
     await verifier_cloture_alerte()
     await verifier_pas_de_spam_mp()
     await verifier_traduction()
+    await verifier_secours_traduction()
     verifier_statut_presence()
     verifier_role_verification()
     await verifier_image_bienvenue()

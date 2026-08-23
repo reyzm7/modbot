@@ -2693,3 +2693,68 @@ Deux défauts réinjectés, deux échecs constatés :
 272/272 côté bot, 61/61 au navigateur sur les cinq langues, et les neuf suites
 existantes restent vertes.
 
+## 40. Livré le 22 août 2026 — une erreur de service affichée comme une traduction
+
+### Ce que Buffl a vu
+
+En traduisant un message, l'embed affichait :
+
+> `'AUTO' IS AN INVALID SOURCE LANGUAGE . EXAMPLE: LANGPAIR=EN|IT USING 2 LETTER
+> ISO OR RFC3066 LIKE ZH-CN. ALMOST ALL LANGUAGES SUPPORTED BUT SOME MAY HAVE
+> NO CONTENT`
+
+Ce n'est pas une traduction : c'est le message d'erreur du service de secours,
+affiché à la place du texte.
+
+### Deux défauts cumulés
+
+**1. MyMemory refuse `auto`.** Google détecte seul la langue de départ, pas
+MyMemory : il exige un vrai code ISO. Le code envoyait `langpair=auto|xx` dans
+les deux cas. Tant que Google répondait, personne ne le voyait — c'est en
+basculant sur le secours que le défaut est sorti.
+
+**2. Le plus grave : MyMemory répond HTTP 200 quand il refuse.** Le vrai code
+est dans `responseStatus`, et le message d'erreur occupe le champ où devrait
+se trouver la traduction. Le code lisait donc ce champ et concluait à un
+succès :
+
+```python
+translated = data.get("responseData", {}).get("translatedText", "")
+if translated:                      # un message d'erreur est « vrai »
+    return {"ok": True, ...}
+```
+
+Sans ce second défaut, l'histoire s'arrêtait à un simple échec de traduction.
+Avec lui, **toute** panne du service — quota dépassé, texte trop long — se
+serait affichée de la même façon, comme si c'était le texte traduit.
+
+La leçon : un code HTTP 200 ne dit pas que l'opération a réussi. Il dit que la
+requête a été comprise. Ce que le service en a fait se lit dans le corps de la
+réponse.
+
+### La correction
+
+- `responseStatus` est vérifié avant tout ;
+- un filet supplémentaire rejette les formules propres au service. Il est
+  volontairement **spécifique** : « NO CONTENT » ou « PLEASE CONTACT »
+  figurent aussi dans son message, mais sont trop banales — une vraie
+  traduction vers l'anglais pourrait les contenir et se ferait rejeter ;
+- `deviner_langue()` fournit une langue de départ réelle : écriture non latine
+  reconnue directement (arabe, cyrillique, CJK, grec, hébreu), sinon score sur
+  les mots fréquents de dix langues latines ;
+- la langue est devinée **une fois pour tout le message**, pas fragment par
+  fragment : « @pirate », « 24 » ou « #general » ne portent aucun indice ;
+- traduire vers la langue déjà parlée rend le texte intact plutôt que de lui
+  faire faire un aller-retour qui l'abîmerait.
+
+### Contrôles négatifs
+
+Le test rejoue la réponse **exacte** de MyMemory qui a produit le bug.
+
+| Défaut réinjecté | Ce qui tombe |
+|---|---|
+| `responseStatus` et le contenu ne sont plus vérifiés | « une erreur du service ne passe jamais pour une traduction » — et le message de Buffl réapparaît mot pour mot dans la sortie du test |
+| retour de `langpair=auto\|xx` | « auto n'est plus envoyé », « une vraie paire de langues est envoyée » |
+
+291/291.
+
