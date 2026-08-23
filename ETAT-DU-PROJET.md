@@ -2618,3 +2618,78 @@ automatiquement sur « Regarde ». Un serveur tout neuf n'affiche pas
 
 247/247.
 
+## 39. Livré le 22 août 2026 — traduire les embeds, et cinq langues sur le site
+
+### Côté bot : traduire n'importe quel embed
+
+Le bot écrit en français et en anglais. Un serveur accueille des gens qui ne
+lisent ni l'un ni l'autre. Un sélecteur de **quatorze langues** permet
+désormais de traduire un embed sans quitter Discord, en réponse éphémère —
+traduire pour soi ne doit pas remplir le salon pour les autres.
+
+`translate_text` existait déjà (Google Traduction, MyMemory en secours) : rien
+à ajouter côté service, et aucune clef d'API.
+
+**La vue est sans état.** Au clic, elle relit le message sur lequel elle est
+posée. Rien n'est stocké, donc rien ne se perd au redémarrage : un bouton
+vieux de six mois marche encore. C'est aussi ce qui permet d'en faire une vue
+persistante avec un `custom_id` fixe.
+
+### « Sur tous les embeds » : ce qui était réellement possible
+
+Le bot compte **151 sites d'envoi d'embed** et **27 vues** déjà en place. Les
+toucher un par un aurait cassé les vues existantes, et une vue Discord est
+limitée à cinq rangées — certaines n'ont tout simplement pas la place.
+
+Trois moyens, donc, plutôt qu'un seul :
+
+| Moyen | Portée |
+|---|---|
+| vue attachée à `log_event` | tous les logs, c'est-à-dire l'essentiel du flux |
+| `avec_traduction()` sur les commandes d'information | `/aide`, `/info-bot` — et n'ajoute rien si la vue est pleine |
+| menu contextuel « 🌍 Traduire » | **tous** les messages, y compris ceux des membres |
+
+Le menu contextuel est la vraie réponse à « partout » : il ne dépend d'aucune
+place disponible dans une vue.
+
+### Un piège Discord, corrigé à deux endroits
+
+`Embed.to_dict()` renvoie la liste interne des champs **sans la copier**, et
+`clear_fields()` la vide **en place**. Construire une copie puis la nettoyer
+effaçait donc les champs de l'original.
+
+Le défaut est silencieux : le nombre de champs finit identique, seules les
+*valeurs* ont été remplacées. C'est exactement pour cela que mon premier test
+de non-mutation l'a manqué — il comparait le nombre de champs et le titre.
+La leçon : **comparer un compteur ne prouve rien sur le contenu.**
+
+La clôture d'alerte écrite en §38 avait le même motif. `copier_embed()` fait
+maintenant une copie profonde aux deux endroits.
+
+### Côté site : de trois à cinq langues
+
+**1 302 clefs × 2 langues = 2 604 chaînes** écrites pour l'espagnol et
+l'allemand. Aucun service de traduction n'étant joignable depuis
+l'environnement de développement (Google refuse les IP de datacenter, MyMemory
+est bloqué par le proxy), tout a été rédigé à la main, par lots thématiques.
+
+Le moteur n'a pas eu à changer : il était déjà générique, et la détection de
+la langue du navigateur reprend les nouvelles sans un mot de code. Seules les
+`<option>` manquaient sur les six pages.
+
+### Ce que les tests tiennent
+
+`test_i18n.py` couvre désormais les cinq langues, dont le contrôle des
+**substitutions** — celui qui attrape un `{n}` devenu `{num}` au fil d'une
+traduction, l'erreur la plus facile à commettre et la plus difficile à voir.
+
+Deux défauts réinjectés, deux échecs constatés :
+
+| Défaut réinjecté | Ce qui tombe |
+|---|---|
+| une clef espagnole laissée en français | « plus de français visible » sur index.html |
+| `{n}` transformé en `{num}` en espagnol | « 1 clef aux substitutions divergentes » |
+
+272/272 côté bot, 61/61 au navigateur sur les cinq langues, et les neuf suites
+existantes restent vertes.
+
