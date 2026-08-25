@@ -213,10 +213,13 @@ def verifier_diagnostic_ia():
     que le bot ne renvoie pas la meme consigne inutile dans les trois cas.
     """
     print("\n--- Diagnostic de la configuration IA ---")
-    cle = "MISTRAL_API_KEY"
-    parasites = ("ANTHROPIC_API_KEY", "MISTRAL_KEY", "CLAUDE_API_KEY")
+    # Le bot choisit son fournisseur au demarrage : le test pilote la
+    # variable que CE processus attend, sans presumer laquelle.
+    cle = bot_mod.AI_ENV_KEY
+    parasites = ("ANTHROPIC_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_KEY",
+                 "MISTRAL_KEY", "CLAUDE_API_KEY", "CLAUDE_KEY")
     sauvegarde = dict(os.environ)
-    clef_module = bot_mod.MISTRAL_API_KEY
+    clef_module = bot_mod.AI_API_KEY
 
     def poser(valeur, autres=()):
         os.environ.pop(cle, None)
@@ -226,7 +229,7 @@ def verifier_diagnostic_ia():
             os.environ[nom] = val
         if valeur is not None:
             os.environ[cle] = valeur
-        bot_mod.MISTRAL_API_KEY = (valeur or "").strip()
+        bot_mod.AI_API_KEY = (valeur or "").strip()
         return bot_mod.ai_diagnostic()
 
     try:
@@ -242,30 +245,41 @@ def verifier_diagnostic_ia():
         titre, _ = bot_mod.ai_conseil_configuration(d)
         verifier("consigne : variable vide", "vide" in titre.lower())
 
-        d = poser(None, autres=[("MISTRAL_KEY", "z" * 32)])
-        verifier("nom voisin repere", d["similar_names"] == ["MISTRAL_KEY"],
+        voisin = "MISTRAL_KEY" if bot_mod.AI_PROVIDER == "mistral" else "ANTHROPIC_KEY"
+        d = poser(None, autres=[(voisin, "z" * 32)])
+        verifier("nom voisin repere", d["similar_names"] == [voisin],
                  str(d["similar_names"]))
         titre, corps = bot_mod.ai_conseil_configuration(d)
         verifier("consigne : renommer la variable",
-                 "nom" in titre.lower() and "MISTRAL_KEY" in corps)
+                 "nom" in titre.lower() and voisin in corps)
 
-        # Une installation qui vient de l'ancien fournisseur garde sa variable
-        # Anthropic : le bot doit l'orienter au lieu de dire « absente ».
-        d = poser(None, autres=[("ANTHROPIC_API_KEY", "sk-ant-api03-zzz")])
-        verifier("ancienne variable Anthropic reperee comme nom voisin",
-                 d["similar_names"] == ["ANTHROPIC_API_KEY"], str(d["similar_names"]))
+        # Une installation posee sur l'AUTRE fournisseur doit etre orientee,
+        # pas recevoir un « variable absente » qui n'explique rien.
+        autre = ("MISTRAL_API_KEY" if bot_mod.AI_PROVIDER == "anthropic"
+                 else "ANTHROPIC_API_KEY")
+        d = poser(None, autres=[(autre, "z" * 32)])
+        verifier("variable de l'autre fournisseur reperee comme nom voisin",
+                 d["similar_names"] == [autre], str(d["similar_names"]))
 
-        d = poser("x" * 32)
+        plausible = ("sk-ant-" + "x" * 32 if bot_mod.AI_PROVIDER == "anthropic"
+                     else "x" * 32)
+        d = poser(plausible)
         verifier("clef plausible reconnue", d["configured"] and d["expected_prefix"])
         verifier("la clef n'est jamais exposee en entier",
                  len(d["prefix"]) <= 8 and "x" * 20 not in str(d))
 
         d = poser("court")
-        verifier("clef trop courte signalee", d["configured"] and not d["expected_prefix"])
+        verifier("clef douteuse signalee", d["configured"] and not d["expected_prefix"])
+
+        verifier("le fournisseur actif est nomme",
+                 d["provider"] in bot_mod.AI_PROVIDERS and bool(d["provider_label"]),
+                 f"{d['provider']} / {d['provider_label']}")
+        verifier("le nom de variable attendu est expose",
+                 d["env_key"] == bot_mod.AI_ENV_KEY, d["env_key"])
     finally:
         os.environ.clear()
         os.environ.update(sauvegarde)
-        bot_mod.MISTRAL_API_KEY = clef_module
+        bot_mod.AI_API_KEY = clef_module
 
 
 def verifier_erreurs_ia():
@@ -275,13 +289,20 @@ def verifier_erreurs_ia():
     tout seul et doit inviter a reessayer, alors qu'un compte suspendu ne
     passera jamais et ne doit pas faire relancer indefiniment.
     """
-    print("\n--- Traduction des erreurs de l'API Mistral ---")
+    print("\n--- Traduction des erreurs de l'API d'IA ---")
     msg = bot_mod.ai_message_erreur
 
     quota = msg(429, "Requests rate limit exceeded")
-    verifier("quota gratuit : annonce comme temporaire",
-             "quota" in quota.lower() and "réessaie" in quota.lower())
-    verifier("quota gratuit : dit que ca se recharge seul", "recharge" in quota.lower())
+    verifier("quota : annonce comme temporaire", "réessaie" in quota.lower(), quota)
+    if bot_mod.AI_REGLAGES.get("gratuit"):
+        # Le palier gratuit se recharge tout seul : il faut le dire, sinon
+        # on laisse croire a une panne definitive.
+        verifier("quota gratuit : dit que ca se recharge seul",
+                 "quota" in quota.lower() and "recharge" in quota.lower(), quota)
+    else:
+        # Facture a l'usage : promettre un rechargement automatique serait faux.
+        verifier("quota paye : ne promet pas de rechargement gratuit",
+                 "gratuit" not in quota.lower(), quota)
 
     suspendu = msg(400, "Service subscription is inactive")
     verifier("compte suspendu : cause nommee", "inactif" in suspendu or "suspendu" in suspendu)
@@ -290,7 +311,8 @@ def verifier_erreurs_ia():
 
     verifier("401 : clef refusee", "refusée" in msg(401, "Unauthorized"))
     verifier("403 traite comme 401", msg(403, "Forbidden") == msg(401, "Unauthorized"))
-    verifier("404 : modele nomme", "MISTRAL_MODEL" in msg(404, "model not found"))
+    verifier("404 : modele nomme",
+             bot_mod.AI_REGLAGES["env_model"] in msg(404, "model not found"))
     verifier("422 : designe un defaut du bot", "défaut du bot" in msg(422, "validation"))
     verifier("503 : indisponibilite temporaire", "indisponible" in msg(503, ""))
 
@@ -302,8 +324,8 @@ def verifier_erreurs_ia():
     verifier("detailler=True : detail brut repris",
              "theiere" in msg(418, "je suis une theiere", detailler=True))
     verifier("aucun message d'erreur n'expose la clef",
-             all("Bearer" not in m and "MISTRAL_API_KEY`" not in m.replace(
-                 "Vérifie `MISTRAL_API_KEY`", "")
+             all("Bearer" not in m and bot_mod.AI_ENV_KEY + "`" not in m.replace(
+                 "Vérifie `" + bot_mod.AI_ENV_KEY + "`", "")
                  for m in (quota, suspendu, inconnu, msg(404, "x"))))
 
 
@@ -396,7 +418,7 @@ def verifier_connaissances_ia():
              "Parle comme un pirate." in perso)
 
     verifier("aucun secret dans la consigne",
-             bot_mod.MISTRAL_API_KEY not in prompt_admin or not bot_mod.MISTRAL_API_KEY)
+             bot_mod.AI_API_KEY not in prompt_admin or not bot_mod.AI_API_KEY)
 
     # L'IA doit repondre a tout, pas seulement aux questions sur le bot. Sans
     # ces deux consignes, le pave de documentation ModBot qui suit la ramenait
@@ -414,7 +436,7 @@ def verifier_connaissances_ia():
     # Le palier gratuit ouvre tous les modeles : prendre le petit ne fait
     # economiser que de la culture generale.
     verifier("le modele par defaut n'est pas le plus petit",
-             "small" not in bot_mod.MISTRAL_MODEL, bot_mod.MISTRAL_MODEL)
+             "small" not in bot_mod.AI_MODEL, bot_mod.AI_MODEL)
     verifier("la reponse peut etre developpee", bot_mod.AI_MAX_TOKENS >= 1000,
              str(bot_mod.AI_MAX_TOKENS))
 

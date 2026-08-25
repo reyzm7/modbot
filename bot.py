@@ -1758,14 +1758,91 @@ def get_msg_count(uid, gid):
 #
 # La clef vit uniquement cote serveur. Elle n'est jamais renvoyee au
 # navigateur : le dashboard passe par /api/guilds/{id}/assistant, qui relaie.
-MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "").strip()
-# Le palier gratuit ouvre TOUS les modeles, y compris Large : prendre le petit
-# ne fait economiser aucun argent, seulement de la culture generale et de la
-# nuance. Large est donc le defaut. Redescendre a `mistral-medium-latest` ou
-# `mistral-small-latest` via la variable d'environnement si la latence gene ou
-# si la limite de requetes par minute du palier gratuit devient contraignante.
-MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "mistral-large-latest").strip()
-MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+# ── Fournisseur d'IA ──────────────────────────────────────────────────────────
+#
+# Deux fournisseurs sont cables. Le bot prend celui dont la clef est posee ;
+# si les deux le sont, Anthropic passe devant, et AI_PROVIDER tranche
+# explicitement (`anthropic` ou `mistral`).
+#
+# Ce qui les separe, cote cout :
+#   * Mistral publie un palier reellement gratuit.
+#   * Anthropic facture a l'usage, sans palier gratuit. Un compte sans credit
+#     repond 400 avec « credit balance is too low » — le bot le nomme.
+#
+# Ce qui les separe, cote protocole :
+#   * Mistral est compatible OpenAI : la consigne systeme est un message de
+#     role `system` en tete de liste, la reponse est dans choices[0].message.
+#   * Anthropic prend la consigne dans un champ `system` separe, s'authentifie
+#     avec l'en-tete `x-api-key`, exige `anthropic-version`, et renvoie une
+#     liste de blocs `content` dont on concatene ceux de type `text`.
+#
+# La clef vit uniquement cote serveur. Elle n'est jamais renvoyee au
+# navigateur : le dashboard passe par /api/guilds/{id}/assistant, qui relaie.
+AI_PROVIDERS = {
+    "anthropic": {
+        "label": "Anthropic (Claude)",
+        "env_key": "ANTHROPIC_API_KEY",
+        "env_model": "ANTHROPIC_MODEL",
+        # Sonnet : le bon compromis pour une conversation Discord, ou la
+        # latence compte autant que la finesse.
+        "default_model": "claude-sonnet-5",
+        "url": "https://api.anthropic.com/v1/messages",
+        "console": "console.anthropic.com",
+        "gratuit": False,
+    },
+    "mistral": {
+        "label": "Mistral",
+        "env_key": "MISTRAL_API_KEY",
+        "env_model": "MISTRAL_MODEL",
+        # Le palier gratuit ouvre TOUS les modeles, y compris Large : prendre
+        # le petit ne fait economiser aucun argent, seulement de la culture
+        # generale et de la nuance.
+        "default_model": "mistral-large-latest",
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "console": "console.mistral.ai",
+        "gratuit": True,
+    },
+}
+
+# Ordre de preference quand aucune variable AI_PROVIDER n'impose de choix.
+AI_PROVIDER_ORDRE = ("anthropic", "mistral")
+ANTHROPIC_VERSION = "2023-06-01"
+
+
+def _lire_clef(nom):
+    return os.environ.get(nom, "").strip()
+
+
+def _choisir_fournisseur():
+    """
+    Retourne (nom, reglages, clef) du fournisseur actif.
+
+    Un choix force par AI_PROVIDER est respecte meme si la clef manque : le
+    diagnostic doit pouvoir dire « tu as demande Anthropic, sa clef est
+    absente » plutot que de basculer en silence sur l'autre.
+    """
+    force = os.environ.get("AI_PROVIDER", "").strip().lower()
+    if force in AI_PROVIDERS:
+        reglages = AI_PROVIDERS[force]
+        return force, reglages, _lire_clef(reglages["env_key"])
+
+    for nom in AI_PROVIDER_ORDRE:
+        reglages = AI_PROVIDERS[nom]
+        clef = _lire_clef(reglages["env_key"])
+        if clef:
+            return nom, reglages, clef
+
+    # Aucune clef : on presente le fournisseur gratuit, c'est celui vers
+    # lequel orienter quelqu'un qui n'a encore rien configure.
+    return "mistral", AI_PROVIDERS["mistral"], ""
+
+
+AI_PROVIDER, AI_REGLAGES, AI_API_KEY = _choisir_fournisseur()
+AI_MODEL = (os.environ.get(AI_REGLAGES["env_model"], "").strip()
+            or AI_REGLAGES["default_model"])
+AI_URL = AI_REGLAGES["url"]
+AI_LABEL = AI_REGLAGES["label"]
+AI_ENV_KEY = AI_REGLAGES["env_key"]
 
 # Les variables d'environnement sont lues UNE FOIS, au demarrage du processus.
 # Une variable ajoutee sur l'hebergeur pendant que le bot tourne n'entre donc
@@ -1774,15 +1851,14 @@ MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 # le voir. On la garde pour pouvoir la comparer a l'heure du reglage.
 PROCESS_STARTED_AT = now()
 
-# Noms deja vus a la place de MISTRAL_API_KEY. Sert a dire « tu as pose
+# Noms deja vus a la place de la vraie variable. Sert a dire « tu as pose
 # MISTRAL_KEY, le bot attend MISTRAL_API_KEY » au lieu de « absente ».
-# Les noms Anthropic restent listes : une installation qui vient de l'ancien
-# fournisseur a encore ANTHROPIC_API_KEY posee, et doit etre orientee.
 AI_KEY_VARIANTES = {
     "MISTRAL_KEY", "MISTRAL_APIKEY", "MISTRAL_API", "MISTRAL_TOKEN",
     "MISTRAL_SECRET", "MISTRAL_SECRET_KEY", "MISTRALAI_API_KEY",
     "MISTRAL_AI_API_KEY", "API_KEY_MISTRAL", "AI_API_KEY",
-    "ANTHROPIC_API_KEY", "ANTHROPIC_KEY", "CLAUDE_API_KEY",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_KEY", "ANTHROPIC_APIKEY",
+    "ANTHROPIC_TOKEN", "CLAUDE_API_KEY", "CLAUDE_KEY",
 }
 
 # Assez large pour developper une explication quand la question le demande.
@@ -1802,7 +1878,18 @@ _ai_last_use: dict = {}
 
 
 def ai_available():
-    return bool(MISTRAL_API_KEY)
+    return bool(AI_API_KEY)
+
+
+def ai_autre_fournisseur():
+    """
+    L'autre fournisseur, si sa clef est posee. Sert a proposer une bascule
+    concrete quand celui qui est actif refuse de repondre.
+    """
+    for nom, reglages in AI_PROVIDERS.items():
+        if nom != AI_PROVIDER and _lire_clef(reglages["env_key"]):
+            return nom, reglages
+    return None, None
 
 
 def ai_diagnostic():
@@ -1814,33 +1901,45 @@ def ai_diagnostic():
       1. la variable n'existe pas dans ce processus — mauvais service, mauvais
          environnement, ou ajoutee sans redemarrage ;
       2. elle existe mais elle est vide ;
-      3. elle a ete posee sous un autre nom (MISTRAL_KEY, ou la variable de
-         l'ancien fournisseur ANTHROPIC_API_KEY, faute de frappe...).
+      3. elle a ete posee sous un autre nom (MISTRAL_KEY, ANTHROPIC_KEY,
+         faute de frappe...) ou sous celui de l'AUTRE fournisseur.
 
     La clef elle-meme n'est jamais renvoyee : seulement sa longueur et ses
     premiers caracteres, de quoi verifier qu'on a colle la bonne chose.
     """
-    brute = os.environ.get("MISTRAL_API_KEY")
+    brute = os.environ.get(AI_ENV_KEY)
     similaires = sorted(
         nom for nom in os.environ
-        if nom != "MISTRAL_API_KEY"
+        if nom != AI_ENV_KEY
         and (nom.strip().upper() in AI_KEY_VARIANTES
-             or nom.strip().upper() == "MISTRAL_API_KEY"
-             or ("MISTRAL" in nom.upper() and "KEY" in nom.upper()))
+             or ("MISTRAL" in nom.upper() and "KEY" in nom.upper())
+             or ("ANTHROPIC" in nom.upper() and "KEY" in nom.upper()))
     )
+    autre_nom, autre_reglages = ai_autre_fournisseur()
     return {
         "configured": ai_available(),
         "defined": brute is not None,
         "empty": brute is not None and not brute.strip(),
-        "length": len(MISTRAL_API_KEY),
-        "prefix": MISTRAL_API_KEY[:8] if MISTRAL_API_KEY else "",
-        # Mistral ne publie pas de prefixe stable : on verifie seulement que la
-        # clef a une longueur plausible, plutot que d'inventer un motif.
-        "expected_prefix": len(MISTRAL_API_KEY) >= 24,
+        "length": len(AI_API_KEY),
+        "prefix": AI_API_KEY[:8] if AI_API_KEY else "",
+        # Anthropic prefixe ses clefs par « sk-ant- ». Mistral ne publie pas
+        # de prefixe stable : on verifie seulement une longueur plausible.
+        "expected_prefix": (AI_API_KEY.startswith("sk-ant-")
+                            if AI_PROVIDER == "anthropic" else len(AI_API_KEY) >= 24),
         "similar_names": similaires,
-        "model": MISTRAL_MODEL,
+        "provider": AI_PROVIDER,
+        "provider_label": AI_LABEL,
+        "env_key": AI_ENV_KEY,
+        "model": AI_MODEL,
+        "free_tier": bool(AI_REGLAGES.get("gratuit")),
+        "fallback_available": autre_nom,
+        "fallback_label": (autre_reglages or {}).get("label", ""),
         "started_at": PROCESS_STARTED_AT.isoformat(),
     }
+
+
+class AIError(Exception):
+    """Erreur remontee a l'utilisateur, deja formulee en francais."""
 
 
 async def ai_verifier_clef():
@@ -1856,22 +1955,18 @@ async def ai_verifier_clef():
     try:
         await ask_ai([{"role": "user", "content": "ping"}],
                      "Réponds exactement : pong", max_tokens=8, detailler=True)
-        return True, f"Clef acceptée, modèle `{MISTRAL_MODEL}` joignable."
+        return True, f"Clef acceptée, modèle `{AI_MODEL}` joignable sur {AI_LABEL}."
     except AIError as ex:
         return False, str(ex)
 
 
-class AIError(Exception):
-    """Erreur remontee a l'utilisateur, deja formulee en francais."""
-
-
 def ai_message_erreur(status, detail="", detailler=False):
     """
-    Traduit une erreur de l'API Mistral en une phrase actionnable.
+    Traduit une erreur de l'API en une phrase actionnable.
 
     Le piege repare ici : tout ce qui n'etait ni 401 ni 429 tombait dans
     « L'IA n'a pas pu repondre, reessaie plus tard ». Or les causes les plus
-    frequentes sont **permanentes** — un compte sans quota ne se repare pas
+    frequentes sont **permanentes** — un compte sans credit ne se repare pas
     en attendant, et le membre relance indefiniment une requete qui echouera
     toujours. On nomme donc ce qui est nommable.
 
@@ -1879,46 +1974,56 @@ def ai_message_erreur(status, detail="", detailler=False):
     administrateur (`/ia statut verifier:`).
     """
     bas = str(detail or "").lower()
+    console = AI_REGLAGES.get("console", "")
+
+    # Compte sans credit : Anthropic le renvoie en 400, pas en 402. Sans ce
+    # cas, le message disait « requete invalide », ce qui envoie chercher un
+    # bug la ou il n'y a qu'une carte a recharger.
+    if "credit balance" in bas or "insufficient" in bas or "billing" in bas:
+        return (f"Le compte {AI_LABEL} de ce ModBot n'a plus de crédit. "
+                f"Le propriétaire doit en ajouter sur {console} — "
+                "réessayer n'y changera rien.")
 
     if status in (401, 403):
-        return ("La clef d'API Mistral est refusée. Vérifie `MISTRAL_API_KEY` : "
+        return (f"La clef d'API {AI_LABEL} est refusée. Vérifie `{AI_ENV_KEY}` : "
                 "révoquée, expirée, ou copiée incomplètement.")
     if status == 404:
         # La clef est bonne, mais le compte n'a pas acces au modele demande.
-        return (f"Le modèle `{MISTRAL_MODEL}` est introuvable pour cette clef. "
-                "Corrige `MISTRAL_MODEL` sur l'hébergeur du bot.")
-    if status == 422:
+        return (f"Le modèle `{AI_MODEL}` est introuvable pour cette clef. "
+                f"Corrige `{AI_REGLAGES['env_model']}` sur l'hébergeur du bot.")
+    if status == 422 or (status == 400 and not bas):
         # Requete mal formee : c'est un bug du bot, pas un probleme de compte.
         return ("La requête envoyée à l'IA a été refusée comme invalide. "
                 "C'est un défaut du bot, pas de ta configuration.")
 
-    # Le palier gratuit se manifeste par un 429 : quota epuise. C'est
-    # temporaire (il se recharge), contrairement a une clef revoquee.
     if status == 429 or "rate limit" in bas or "quota" in bas or "capacity" in bas:
-        return ("L'IA a atteint sa limite de requêtes. C'est le quota du palier "
-                "gratuit : il se recharge tout seul, réessaie dans un moment.")
+        if AI_REGLAGES.get("gratuit"):
+            return ("L'IA a atteint sa limite de requêtes. C'est le quota du palier "
+                    "gratuit : il se recharge tout seul, réessaie dans un moment.")
+        return ("L'IA a atteint sa limite de requêtes. Réessaie dans un moment.")
     if status in (500, 502, 503, 504):
         return "Le service d'IA est momentanément indisponible. Réessaie dans un instant."
 
     # Compte suspendu ou desactive : permanent, ne jamais annoncer « reessaie ».
     if "inactive" in bas or "suspend" in bas or "subscription" in bas:
-        return ("Le compte Mistral de ce ModBot est inactif ou suspendu. Le propriétaire "
-                "doit le vérifier sur console.mistral.ai — réessayer n'y changera rien.")
+        return (f"Le compte {AI_LABEL} de ce ModBot est inactif ou suspendu. Le propriétaire "
+                f"doit le vérifier sur {console} — réessayer n'y changera rien.")
 
     if detailler:
-        return f"L'API Mistral répond {status} : {detail or 'aucun détail fourni'}"
+        return f"L'API {AI_LABEL} répond {status} : {detail or 'aucun détail fourni'}"
     return ("L'IA n'a pas pu répondre. Un administrateur peut lancer "
             "`/ia statut verifier:Oui` pour voir la cause exacte.")
 
 
 def ai_detail_erreur(donnees):
     """
-    Extrait le message d'erreur d'une reponse Mistral.
+    Extrait le message d'erreur d'une reponse d'API.
 
-    Le format n'est pas stable d'un code HTTP a l'autre : selon le cas c'est
-    `{"message": ...}`, `{"error": {"message": ...}}`, ou le `{"detail": ...}`
-    de la couche de validation, ou `detail` est parfois une liste. On les
-    couvre tous plutot que de renvoyer une chaine vide au diagnostic.
+    Le format n'est stable ni d'un fournisseur a l'autre, ni d'un code HTTP a
+    l'autre : selon le cas c'est `{"message": ...}`, `{"error": {"message":
+    ...}}`, ou le `{"detail": ...}` de la couche de validation, ou `detail`
+    est parfois une liste. On les couvre tous plutot que de renvoyer une
+    chaine vide au diagnostic.
     """
     if not isinstance(donnees, dict):
         return ""
@@ -1938,17 +2043,63 @@ def ai_detail_erreur(donnees):
     return ""
 
 
+def _charge_utile(messages, system_prompt, max_tokens):
+    """Corps de requete et en-tetes, au format du fournisseur actif."""
+    if AI_PROVIDER == "anthropic":
+        charge = {
+            "model": AI_MODEL,
+            "max_tokens": max_tokens,
+            "messages": list(messages),
+        }
+        # Anthropic prend la consigne dans un champ separe, pas dans la liste.
+        if system_prompt:
+            charge["system"] = system_prompt
+        entetes = {
+            "x-api-key": AI_API_KEY,
+            "anthropic-version": ANTHROPIC_VERSION,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        return charge, entetes
+
+    charge = {
+        "model": AI_MODEL,
+        "max_tokens": max_tokens,
+        "messages": ([{"role": "system", "content": system_prompt}] if system_prompt
+                     else []) + list(messages),
+    }
+    entetes = {
+        "Authorization": f"Bearer {AI_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    return charge, entetes
+
+
+def _extraire_texte(donnees):
+    """Texte de la reponse, quel que soit le fournisseur."""
+    if AI_PROVIDER == "anthropic":
+        blocs = (donnees or {}).get("content") or []
+        morceaux = [b.get("text", "") for b in blocs
+                    if isinstance(b, dict) and b.get("type") == "text"]
+        return "\n".join(m for m in morceaux if m).strip()
+
+    choix = (donnees or {}).get("choices") or []
+    if not choix:
+        return ""
+    return str((choix[0].get("message") or {}).get("content") or "").strip()
+
+
 async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=False):
     """
-    Appelle l'API Mistral et retourne le texte de la reponse.
+    Appelle l'API du fournisseur actif et retourne le texte de la reponse.
 
     Leve AIError avec un message lisible : l'appelant l'affiche tel quel,
     sans jamais exposer la clef ni la reponse brute de l'API.
 
-    `messages` est l'historique du bot, deja au format {role, content} avec
-    role parmi user / assistant — c'est exactement ce qu'attend Mistral. La
-    consigne systeme, elle, se passe comme un message de role `system` en tete
-    de la liste (et non dans un champ separe comme chez d'autres fournisseurs).
+    `messages` est l'historique du bot, au format {role, content} avec role
+    parmi user / assistant — commun aux deux fournisseurs. Seule la consigne
+    systeme se place differemment, d'ou `_charge_utile`.
 
     `detailler` reprend le message d'erreur brut de l'API. Reserve au
     diagnostic administrateur (`/ia statut verifier:`) : un membre ordinaire
@@ -1956,34 +2107,21 @@ async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=Fa
     """
     if not ai_available():
         raise AIError("L'IA n'est pas configuree sur ce ModBot. "
-                      "Un administrateur doit definir `MISTRAL_API_KEY`.")
+                      f"Un administrateur doit definir `{AI_ENV_KEY}`.")
 
-    charge = {
-        "model": MISTRAL_MODEL,
-        "max_tokens": max_tokens,
-        "messages": ([{"role": "system", "content": system_prompt}] if system_prompt
-                     else []) + list(messages),
-    }
-    entetes = {
-        "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
+    charge, entetes = _charge_utile(messages, system_prompt, max_tokens)
 
     try:
         timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(MISTRAL_URL, json=charge, headers=entetes) as reponse:
+            async with session.post(AI_URL, json=charge, headers=entetes) as reponse:
                 donnees = await reponse.json(content_type=None)
                 if reponse.status >= 400:
                     detail = ai_detail_erreur(donnees)
-                    print(f"Mistral {reponse.status}: {detail}")
+                    print(f"{AI_LABEL} {reponse.status}: {detail}")
                     raise AIError(ai_message_erreur(reponse.status, detail, detailler))
 
-        choix = (donnees or {}).get("choices") or []
-        texte = ""
-        if choix:
-            texte = str((choix[0].get("message") or {}).get("content") or "").strip()
+        texte = _extraire_texte(donnees)
         if not texte:
             raise AIError("L'IA a renvoye une reponse vide.")
         return texte
@@ -1993,7 +2131,7 @@ async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=Fa
     except asyncio.TimeoutError:
         raise AIError("L'IA met trop de temps a repondre. Reessaie.")
     except aiohttp.ClientError as ex:
-        print(f"Mistral reseau: {ex}")
+        print(f"{AI_LABEL} reseau: {ex}")
         raise AIError("Impossible de joindre l'IA. Verifie la connexion du bot.")
 
 
@@ -5843,7 +5981,8 @@ def serialize_security_config(guild):
             "interval_hours": int(cfg.get("auto_backup_interval_hours") or 24),
             "last": cfg.get("auto_backup_last") or "",
         },
-        "ai": {**ai_cfg(gid), "configured": ai_available(), "model": MISTRAL_MODEL},
+        "ai": {**ai_cfg(gid), "configured": ai_available(),
+               "model": AI_MODEL, "provider": AI_PROVIDER, "provider_label": AI_LABEL},
         "logs_enabled": cfg.get("logs_enabled") if isinstance(cfg.get("logs_enabled"), dict) else {},
         "permissions": {
             "view_audit_log": perms.view_audit_log,
@@ -6726,7 +6865,7 @@ async def api_assistant(request):
 
     if not ai_available():
         raise web.HTTPServiceUnavailable(
-            text="L'assistant IA n'est pas configure. Definis MISTRAL_API_KEY cote bot.")
+            text=f"L'assistant IA n'est pas configure. Definis {AI_ENV_KEY} cote bot.")
 
     question = str(payload.get("question") or "").strip()
     if not question:
@@ -7306,18 +7445,20 @@ async def start_dashboard_api():
     # lignes datent du lancement, donc elles disent ce que CE processus a lu.
     diag = ai_diagnostic()
     if diag["configured"]:
-        print(f"  • IA prete — clef {diag['prefix']}… ({diag['length']} caracteres), "
-              f"modele {MISTRAL_MODEL}")
+        print(f"  • IA prete — {AI_LABEL}, clef {diag['prefix']}… "
+              f"({diag['length']} caracteres), modele {AI_MODEL}")
         if not diag["expected_prefix"]:
-            print("    ⚠️  Cette clef est courte pour une clef Mistral — verifie la copie.")
+            print(f"    ⚠️  Cette clef ne ressemble pas a une clef {AI_LABEL} — verifie la copie.")
+        if not AI_REGLAGES.get("gratuit"):
+            print(f"    ℹ️  {AI_LABEL} est facture a l'usage : surveille le credit du compte.")
     elif diag["similar_names"]:
         print(f"  ⚠️  IA non configuree — variables proches trouvees : "
               f"{', '.join(diag['similar_names'])}")
-        print("     Le bot lit exactement MISTRAL_API_KEY. Renomme la variable.")
+        print(f"     Le bot lit exactement {AI_ENV_KEY}. Renomme la variable.")
     elif diag["empty"]:
-        print("  ⚠️  IA non configuree — MISTRAL_API_KEY existe mais est vide.")
+        print(f"  ⚠️  IA non configuree — {AI_ENV_KEY} existe mais est vide.")
     else:
-        print("  ⚠️  IA non configuree — MISTRAL_API_KEY absente de ce processus.")
+        print(f"  ⚠️  IA non configuree — {AI_ENV_KEY} absente de ce processus.")
         print("     Ajoutee apres coup ? Les variables ne sont lues qu'au demarrage :")
         print("     redeploie le service pour qu'elle soit prise en compte.")
 
@@ -11967,27 +12108,27 @@ async def ia_oublier(i: discord.Interaction):
 def ai_conseil_configuration(diag):
     """
     Transforme le diagnostic brut en une consigne unique et actionnable.
-    Repeter « definis MISTRAL_API_KEY » a quelqu'un qui vient de le faire
+    Repeter « definis la clef » a quelqu'un qui vient de le faire
     ne l'aide pas : il faut lui dire ce qui cloche precisement.
     """
     if diag["similar_names"]:
         noms = ", ".join(f"`{n}`" for n in diag["similar_names"][:4])
         return ("Nom de variable incorrect",
                 f"L'hébergeur fournit {noms}, mais le bot lit exactement "
-                "`MISTRAL_API_KEY`. Renomme la variable, puis redémarre le bot.")
+                f"`{AI_ENV_KEY}`. Renomme la variable, puis redémarre le bot.")
     if diag["empty"]:
         return ("Variable vide",
-                "`MISTRAL_API_KEY` existe bien mais ne contient rien. "
+                f"`{AI_ENV_KEY}` existe bien mais ne contient rien. "
                 "Recolle la clef, puis redémarre le bot.")
     return ("Variable absente de ce processus",
-            "Le bot n'a **pas** vu `MISTRAL_API_KEY` au démarrage. Les variables "
+            f"Le bot n'a **pas** vu `{AI_ENV_KEY}` au démarrage. Les variables "
             "ne sont lues qu'au lancement : si tu l'as ajoutée après, **redéploie ou "
             "redémarre le service**. Vérifie aussi que la variable est posée sur *ce* "
             "service et dans *cet* environnement de l'hébergeur.")
 
 
 @ia_group.command(name="statut", description="Voir l'etat de l'IA")
-@app_commands.describe(verifier="Tester la clef par un vrai appel a l'API Mistral")
+@app_commands.describe(verifier="Tester la clef par un vrai appel a l'API")
 async def ia_statut(i: discord.Interaction, verifier: bool = False):
     gid = str(i.guild.id)
     reglages = ai_cfg(gid)
@@ -11997,7 +12138,8 @@ async def ia_statut(i: discord.Interaction, verifier: bool = False):
     embed.add_field(name="Etat", value="`Actif`" if reglages["enabled"] else "`Inactif`", inline=True)
     embed.add_field(name="Clef API",
                     value="`Configuree`" if diag["configured"] else "`Absente`", inline=True)
-    embed.add_field(name="Modele", value=f"`{MISTRAL_MODEL}`", inline=True)
+    embed.add_field(name="Modele", value=f"`{AI_MODEL}`", inline=True)
+    embed.add_field(name="Fournisseur", value=f"`{AI_LABEL}`", inline=True)
     embed.add_field(
         name="📍 Salons",
         value=(" ".join(f"<#{c}>" for c in reglages["channels"])

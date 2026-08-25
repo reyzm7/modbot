@@ -21,9 +21,14 @@ git clone https://github.com/reyzm7/modbot-site.git
 **Déploiement automatique au push :** `modbot` → Railway, `modbot-site` → Vercel.
 Attention, **Vercel suit `main`** : pousser une branche de travail ne déploie rien.
 
-**Une seule action reste côté humain :** définir `MISTRAL_API_KEY` dans
+**Une seule action reste côté humain :** poser une clef d'IA dans
 Railway → Variables, pour que les deux IA fonctionnent. Tout le reste marche
 sans elle.
+
+Deux fournisseurs sont câblés, le bot prend celui dont la clef est posée :
+`MISTRAL_API_KEY` (palier gratuit) ou `ANTHROPIC_API_KEY` (facturé à
+l'usage). Si les deux sont posées, Anthropic passe devant ; `AI_PROVIDER`
+tranche explicitement. Détail en §20.
 
 ### Chiffres au 10 août 2026 (après le lot §19)
 
@@ -712,8 +717,14 @@ fermé — il n'est plus atteignable au clavier.
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `MISTRAL_API_KEY` | *(vide)* | **Requise pour les deux IA.** Clef gratuite sur console.mistral.ai. Lue **au démarrage uniquement** : après l'avoir ajoutée, il faut redéployer. `/ia statut` dit ce que le processus voit réellement |
-| `MISTRAL_MODEL` | `mistral-small-latest` | Modèle utilisé |
+| `MISTRAL_API_KEY` | *(vide)* | Clef **gratuite** sur console.mistral.ai. Lue **au démarrage uniquement** : après l'avoir ajoutée, il faut redéployer. `/ia statut` dit ce que le processus voit réellement |
+| `MISTRAL_MODEL` | `mistral-large-latest` | Modèle Mistral |
+| `ANTHROPIC_API_KEY` | *(vide)* | Clef Claude. **Pas de palier gratuit** : facturé à l'usage, un compte sans crédit répond « credit balance is too low » |
+| `ANTHROPIC_MODEL` | `claude-sonnet-5` | Modèle Claude |
+| `AI_PROVIDER` | *(auto)* | Force `anthropic` ou `mistral`. Vide : Anthropic si sa clef existe, sinon Mistral |
+
+**Une clef suffit.** Sans aucune, tout le reste du bot fonctionne et les
+commandes IA expliquent ce qui manque.
 
 ### Fichiers à ne pas versionner (ajoutés)
 
@@ -2758,3 +2769,55 @@ Le test rejoue la réponse **exacte** de MyMemory qui a produit le bug.
 
 291/291.
 
+---
+
+## 20. Fournisseur d'IA interchangeable — 25 août 2026
+
+Le bot parlait à Anthropic, puis a été basculé sur Mistral pour le palier
+gratuit, puis on a redemandé Anthropic. Plutôt qu'un troisième aller-retour,
+**le fournisseur est devenu un réglage.**
+
+### Ce qui décide
+
+```
+AI_PROVIDER posé  →  ce fournisseur, même si sa clef manque
+                     (le diagnostic doit pouvoir dire « tu as demandé
+                      Anthropic, sa clef est absente »)
+sinon             →  Anthropic si ANTHROPIC_API_KEY existe
+                     sinon Mistral
+```
+
+`AI_PROVIDERS` (dans `bot.py`) porte tout ce qui diffère : nom de variable,
+modèle par défaut, URL, console, et si le fournisseur a un palier gratuit.
+Ajouter un troisième fournisseur revient à ajouter une entrée, plus
+`_charge_utile()` et `_extraire_texte()`.
+
+### Ce qui diffère entre les deux API
+
+| | Mistral | Anthropic |
+|---|---|---|
+| Consigne système | message de rôle `system` en tête | champ `system` séparé |
+| Authentification | `Authorization: Bearer` | `x-api-key` + `anthropic-version` |
+| Réponse | `choices[0].message.content` | blocs `content[]` de type `text` |
+| Coût | palier **gratuit** | **facturé à l'usage** |
+
+### Le piège du compte sans crédit
+
+Anthropic renvoie « credit balance is too low » en **400**, pas en 402. Sans
+traitement, ce cas tombait dans « requête invalide », ce qui envoie chercher
+un bug dans le bot alors qu'il n'y a qu'une carte à recharger.
+`ai_message_erreur()` le nomme, et ne propose pas de réessayer — c'est
+permanent tant que le compte n'est pas approvisionné.
+
+De même, un 429 n'annonce « ça se recharge tout seul » **que** si le
+fournisseur a un palier gratuit. Le promettre sur un compte payant serait
+faux.
+
+### Tests
+
+`test_ia.py` — 30 vérifications, sans réseau : choix du fournisseur dans les
+cinq configurations, format des requêtes et des réponses pour chaque API,
+et messages d'erreur nommant la bonne variable.
+
+`test_api.py` passe à **298/298** dans les quatre configurations : aucune
+clef, Anthropic seule, Mistral seule, les deux.
