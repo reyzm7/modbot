@@ -1609,6 +1609,19 @@ async def main():
             async with s.post(f"{BASE}{route}", json={"action": "warn"}) as r:
                 verifier(f"POST {route} sans jeton -> 401", r.status == 401, f"recu {r.status}")
 
+        print("\n--- Espace administrateur ---")
+        for route in ("/api/admin/admins", "/api/admin/stats", "/api/admin/database"):
+            async with s.get(f"{BASE}{route}") as r:
+                verifier(f"{route} sans jeton -> 401", r.status == 401, f"recu {r.status}")
+
+        async with s.get(f"{BASE}/api/admin/admins",
+                         headers={"Authorization": "Bearer faux-jeton"}) as r:
+            verifier("/api/admin/admins avec faux jeton -> 401", r.status == 401,
+                     f"recu {r.status}")
+            corps = await r.text()
+            verifier("aucun identifiant admin fuite dans l'erreur",
+                     "1189681599965573131" not in corps)
+
         # L'assistant IA relaie vers Anthropic : la clef ne doit jamais sortir
         async with s.get(f"{BASE}/api/health") as r:
             corps = await r.text()

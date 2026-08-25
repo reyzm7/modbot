@@ -7077,6 +7077,40 @@ async def api_admin_database(request):
         "sanctions": db_recent_sanctions(120),
     })
 
+async def api_admin_admins(request):
+    """
+    Liste des administrateurs du dashboard, en lecture seule.
+
+    La source de verite est la variable d'environnement DASHBOARD_ADMIN_IDS,
+    cote hebergeur. Elle n'est modifiable que la : une liste modifiable depuis
+    le navigateur permettrait a n'importe qui de s'y ajouter.
+    """
+    identity = await api_identity(request, admin_required=True)
+    moi = str(identity.get("user_id") or "")
+
+    admins = []
+    for admin_id in sorted(DASHBOARD_ADMIN_IDS):
+        nom = ""
+        # Le nom n'est connu que si le compte partage un serveur avec le bot.
+        try:
+            utilisateur = bot.get_user(int(admin_id))
+            nom = str(utilisateur) if utilisateur else ""
+        except (TypeError, ValueError):
+            pass
+        admins.append({
+            "id": admin_id,
+            "username": nom,
+            "is_you": admin_id == moi,
+        })
+
+    return api_json({
+        "ok": True,
+        "admins": admins,
+        "source": "DASHBOARD_ADMIN_IDS",
+        "editable": False,
+    }, request=request)
+
+
 async def api_admin_blacklist(request):
     identity = await api_identity(request, admin_required=True)
     payload = await request.json()
@@ -7225,6 +7259,7 @@ async def start_dashboard_api():
     # Administration
     app.router.add_get("/api/admin/stats", api_admin_stats)
     app.router.add_get("/api/admin/database", api_admin_database)
+    app.router.add_get("/api/admin/admins", api_admin_admins)
     app.router.add_post("/api/admin/blacklist", api_admin_blacklist)
 
     # ── Site web servi par le bot (optionnel mais recommande) ──────────
