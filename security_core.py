@@ -1068,6 +1068,209 @@ class CaptchaStore:
 
 
 # ════════════════════════════════════════════════════════════════════
+#  10. DETECTION D'ARNAQUES ET DE PUBLICITES DE NUKE
+# ════════════════════════════════════════════════════════════════════
+#
+# Un serveur s'est fait passer une publicite pour un service de nuke, dans
+# un salon reserve au staff, par un COMPTE BOT. Rien ne l'a arretee.
+#
+# Le principe retenu ici : aucun signal ne suffit seul. Un membre qui
+# ecrit « encore une arnaque au free nitro » ne doit rien declencher ; un
+# message qui cumule l'appat, le lien d'invitation, le lien externe et le
+# vocabulaire d'un service de nuke, si.
+#
+# Les motifs sont cherches sur le texte NORMALISE (voir normalize_text) :
+# « fr€€ n1tr0 » est donc vu comme « free nitro », comme le reste du
+# moteur anti-contournement.
+
+# Vendre ou vanter un service qui detruit des serveurs n'a aucun usage
+# legitime dans un salon Discord. C'est le signal le plus lourd.
+MOTIFS_NUKE = (
+    r"nuke\s*bot", r"raid\s*bot", r"nuker", r"server\s*nuke", r"nuke\s*(?:a\s*)?server",
+    r"mass\s*ban", r"mass\s*dm", r"spam\s*servers?", r"token\s*grab",
+    r"selfbot", r"raid\s*tool", r"griefing\s*bot", r"crash\s*(?:a\s*)?server",
+)
+
+# L'appat. Tres frequent, mais pas suffisant : on en parle aussi pour
+# prevenir les autres.
+MOTIFS_APPAT = (
+    r"free\s*nitro", r"nitro\s*free", r"nitro\s*gratuit", r"gratuit\s*nitro",
+    r"free\s*discord\s*nitro", r"nitro\s*giveaway\s*free",
+    r"steam\s*gift", r"free\s*steam", r"cs\s*?go\s*skins?\s*free",
+    r"claim\s*your\s*(?:free\s*)?nitro", r"recuperer?\s*ton\s*nitro",
+)
+
+# La pression : « clique vite », « offre limitee ».
+MOTIFS_URGENCE = (
+    r"click\s*here", r"clique\s*ici", r"claim\s*now", r"limited\s*offer",
+    r"offre\s*limitee", r"first\s*\d+\s*users?", r"hurry",
+)
+
+# Domaines qui se font passer pour Discord. Le motif cherche « discord »
+# colle a autre chose dans un nom de domaine.
+MOTIFS_FAUX_DISCORD = (
+    r"discord[a-z0-9-]*\.(?!com|gg|gift|media|net|app)[a-z]{2,}",
+    r"dlscord", r"discrod", r"discordapp\.(?!com|net)[a-z]{2,}",
+    r"disc0rd", r"d1scord",
+)
+
+_ARNAQUE_CACHE = {}
+
+
+def _compiler(motifs):
+    clef = id(motifs)
+    if clef not in _ARNAQUE_CACHE:
+        _ARNAQUE_CACHE[clef] = [re.compile(m, re.IGNORECASE) for m in motifs]
+    return _ARNAQUE_CACHE[clef]
+
+
+# Poids de chaque signal. Le seuil d'action est a 5 : il faut donc soit le
+# vocabulaire d'un service de nuke, soit l'appat combine a au moins deux
+# autres signaux. Un signal isole ne fait jamais agir.
+POIDS_SIGNAUX = {
+    "nuke": 5,
+    "appat": 3,
+    "faux_discord": 4,
+    "urgence": 1,
+    "invitation": 1,
+    "lien_externe": 1,
+    "mention_globale": 1,
+}
+
+SEUIL_ARNAQUE = 5
+
+_INVITE_RE = re.compile(
+    r"(?:discord(?:app)?\.com/invite|discord\.gg|discord\.me|dsc\.gg|invite\.gg)/[a-z0-9-]+",
+    re.IGNORECASE)
+_LIEN_RE = re.compile(r"https?://[^\s<>()\[\]]+", re.IGNORECASE)
+_MENTION_GLOBALE_RE = re.compile(r"@(?:everyone|here)")
+
+
+def detect_scam_payload(texte, extra_motifs=None):
+    """
+    Analyse un message et retourne ce qu'il contient de suspect.
+
+    Retourne un dict :
+        score    - somme des poids des signaux trouves
+        signaux  - liste des signaux, du plus lourd au plus leger
+        action   - True si le score atteint le seuil
+        extrait  - le premier motif reconnu, pour le journal
+
+    Le texte doit deja contenir le contenu ET les embeds : une publicite
+    de nuke vit surtout dans les embeds, jamais dans le corps du message.
+    """
+    brut = str(texte or "")
+    if not brut.strip():
+        return {"score": 0, "signaux": [], "action": False, "extrait": ""}
+
+    # Le meme moteur anti-contournement que le filtre de langage : les
+    # arnaques ecrivent « fr33 n1tr0 » exactement comme les insultes.
+    normalise = normalize_text(brut, leet=True)
+
+    signaux = []
+    extrait = ""
+
+    # Texte compacte : toute la ponctuation et les espaces retires. C'est
+    # ce qui attrape « f r e e   n i t r o » et « n-u-k-e b-o-t », que les
+    # motifs a espaces optionnels laissent passer des que la separation
+    # tombe ENTRE les lettres et non entre les mots.
+    compacte = re.sub(r"[^a-z0-9]", "", normalise)
+
+    def chercher(motifs, nom):
+        nonlocal extrait
+        for regex in _compiler(motifs):
+            trouve = regex.search(normalise) or regex.search(brut)
+            if trouve:
+                signaux.append(nom)
+                if not extrait:
+                    extrait = trouve.group(0)[:80]
+                return True
+        # Seconde passe sur le texte compacte. Les motifs y perdent leurs
+        # separateurs : « free\s*nitro » devient « freenitro ». Sans risque
+        # de faux positif — ces suites de lettres collees n'apparaissent
+        # dans aucun texte legitime.
+        for motif in motifs:
+            colle = re.sub(r"\s\*|\s\+|\s+", "", motif)
+            colle = colle.replace("(?:as)?", "").replace("(?:a)?", "")
+            try:
+                trouve = re.search(colle, compacte, re.IGNORECASE)
+            except re.error:
+                continue
+            if trouve:
+                signaux.append(nom)
+                if not extrait:
+                    extrait = trouve.group(0)[:80]
+                return True
+        return False
+
+    chercher(MOTIFS_NUKE, "nuke")
+    chercher(MOTIFS_APPAT, "appat")
+    chercher(MOTIFS_URGENCE, "urgence")
+
+    # Les faux domaines se cherchent sur le texte BRUT : la normalisation
+    # transforme les chiffres en lettres et ferait passer « d1scord » pour
+    # « discord », donc pour un domaine legitime.
+    for regex in _compiler(MOTIFS_FAUX_DISCORD):
+        if regex.search(brut):
+            signaux.append("faux_discord")
+            if not extrait:
+                extrait = regex.search(brut).group(0)[:80]
+            break
+
+    if _INVITE_RE.search(brut):
+        signaux.append("invitation")
+    if _MENTION_GLOBALE_RE.search(brut):
+        signaux.append("mention_globale")
+
+    # Un lien externe = qui ne pointe pas vers Discord.
+    for lien in _LIEN_RE.findall(brut):
+        bas = lien.lower()
+        if not any(d in bas for d in ("discord.com", "discord.gg", "discordapp.com",
+                                      "discord.media", "cdn.discordapp")):
+            signaux.append("lien_externe")
+            break
+
+    if extra_motifs:
+        for motif in extra_motifs:
+            motif = str(motif or "").strip().lower()
+            if motif and motif in normalise:
+                signaux.append("nuke")   # motif ajoute par le serveur : traite comme lourd
+                if not extrait:
+                    extrait = motif[:80]
+                break
+
+    score = sum(POIDS_SIGNAUX.get(s, 0) for s in set(signaux))
+    ordre = sorted(set(signaux), key=lambda s: -POIDS_SIGNAUX.get(s, 0))
+    return {
+        "score": score,
+        "signaux": ordre,
+        "action": score >= SEUIL_ARNAQUE,
+        "extrait": extrait,
+    }
+
+
+def message_complet(contenu, embeds=None):
+    """
+    Rassemble tout le texte visible d'un message.
+
+    Le corps SEUL ne suffit pas : la publicite de nuke qui a traverse les
+    protections tenait presque entierement dans ses embeds — titre,
+    description, champs, pied de page, et l'URL de l'auteur.
+    """
+    morceaux = [str(contenu or "")]
+    for embed in (embeds or []):
+        for valeur in (embed.get("title"), embed.get("description"),
+                       embed.get("url"), embed.get("footer"), embed.get("author")):
+            if valeur:
+                morceaux.append(str(valeur))
+        for champ in embed.get("fields") or []:
+            if isinstance(champ, dict):
+                morceaux.append(str(champ.get("name") or ""))
+                morceaux.append(str(champ.get("value") or ""))
+    return "\n".join(m for m in morceaux if m)
+
+
+# ════════════════════════════════════════════════════════════════════
 #  9. UTILITAIRES PARTAGES
 # ════════════════════════════════════════════════════════════════════
 

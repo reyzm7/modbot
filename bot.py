@@ -4284,6 +4284,167 @@ class VueTicketConfirmation(discord.ui.View):
                 pass
 
 # ════════════════════════════════════════════════
+#  ANTI-ARNAQUE ET PUBLICITES DE NUKE
+# ════════════════════════════════════════════════
+
+def antiscam_cfg(gid):
+    """Reglages, actifs par defaut : cette protection n'a pas de contrepartie."""
+    cfg = get_cfg(gid)
+    brut = cfg.get("antiscam") if isinstance(cfg.get("antiscam"), dict) else {}
+    return {
+        "enabled": brut.get("enabled", True) is not False,
+        "ban_bots": brut.get("ban_bots", True) is not False,
+        "trusted_bots": [str(x) for x in (brut.get("trusted_bots") or [])],
+        "extra_patterns": [str(x)[:60] for x in (brut.get("extra_patterns") or [])][:50],
+    }
+
+
+def texte_complet_message(message):
+    """Corps + embeds, sous la forme attendue par le detecteur."""
+    embeds = []
+    for embed in (message.embeds or []):
+        embeds.append({
+            "title": embed.title,
+            "description": embed.description,
+            "url": embed.url,
+            "footer": getattr(embed.footer, "text", None),
+            "author": getattr(embed.author, "name", None),
+            "fields": [{"name": f.name, "value": f.value} for f in (embed.fields or [])],
+        })
+    return sc.message_complet(message.content, embeds)
+
+
+async def _retirer_bot_malveillant(guild, membre, motif):
+    """
+    Bannit le bot et revoque son integration.
+
+    Bannir ne suffit pas toujours : un bot reste installe tant que son
+    integration existe, et peut etre reinvite par qui l'a ajoute. On
+    supprime donc aussi l'integration quand le bot en a le droit.
+    """
+    resultat = []
+    try:
+        await guild.ban(membre, reason=f"[ModBot Anti-arnaque] {motif}"[:500],
+                        delete_message_days=1)
+        resultat.append("banni")
+    except discord.Forbidden:
+        resultat.append("bannissement refuse (permissions)")
+    except Exception as ex:
+        resultat.append(f"echec du bannissement ({type(ex).__name__})")
+
+    if guild.me.guild_permissions.manage_guild:
+        try:
+            for integration in await guild.integrations():
+                compte = getattr(integration, "application", None)
+                bot_lie = getattr(compte, "user", None) if compte else None
+                if bot_lie and bot_lie.id == membre.id:
+                    await integration.delete(reason="[ModBot Anti-arnaque]")
+                    resultat.append("integration supprimee")
+                    break
+        except Exception:
+            pass
+    return ", ".join(resultat)
+
+
+async def verifier_arnaque(message):
+    """
+    Analyse un message et agit s'il s'agit d'une arnaque.
+
+    Retourne True si le message a ete traite, pour que l'appelant
+    s'arrete la.
+    """
+    guild = message.guild
+    if not guild:
+        return False
+    gid = str(guild.id)
+    reglages = antiscam_cfg(gid)
+    if not reglages["enabled"]:
+        return False
+
+    auteur = message.author
+    # Un bot explicitement declare de confiance n'est pas inspecte : c'est
+    # la soupape pour les bots utilitaires qui annoncent des giveaways.
+    if str(auteur.id) in reglages["trusted_bots"]:
+        return False
+    # ModBot ne s'analyse pas lui-meme.
+    if auteur.id == getattr(bot.user, "id", 0):
+        return False
+
+    detection = sc.detect_scam_payload(texte_complet_message(message),
+                                       extra_motifs=reglages["extra_patterns"])
+    if not detection["action"]:
+        return False
+
+    await handle_scam_message(message, detection)
+    return True
+
+
+async def handle_scam_message(message, detection):
+    """
+    Reagit a un message d'arnaque.
+
+    Le message part dans tous les cas. Ce qui change, c'est le sort de son
+    auteur : un bot est retire, un humain est seulement signale.
+    """
+    guild = message.guild
+    gid = str(guild.id)
+    reglages = antiscam_cfg(gid)
+    auteur = message.author
+    est_bot = bool(getattr(auteur, "bot", False))
+
+    # 1. Le message disparait, quel que soit l'auteur.
+    supprime = False
+    try:
+        await message.delete()
+        supprime = True
+    except Exception:
+        pass
+
+    # 2. Le sort de l'auteur.
+    sanction = "signale au staff"
+    if est_bot and reglages["ban_bots"]:
+        sanction = await _retirer_bot_malveillant(
+            guild, auteur, f"Publicite d'arnaque ({', '.join(detection['signaux'])})")
+    elif not est_bot:
+        # Un humain n'est JAMAIS banni sur une correspondance de motif :
+        # le cout d'un faux positif est trop eleve. On enregistre une
+        # infraction, l'echelle de sanctions habituelle fera le reste.
+        try:
+            INFRACTIONS.add(gid, auteur.id, "Publicite d'arnaque", points=3,
+                            source="antiscam")
+            sanction = "infraction enregistree (3 points)"
+        except Exception:
+            pass
+
+    champs = [
+        ("👤 Auteur", f"{auteur.mention} (`{auteur.id}`)"
+                      + (" — **compte bot**" if est_bot else "")),
+        ("📍 Salon", getattr(message.channel, "mention", "-")),
+        ("🎯 Score", f"`{detection['score']}` (seuil `{sc.SEUIL_ARNAQUE}`)"),
+        ("🚩 Signaux", ", ".join(detection["signaux"]) or "-"),
+        ("🔤 Extrait", f"`{detection['extrait'][:80]}`" if detection["extrait"] else "-"),
+        ("⚡ Sanction", sanction),
+        ("🗑️ Message", "supprime" if supprime else "non supprime"),
+    ]
+
+    await log_event(
+        guild, "security", "Publicite d'arnaque bloquee",
+        f"Un message a ete retire pour publicite d'arnaque ou de service de nuke.",
+        fields=champs, severity="critical", target=auteur)
+    dashboard_log("antiscam", guild, str(auteur), detection["extrait"])
+
+    # 3. Un bot qui vend du nuke est une tentative d'attaque, pas du spam :
+    #    les administrateurs sont prevenus comme pour un raid.
+    if est_bot:
+        await alerter_administrateurs(
+            guild,
+            "Bot malveillant retire",
+            f"**{auteur}** a publie une publicite pour un service de nuke ou "
+            f"une arnaque dans {getattr(message.channel, 'mention', 'un salon')}.",
+            fields=champs, acteur=auteur)
+
+
+# ════════════════════════════════════════════════
 #  IMAGES DES OPTIONS DE TICKET
 # ════════════════════════════════════════════════
 
@@ -6159,6 +6320,7 @@ def serialize_security_config(guild):
             "interval_hours": int(cfg.get("auto_backup_interval_hours") or 24),
             "last": cfg.get("auto_backup_last") or "",
         },
+        "antiscam": antiscam_cfg(gid),
         "ai": {**ai_cfg(gid), "configured": ai_available(),
                "model": AI_MODEL, "provider": AI_PROVIDER, "provider_label": AI_LABEL},
         "logs_enabled": cfg.get("logs_enabled") if isinstance(cfg.get("logs_enabled"), dict) else {},
@@ -6234,6 +6396,24 @@ async def api_save_guild_security(request):
                 normalize_filtered_word(w) for w in filt["custom_words"][:500] if str(w).strip()
             ]
             sc.clear_pattern_cache()
+
+    antiscam = payload.get("antiscam")
+    if isinstance(antiscam, dict):
+        courant = antiscam_cfg(gid)
+        if "enabled" in antiscam:
+            courant["enabled"] = bool(antiscam.get("enabled"))
+        if "ban_bots" in antiscam:
+            courant["ban_bots"] = bool(antiscam.get("ban_bots"))
+        if isinstance(antiscam.get("trusted_bots"), list):
+            # Uniquement des identifiants : un nom de bot ne prouve rien,
+            # n'importe qui peut renommer le sien.
+            courant["trusted_bots"] = [
+                str(parse_int(x)) for x in antiscam["trusted_bots"][:30] if parse_int(x)]
+        if isinstance(antiscam.get("extra_patterns"), list):
+            courant["extra_patterns"] = [
+                clean_short_text(x, "", 60) for x in antiscam["extra_patterns"][:50]
+                if str(x).strip()]
+        cfg["antiscam"] = courant
 
     captcha = payload.get("captcha")
     if isinstance(captcha, dict):
@@ -9799,10 +9979,68 @@ async def send_dashboard_member_event(member, departure=False):
             except Exception as ex2:
                 print(f"send_dashboard_member_event {member.guild.id} (sans carte): {ex2}")
 
+async def signaler_arrivee_bot(membre):
+    """
+    Un bot vient d'etre ajoute au serveur.
+
+    On ne le bannit PAS : ajouter un bot est une operation legitime, et
+    seul un administrateur peut le faire. Mais c'est aussi la porte
+    d'entree d'un raid — le bot qui a poste la publicite de nuke est
+    arrive comme celui-ci. On previent donc, avec de quoi decider.
+    """
+    guild = membre.guild
+    acteur, _ = await fetch_audit_actor(guild, discord.AuditLogAction.bot_add, membre.id)
+
+    perms = membre.guild_permissions
+    dangereuses = [nom for nom, actif in (
+        ("Administrateur", perms.administrator),
+        ("Gerer le serveur", perms.manage_guild),
+        ("Gerer les salons", perms.manage_channels),
+        ("Gerer les roles", perms.manage_roles),
+        ("Bannir", perms.ban_members),
+        ("Mentionner @everyone", perms.mention_everyone),
+    ) if actif]
+
+    champs = [
+        ("🤖 Bot", f"{membre.mention} (`{membre.id}`)"),
+        ("👤 Ajoute par", acteur.mention if acteur else "inconnu"),
+        ("🔑 Permissions sensibles",
+         "\n".join(f"• {p}" for p in dangereuses) if dangereuses else "aucune"),
+        ("📅 Compte cree le", fmt(membre.created_at)),
+    ]
+
+    await log_event(guild, "admin", "Bot ajoute au serveur",
+                    f"{membre.mention} a rejoint le serveur en tant qu'application.",
+                    fields=champs, severity="warning" if dangereuses else "info",
+                    target=membre, actor=acteur)
+
+    # L'anti-nuke compte l'ajout : plusieurs bots coup sur coup, c'est une
+    # prise de controle, pas une installation.
+    if acteur:
+        await guard_sensitive_action(
+            guild, acteur, "bot_add",
+            f"Ajout du bot {membre} ({membre.id})")
+
+    # Un bot administrateur merite un mot aux administrateurs, tout de suite.
+    if perms.administrator or perms.manage_guild:
+        await alerter_administrateurs(
+            guild, "Bot ajoute avec des permissions elevees",
+            f"**{membre}** vient d'etre ajoute avec des permissions qui lui "
+            "permettraient de nuire au serveur.",
+            fields=champs, acteur=acteur)
+
+
 @bot.event
 async def on_member_join(member):
     gid = str(member.guild.id)
     cfg = get_cfg(gid)
+
+    # Un bot qui arrive est l'evenement le plus lourd de consequences sur
+    # un serveur : il vient avec ses permissions. « bot_add » etait prevu
+    # cote anti-nuke mais n'etait declenche nulle part. Il l'est ici.
+    if member.bot:
+        await signaler_arrivee_bot(member)
+        return
 
     await send_dashboard_member_event(member, departure=False)
 
@@ -13528,7 +13766,16 @@ _en_cours: set = set()
 
 @bot.event
 async def on_message(message):
-    if message.author.bot or not message.guild:
+    if not message.guild:
+        return
+
+    # Les messages de bots etaient ignores en bloc. C'est par la qu'est
+    # passee la publicite de nuke : son auteur portait le badge APP.
+    # Ils sont maintenant inspectes par l'anti-arnaque, et par lui seul —
+    # le filtre de langage et l'anti-spam restent reserves aux humains.
+    if message.author.bot:
+        if message.author.id != getattr(bot.user, "id", 0):
+            await verifier_arnaque(message)
         return
 
     if message.id in _en_cours:
@@ -13559,8 +13806,14 @@ async def on_message(message):
         # anti-lien, anti-spam et filtre de langage. On le calcule une fois.
         immunise = est_immunise(message.author, gid)
 
-        # Anti-lien
-        if anti_link_enabled(cfg) and contains_forbidden_link(message.content):
+        # Anti-arnaque : avant l'anti-lien, parce qu'une publicite de nuke
+        # merite mieux qu'une simple suppression de lien.
+        if await verifier_arnaque(message):
+            return
+
+        # Anti-lien. Il lit desormais les embeds : la publicite qui est
+        # passee ne mettait presque rien dans le corps du message.
+        if anti_link_enabled(cfg) and contains_forbidden_link(texte_complet_message(message)):
             if not immunise and not message.author.guild_permissions.manage_messages:
                 if not await claim_message_by_delete(message):
                     return
