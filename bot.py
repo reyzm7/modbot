@@ -14286,6 +14286,7 @@ def vue_liens_modbot():
     for libelle, emoji, url in (
         ("Dashboard", "📊", DASHBOARD_SITE_URL),
         ("Wiki", "📚", f"{racine}/wiki.html"),
+        ("Conditions", "📜", f"{racine}/conditions.html"),
         ("Support", "💬", "https://discord.gg/CK8CbFtYuv"),
     ):
         vue.add_item(discord.ui.Button(label=libelle, emoji=emoji,
@@ -14378,6 +14379,13 @@ async def cmd_info(i: discord.Interaction):
     e.add_field(name="⚡ Progression des sanctions",
                 value="1️⃣ avertissement → 2️⃣ mute 4 h → 3️⃣ mute 24 h → 4️⃣ bannissement",
                 inline=False)
+    racine = site_base_url()
+    e.add_field(
+        name="📜 Conditions et données",
+        value=(f"[Conditions d'utilisation]({racine}/conditions.html) · "
+               f"[Confidentialité]({racine}/confidentialite.html)\n"
+               "-# Utiliser ModBot vaut acceptation de ces conditions."),
+        inline=False)
     e.set_footer(text=f"discord.py {discord.__version__} · Python "
                       f"{sys.version_info.major}.{sys.version_info.minor}")
 
