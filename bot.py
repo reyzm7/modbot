@@ -1162,11 +1162,37 @@ def priority_label(gid, priority):
     return f"{priority_emoji(priority)} {tr(gid, f'priority_{priority}')}"
 
 def normalize_ticket_question(item, fallback=None):
+    """
+    Une option de ticket.
+
+    `label` peut desormais etre VIDE : une option qui porte une image ou un
+    emoji se passe de texte. Discord l'accepte sur un bouton, jamais sur une
+    entree de menu deroulant — c'est build_ticket_components() qui choisit
+    la presentation en consequence.
+
+    `image` est l'URL d'une photo. Discord n'affiche pas d'image arbitraire
+    sur un composant : le bot en fait un emoji personnalise du serveur, et
+    range son identifiant dans `emoji`. L'URL reste pour pouvoir refaire
+    l'emoji si quelqu'un l'a supprime.
+    """
     fallback = fallback or {}
+    item = item if isinstance(item, dict) else {}
+
+    # Le libelle est facultatif, mais seulement s'il reste de quoi cliquer.
+    label = clean_short_text(item.get("label"), "", 80)
+    emoji = clean_emoji(item.get("emoji"), "")
+    image = clean_short_text(item.get("image"), "", 400)
+    if not image.startswith(("http://", "https://", "data:image/")):
+        image = ""
+    if not label and not emoji and not image:
+        label = fallback.get("label") or "Ticket"
+        emoji = fallback.get("emoji") or "🎫"
+
     return {
-        "emoji": clean_emoji(item.get("emoji") if isinstance(item, dict) else None, fallback.get("emoji") or "🎫"),
-        "label": clean_short_text(item.get("label") if isinstance(item, dict) else None, fallback.get("label") or "Ticket", 80),
-        "desc": clean_short_text(item.get("desc") if isinstance(item, dict) else None, fallback.get("desc") or "Ouvrir un ticket", 100),
+        "emoji": emoji,
+        "image": image,
+        "label": label,
+        "desc": clean_short_text(item.get("desc"), fallback.get("desc") or "", 100),
     }
 
 def get_ticket_questions(gid):
@@ -4257,17 +4283,150 @@ class VueTicketConfirmation(discord.ui.View):
             except Exception:
                 pass
 
+# ════════════════════════════════════════════════
+#  IMAGES DES OPTIONS DE TICKET
+# ════════════════════════════════════════════════
+
+# Prefixe des emoji crees par le bot. Sert a les reconnaitre pour les
+# reutiliser ou les nettoyer, sans toucher a ceux du serveur.
+EMOJI_TICKET_PREFIXE = "modbot_tkt_"
+
+
+async def _telecharger_image(url):
+    """Octets d'une image, depuis une URL ou une donnee en ligne."""
+    if url.startswith("data:image/"):
+        import base64
+        try:
+            return base64.b64decode(url.split(",", 1)[1])
+        except Exception:
+            return None
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as reponse:
+                if reponse.status != 200:
+                    return None
+                # Discord refuse au-dela de 256 Ko pour un emoji
+                donnees = await reponse.content.read(300 * 1024)
+                return donnees if len(donnees) <= 256 * 1024 else None
+    except Exception:
+        return None
+
+
+async def image_en_emoji(guild, url, index):
+    """
+    Transforme une image en emoji personnalise du serveur.
+
+    Retourne la forme `<:nom:id>` utilisable sur un composant, ou "" si
+    l'operation echoue. Chaque echec est silencieux du point de vue du
+    membre : l'option garde alors son emoji Unicode, ou son libelle.
+    """
+    if not url or not guild:
+        return ""
+    if not guild.me.guild_permissions.manage_emojis:
+        return ""
+
+    nom = f"{EMOJI_TICKET_PREFIXE}{index}"
+
+    # Deja cree lors d'une publication precedente : on le reutilise plutot
+    # que d'epuiser les emplacements d'emoji du serveur.
+    for emoji in guild.emojis:
+        if emoji.name == nom:
+            return str(emoji)
+
+    donnees = await _telecharger_image(url)
+    if not donnees:
+        return ""
+    try:
+        emoji = await guild.create_custom_emoji(
+            name=nom, image=donnees,
+            reason="[ModBot] Image d'option de ticket")
+        return str(emoji)
+    except discord.Forbidden:
+        return ""
+    except discord.HTTPException as ex:
+        print(f"image_en_emoji {guild.id}: {ex}")
+        return ""
+
+
+async def preparer_emojis_ticket(guild):
+    """
+    Materialise les images des options avant de publier le panneau.
+
+    Appele au moment de la publication, pas a chaque affichage : creer un
+    emoji est une ecriture sur le serveur, elle n'a rien a faire dans le
+    chemin de rendu.
+    """
+    questions = get_ticket_questions(guild.id)
+    change = False
+    for index, q in enumerate(questions):
+        if q.get("image") and not str(q.get("emoji", "")).startswith("<"):
+            emoji = await image_en_emoji(guild, q["image"], index)
+            if emoji:
+                q["emoji"] = emoji
+                change = True
+    if change:
+        set_ticket_questions(guild.id, questions)
+    return questions
+
+
+def ticket_panel_en_boutons(questions):
+    """
+    Vrai si le panneau doit s'afficher en boutons.
+
+    Une entree de menu deroulant EXIGE un libelle non vide ; un bouton s'en
+    passe des qu'il porte un emoji. Une option sans texte impose donc les
+    boutons. Au-dela de 25, Discord n'accepte plus de boutons : on repasse
+    au menu, et les options sans libelle recoivent un texte de repli.
+    """
+    if len(questions) > 25:
+        return False
+    return any(not q.get("label") for q in questions)
+
+
+class BoutonCategorieTicket(discord.ui.Button):
+    """Une option de ticket presentee en bouton : le libelle est facultatif."""
+
+    def __init__(self, index, question):
+        emoji = question.get("emoji") or None
+        label = question.get("label") or None
+        # Discord refuse un bouton sans libelle NI emoji : on garantit l'un.
+        if not emoji and not label:
+            label = "Ticket"
+        super().__init__(
+            label=label, emoji=emoji,
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"tkt_cat_{index}", row=index // 5)
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction):
+        questions = get_ticket_questions(interaction.guild.id)
+        if self.index >= len(questions):
+            return await safe_ephemeral(interaction, embed=E(
+                "Option introuvable",
+                "Cette option de ticket n'existe plus. Previens un administrateur.",
+                0xED4245))
+        try:
+            await interaction.response.send_modal(ModalMotifTicket(questions[self.index]))
+        except Exception:
+            pass
+
+
 class TicketCategorySelect(discord.ui.Select):
     def __init__(self, gid=None):
         self.gid = str(gid) if gid else None
         questions = get_ticket_questions(self.gid)
         options = []
         for idx, q in enumerate(questions[:MAX_TICKET_OPTIONS]):
+            # Une entree de menu ne peut pas avoir de libelle vide : quand
+            # l'option n'en a pas, on retombe sur sa description, puis sur
+            # un numero. Le panneau en boutons, lui, accepte le vide.
+            label = q.get("label") or q.get("desc") or f"Option {idx + 1}"
             options.append(discord.SelectOption(
-                label=q["label"][:100],
-                description=(q.get("desc") or "Ouvrir un ticket")[:100],
+                label=label[:100],
+                description=(q.get("desc") or "")[:100] or None,
                 value=str(idx),
-                emoji=q.get("emoji") or "🎫",
+                emoji=q.get("emoji") or None,
             ))
         if not options:
             options = [discord.SelectOption(label="Ticket", description="Ouvrir un ticket", value="0", emoji="🎫")]
@@ -4288,10 +4447,23 @@ class TicketCategorySelect(discord.ui.Select):
             pass
 
 class VueChoixCategorie(discord.ui.View):
+    """
+    Panneau de choix de categorie.
+
+    Deux presentations, choisies par les donnees et non par un reglage :
+    des qu'une option se passe de libelle, on passe en boutons — seule
+    forme ou Discord accepte un composant sans texte.
+    """
+
     def __init__(self, gid=None):
         super().__init__(timeout=None)
         self.gid = str(gid) if gid else None
-        self.add_item(TicketCategorySelect(self.gid))
+        questions = get_ticket_questions(self.gid) if self.gid else []
+        if self.gid and ticket_panel_en_boutons(questions):
+            for index, question in enumerate(questions[:MAX_TICKET_OPTIONS]):
+                self.add_item(BoutonCategorieTicket(index, question))
+        else:
+            self.add_item(TicketCategorySelect(self.gid))
 
 # ════════════════════════════════════════════════
 #  VIEW — REPORT (persistante ✅) — 4 boutons directs
@@ -4596,6 +4768,9 @@ async def cleanup_configured_system_messages(guild):
 
 async def deploy_fresh_ticket_panel(guild, channel):
     gid = str(guild.id)
+    # Les images des options deviennent des emoji du serveur ici, une fois,
+    # et non a chaque affichage : creer un emoji est une ecriture.
+    await preparer_emojis_ticket(guild)
     await delete_system_message(guild, "salon_tickets", "status")
     cfg = get_cfg(gid)
     old_msg_id = cfg.get("salon_tickets_panel_message_id")
@@ -5589,7 +5764,10 @@ async def apply_dashboard_config(guild, payload):
     if "welcome_system" in payload:
         cfg["welcome_system"] = sanitize_welcome_system(payload.get("welcome_system"))
 
-    for key in ("recurring_messages", "social_relays", "tournament"):
+    if "social_relays" in payload:
+        cfg["social_relays"] = sanitize_social_relays(payload.get("social_relays"))
+
+    for key in ("recurring_messages", "tournament"):
         if key in payload:
             cfg[key] = payload[key]
 
@@ -6611,6 +6789,173 @@ async def api_role_action(request):
 #  API — GIVEAWAYS
 # ════════════════════════════════════════════════
 
+# ════════════════════════════════════════════════
+#  API — CAPTCHA
+# ════════════════════════════════════════════════
+
+async def api_captcha_setup(request):
+    """
+    Met le captcha en place, en creant ce qui manque.
+
+    Meme travail que `/captcha activer`, declenche depuis le dashboard :
+    role de verification, salon dedie, panneau publie. Les fonctions sont
+    partagees avec la commande — une seule verite pour deux entrees.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if not guild.me.guild_permissions.manage_roles:
+        raise web.HTTPForbidden(
+            text="ModBot a besoin de « Gerer les roles » pour attribuer le role de verification.")
+
+    cree = []
+    role = guild.get_role(parse_int(payload.get("role_id")) or 0)
+    salon = guild.get_channel(parse_int(payload.get("channel_id")) or 0)
+
+    try:
+        if role is None:
+            role, nouveau = await _assurer_role_verifie(guild)
+            if nouveau:
+                cree.append("role")
+        if salon is None:
+            salon, nouveau = await _assurer_salon_verification(guild, role)
+            if nouveau:
+                cree.append("salon")
+    except discord.Forbidden:
+        raise web.HTTPForbidden(
+            text="ModBot ne peut pas creer le role ou le salon. "
+                 "Verifie « Gerer les roles » et « Gerer les salons ».")
+    except discord.HTTPException as ex:
+        raise web.HTTPBadRequest(text=f"Discord a refuse : {ex}")
+
+    if role >= guild.me.top_role:
+        raise web.HTTPBadRequest(
+            text=f"Le role {role.name} est au-dessus de ModBot dans la hierarchie : "
+                 "deplace le role de ModBot plus haut, sinon il ne pourra pas l'attribuer.")
+
+    gid = str(guild.id)
+    update_cfg(gid, "captcha_enabled", True)
+    update_cfg(gid, "captcha_role", str(role.id))
+    update_cfg(gid, "captcha_channel", str(salon.id))
+
+    message_id = ""
+    if payload.get("publish", True):
+        try:
+            message = await salon.send(
+                embed=build_captcha_panel_embed(guild, captcha_cfg(gid)),
+                view=VueCaptchaPanel())
+            message_id = str(message.id)
+        except discord.Forbidden:
+            raise web.HTTPForbidden(
+                text=f"ModBot ne peut pas ecrire dans #{salon.name}.")
+
+    auteur = identity.get("username") or identity.get("user_id") or "Dashboard"
+    dashboard_log("captcha_setup", guild, auteur, f"role={role.name} salon={salon.name}")
+    await log_event(guild, "admin", "Captcha active",
+                    "La verification humaine a ete mise en place depuis le dashboard.",
+                    fields=[("👤 Par", auteur), ("🎭 Role", role.mention),
+                            ("📍 Salon", salon.mention)],
+                    severity="success")
+
+    return api_json({
+        "ok": True,
+        "created": cree,
+        "message_id": message_id,
+        "captcha": {**captcha_cfg(gid), "pending": CAPTCHA_STORE.pending(gid),
+                    "image": bool(PIL_AVAILABLE)},
+        "role": serialize_role(role),
+        "channel": serialize_text_channel(salon),
+    }, request=request)
+
+
+async def api_captcha_panel(request):
+    """Republie le panneau, sans rien recreer."""
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    gid = str(guild.id)
+    reglages = captcha_cfg(gid)
+
+    if not reglages["channel_id"] or not reglages["channel_id"].isdigit():
+        raise web.HTTPBadRequest(text="Aucun salon de verification n'est configure.")
+    salon = guild.get_channel(int(reglages["channel_id"]))
+    if not salon:
+        raise web.HTTPBadRequest(text="Le salon de verification n'existe plus.")
+
+    try:
+        message = await salon.send(
+            embed=build_captcha_panel_embed(guild, reglages), view=VueCaptchaPanel())
+    except discord.Forbidden:
+        raise web.HTTPForbidden(text=f"ModBot ne peut pas ecrire dans #{salon.name}.")
+
+    dashboard_log("captcha_panel", guild, identity.get("username"), salon.name)
+    return api_json({"ok": True, "message_id": str(message.id),
+                     "channel": serialize_text_channel(salon)}, request=request)
+
+
+async def api_captcha_lock(request):
+    """
+    Masque les salons aux membres non verifies.
+
+    C'est l'etape qui rend la verification reellement bloquante : sans
+    elle, un robot qui ignore le panneau voit quand meme tout le serveur.
+    Seules les categories et les salons hors categorie sont touches — les
+    salons d'une categorie en heritent.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    gid = str(guild.id)
+    reglages = captcha_cfg(gid)
+
+    if not reglages["role_id"] or not reglages["role_id"].isdigit():
+        raise web.HTTPBadRequest(text="Active d'abord le captcha : aucun role de verification.")
+    role = guild.get_role(int(reglages["role_id"]))
+    if not role:
+        raise web.HTTPBadRequest(text="Le role de verification n'existe plus.")
+    if not guild.me.guild_permissions.manage_channels:
+        raise web.HTTPForbidden(text="ModBot a besoin de « Gerer les salons ».")
+
+    salon_verif = parse_int(reglages["channel_id"]) or 0
+    modifies, echecs = 0, 0
+    for salon in list(guild.channels):
+        if salon.id == salon_verif:
+            continue
+        if isinstance(salon, discord.CategoryChannel) or salon.category is None:
+            try:
+                await salon.set_permissions(guild.default_role, view_channel=False,
+                                            reason="[ModBot] Captcha — verrouillage")
+                await salon.set_permissions(role, view_channel=True,
+                                            reason="[ModBot] Captcha — acces verifie")
+                modifies += 1
+            except Exception:
+                echecs += 1
+
+    auteur = identity.get("username") or identity.get("user_id") or "Dashboard"
+    dashboard_log("captcha_lock", guild, auteur, f"{modifies} salon(s)")
+    await log_event(guild, "admin", "Salons verrouilles par le captcha",
+                    f"`{modifies}` categorie(s) et salon(s) sont desormais invisibles "
+                    "pour les membres non verifies.",
+                    fields=[("👤 Par", auteur)], severity="warning")
+
+    return api_json({"ok": True, "locked": modifies, "failed": echecs}, request=request)
+
+
+async def api_captcha_disable(request):
+    """Coupe la verification et oublie les codes en attente."""
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    gid = str(guild.id)
+    update_cfg(gid, "captcha_enabled", False)
+    CAPTCHA_STORE.clear(gid)
+    dashboard_log("captcha_disable", guild, identity.get("username"), "")
+    await log_event(guild, "admin", "Captcha desactive",
+                    "La verification humaine a ete coupee depuis le dashboard.",
+                    severity="warning")
+    return api_json({"ok": True, "captcha": captcha_cfg(gid)}, request=request)
+
+
 async def api_list_giveaways(request):
     identity = await api_identity(request)
     guild = await api_guild_from_request(request, identity)
@@ -7373,6 +7718,12 @@ async def start_dashboard_api():
     app.router.add_post("/api/guilds/{guild_id}/roles/{role_id}/action", api_role_action)
 
     # Giveaways
+    # Captcha : mise en place complete depuis le dashboard
+    app.router.add_post("/api/guilds/{guild_id}/captcha/setup", api_captcha_setup)
+    app.router.add_post("/api/guilds/{guild_id}/captcha/panel", api_captcha_panel)
+    app.router.add_post("/api/guilds/{guild_id}/captcha/lock", api_captcha_lock)
+    app.router.add_post("/api/guilds/{guild_id}/captcha/disable", api_captcha_disable)
+
     app.router.add_get("/api/guilds/{guild_id}/giveaways", api_list_giveaways)
     app.router.add_post("/api/guilds/{guild_id}/giveaways", api_create_giveaway)
     app.router.add_put("/api/guilds/{guild_id}/giveaways/{giveaway_id}", api_update_giveaway)
@@ -7485,6 +7836,70 @@ def recurring_last_sent_ts(value):
         return datetime.fromisoformat(str(value)).timestamp()
     except Exception:
         return 0
+
+def sanitize_social_relays(brut):
+    """
+    Valide les relais venus du dashboard.
+
+    Le champ qui compte ici : `ping_roles`. Une mention de role part a tout
+    le serveur — on n'accepte donc que des identifiants numeriques, et on
+    borne leur nombre. Une liste libre laisserait passer « @everyone » sous
+    forme de texte, qui serait interprete a l'envoi.
+    """
+    if not isinstance(brut, list):
+        return []
+    relais = []
+    for item in brut[:12]:
+        if not isinstance(item, dict):
+            continue
+        roles = []
+        for r in (item.get("ping_roles") or [])[:8]:
+            rid = parse_int(r)
+            if rid:
+                roles.append(str(rid))
+        relais.append({
+            "platform": clean_short_text(item.get("platform"), "Reseau", 40),
+            "link": clean_short_text(item.get("link"), "", 500),
+            "channel_id": str(parse_int(item.get("channel_id")) or ""),
+            "enabled": bool(item.get("enabled")),
+            "ping_roles": roles,
+            "ping_everyone": bool(item.get("ping_everyone")),
+        })
+    return relais
+
+
+def mentions_relais(guild, relay):
+    """
+    Texte de mention et permissions associees.
+
+    Discord n'envoie la notification que si la mention est dans le CONTENU
+    du message, jamais dans un embed — d'ou le couple (contenu, allowed).
+    Les deux doivent concorder : mentionner un role sans l'autoriser produit
+    un texte bleu qui ne previent personne.
+    """
+    roles = []
+    for rid in (relay.get("ping_roles") or []):
+        if not str(rid).isdigit():
+            continue
+        role = guild.get_role(int(rid))
+        if role and role.mentionable is False and not guild.me.guild_permissions.mention_everyone:
+            # Role non mentionnable et bot sans le droit : la mention
+            # s'afficherait sans prevenir personne. On la retire.
+            continue
+        if role:
+            roles.append(role)
+
+    morceaux = []
+    everyone = bool(relay.get("ping_everyone")) and guild.me.guild_permissions.mention_everyone
+    if everyone:
+        morceaux.append("@everyone")
+    morceaux.extend(r.mention for r in roles)
+
+    if not morceaux:
+        return "", discord.AllowedMentions.none()
+    return " ".join(morceaux), discord.AllowedMentions(
+        everyone=everyone, roles=roles or False, users=False)
+
 
 def _social_platform_palette(platform):
     p = str(platform or "").lower()
@@ -7619,8 +8034,10 @@ async def dashboard_social_loop():
                             pass
                     view = discord.ui.View()
                     view.add_item(discord.ui.Button(label="Ouvrir" if "twitch" not in platform.lower() else "Watch Stream", url=snapshot.get("url") or link))
+                    contenu, autorisees = mentions_relais(guild, relay)
                     try:
-                        await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+                        await channel.send(content=contenu or None, embed=embed, view=view,
+                                           allowed_mentions=autorisees)
                     except Exception:
                         continue
                     states[key] = snapshot
@@ -9516,6 +9933,8 @@ async def on_voice_state_update(member, before, after):
             if secs > 0:
                 add_voice_min(uid, gid, secs)
 
+    await journaliser_vocal(member, before, after)
+
 # ════════════════════════════════════════════════════════════════════
 #  SECURITE — ANTI-RAID / ANTI-NUKE / LOGS / BACKUPS
 # ════════════════════════════════════════════════════════════════════
@@ -9708,6 +10127,12 @@ LOG_CATEGORIES = {
     "roles":       {"key": "log_channel_roles",       "fr": "Roles",            "en": "Roles",           "emoji": "🎭", "defaut": False},
     "channels":    {"key": "log_channel_channels",    "fr": "Salons",           "en": "Channels",        "emoji": "📁", "defaut": False},
     "permissions": {"key": "log_channel_permissions", "fr": "Permissions",      "en": "Permissions",     "emoji": "🔑", "defaut": False},
+    "server":      {"key": "log_channel_server",      "fr": "Serveur",          "en": "Server",          "emoji": "🏠", "defaut": True},
+    "invites":     {"key": "log_channel_invites",     "fr": "Invitations",      "en": "Invites",         "emoji": "🔗", "defaut": False},
+    "threads":     {"key": "log_channel_threads",     "fr": "Fils",             "en": "Threads",         "emoji": "🧵", "defaut": False},
+    "voice":       {"key": "log_channel_voice",       "fr": "Vocal",            "en": "Voice",           "emoji": "🔊", "defaut": False},
+    "events":      {"key": "log_channel_events",      "fr": "Evenements",       "en": "Events",          "emoji": "📅", "defaut": False},
+    "automod":     {"key": "log_channel_automod",     "fr": "Automod Discord",  "en": "Discord automod", "emoji": "🤖", "defaut": True},
 }
 
 def log_category_enabled(gid, category):
@@ -10799,6 +11224,27 @@ async def on_member_update(before, after):
                 guild, actor, "role_update",
                 f"role administrateur donne a {after} ({after.id})",
             )
+
+    # Exclusion temporaire : elle n'a pas d'evenement propre, elle se lit
+    # sur la date de fin. C'est une sanction, elle va en « moderation ».
+    avant_timeout = getattr(before, "timed_out_until", None)
+    apres_timeout = getattr(after, "timed_out_until", None)
+    if avant_timeout != apres_timeout:
+        acteur, _ = await fetch_audit_actor(
+            after.guild, discord.AuditLogAction.member_update, after.id)
+        if apres_timeout and apres_timeout > discord.utils.utcnow():
+            reste = int((apres_timeout - discord.utils.utcnow()).total_seconds() // 60)
+            await log_event(
+                after.guild, "moderation", "Membre exclu temporairement",
+                f"{after.mention} ne peut plus parler.",
+                fields=[("⏱️ Duree restante", sc.human_duration(reste)),
+                        ("📅 Fin", fmt(apres_timeout))],
+                severity="warning", target=after, actor=acteur)
+        elif avant_timeout:
+            await log_event(
+                after.guild, "moderation", "Exclusion temporaire levee",
+                f"{after.mention} peut de nouveau parler.",
+                severity="success", target=after, actor=acteur)
 
     if before.nick != after.nick:
         await log_event(
@@ -12380,6 +12826,289 @@ def detect_message_content(message, gid):
 #  BOUCLES DE FOND SECURITE
 # ════════════════════════════════════════════════
 
+# ════════════════════════════════════════════════════════════════════
+#  JOURNAL — EVENEMENTS COMPLEMENTAIRES
+#  Le vocal, les fils, les invitations, les emoji, les evenements
+#  planifies, l'automodration Discord et les reglages du serveur.
+# ════════════════════════════════════════════════════════════════════
+
+async def journaliser_vocal(member, before, after):
+    """
+    Arrivee, depart, changement de salon, micro et casque.
+
+    Un serveur actif produit ici beaucoup de lignes : la categorie est
+    donc coupee par defaut. Elle sert surtout aux enquetes ponctuelles.
+    """
+    if member.bot:
+        return
+    guild = member.guild
+
+    if before.channel is None and after.channel is not None:
+        await log_event(guild, "voice", "Connexion vocale",
+                        f"{member.mention} a rejoint {after.channel.mention}.",
+                        severity="info", target=member)
+    elif before.channel is not None and after.channel is None:
+        await log_event(guild, "voice", "Deconnexion vocale",
+                        f"{member.mention} a quitte {before.channel.mention}.",
+                        severity="info", target=member)
+    elif before.channel != after.channel:
+        await log_event(guild, "voice", "Changement de salon vocal",
+                        f"{member.mention} est passe de {before.channel.mention} "
+                        f"a {after.channel.mention}.",
+                        severity="info", target=member)
+    # Une coupure imposee par un moderateur se distingue d'une coupure
+    # choisie : ce sont deux champs differents cote Discord.
+    elif before.mute != after.mute or before.deaf != after.deaf:
+        etat = []
+        if before.mute != after.mute:
+            etat.append("micro coupe" if after.mute else "micro rendu")
+        if before.deaf != after.deaf:
+            etat.append("casque coupe" if after.deaf else "casque rendu")
+        acteur, _ = await fetch_audit_actor(
+            guild, discord.AuditLogAction.member_update, member.id)
+        await log_event(guild, "voice", "Moderation vocale",
+                        f"{member.mention} : {', '.join(etat)}.",
+                        severity="warning", target=member, actor=acteur)
+
+
+@bot.event
+async def on_guild_update(before, after):
+    """Nom, icone, niveau de verification, salons systeme."""
+    changements = []
+    if before.name != after.name:
+        changements.append(("📛 Nom", f"`{before.name}` → `{after.name}`"))
+    if str(before.verification_level) != str(after.verification_level):
+        changements.append(("🔒 Verification",
+                            f"`{before.verification_level}` → `{after.verification_level}`"))
+    if before.icon != after.icon:
+        changements.append(("🖼️ Icone", "modifiee"))
+    if before.owner_id != after.owner_id:
+        changements.append(("👑 Proprietaire", f"<@{before.owner_id}> → <@{after.owner_id}>"))
+    if before.afk_channel != after.afk_channel:
+        changements.append(("💤 Salon AFK",
+                            f"{before.afk_channel} → {after.afk_channel}"))
+    if not changements:
+        return
+    acteur, _ = await fetch_audit_actor(after, discord.AuditLogAction.guild_update)
+    await log_event(after, "server", "Reglages du serveur modifies",
+                    "Un parametre general du serveur a change.",
+                    fields=changements, severity="warning", actor=acteur)
+
+
+@bot.event
+async def on_guild_emojis_update(guild, before, after):
+    ajoutes = [e for e in after if e not in before]
+    retires = [e for e in before if e not in after]
+    if not ajoutes and not retires:
+        return
+    # Les emoji crees par le bot pour les options de ticket ne sont pas
+    # une action humaine : les signaler ferait du bruit a chaque panneau.
+    ajoutes = [e for e in ajoutes if not e.name.startswith(EMOJI_TICKET_PREFIXE)]
+    retires = [e for e in retires if not e.name.startswith(EMOJI_TICKET_PREFIXE)]
+    if not ajoutes and not retires:
+        return
+    acteur, _ = await fetch_audit_actor(guild, discord.AuditLogAction.emoji_create)
+    champs = []
+    if ajoutes:
+        champs.append(("➕ Ajoutes", ", ".join(f"`:{e.name}:`" for e in ajoutes)[:1024]))
+    if retires:
+        champs.append(("➖ Retires", ", ".join(f"`:{e.name}:`" for e in retires)[:1024]))
+    await log_event(guild, "server", "Emoji du serveur modifies", "",
+                    fields=champs, severity="info", actor=acteur)
+
+
+@bot.event
+async def on_guild_stickers_update(guild, before, after):
+    if len(before) == len(after):
+        return
+    sens = "ajoute" if len(after) > len(before) else "retire"
+    await log_event(guild, "server", "Autocollants modifies",
+                    f"Un autocollant a ete {sens}.",
+                    severity="info")
+
+
+@bot.event
+async def on_invite_create(invite):
+    if not invite.guild:
+        return
+    expire = fmt(invite.expires_at) if invite.expires_at else "jamais"
+    await log_event(
+        invite.guild, "invites", "Invitation creee",
+        f"Une nouvelle invitation a ete generee.",
+        fields=[("🔗 Code", f"`{invite.code}`"),
+                ("📍 Salon", getattr(invite.channel, "mention", "-")),
+                ("♾️ Utilisations max", str(invite.max_uses or "illimite")),
+                ("⏱️ Expire", expire)],
+        severity="info", actor=invite.inviter)
+
+
+@bot.event
+async def on_invite_delete(invite):
+    if not invite.guild:
+        return
+    acteur, _ = await fetch_audit_actor(invite.guild, discord.AuditLogAction.invite_delete)
+    await log_event(invite.guild, "invites", "Invitation supprimee",
+                    f"L'invitation `{invite.code}` n'est plus valable.",
+                    severity="info", actor=acteur)
+
+
+@bot.event
+async def on_thread_create(thread):
+    await log_event(
+        thread.guild, "threads", "Fil cree",
+        f"{thread.mention} a ete ouvert dans "
+        f"{getattr(thread.parent, 'mention', 'un salon')}.",
+        severity="info", actor=thread.owner)
+
+
+@bot.event
+async def on_thread_delete(thread):
+    acteur, _ = await fetch_audit_actor(thread.guild, discord.AuditLogAction.thread_delete)
+    await log_event(thread.guild, "threads", "Fil supprime",
+                    f"Le fil **{thread.name}** a ete supprime.",
+                    severity="warning", actor=acteur)
+
+
+@bot.event
+async def on_thread_update(before, after):
+    changements = []
+    if before.name != after.name:
+        changements.append(("📛 Nom", f"`{before.name}` → `{after.name}`"))
+    if before.archived != after.archived:
+        changements.append(("📦 Archive", "oui" if after.archived else "non"))
+    if before.locked != after.locked:
+        changements.append(("🔒 Verrouille", "oui" if after.locked else "non"))
+    if not changements:
+        return
+    acteur, _ = await fetch_audit_actor(after.guild, discord.AuditLogAction.thread_update)
+    await log_event(after.guild, "threads", "Fil modifie",
+                    f"{after.mention} a change.",
+                    fields=changements, severity="info", actor=acteur)
+
+
+@bot.event
+async def on_bulk_message_delete(messages):
+    """
+    Suppression en masse : un seul evenement, pas une ligne par message.
+
+    Sans ce gestionnaire, purger 100 messages ne laissait aucune trace :
+    on_message_delete n'est pas appele pour une suppression groupee.
+    """
+    if not messages:
+        return
+    premier = messages[0]
+    if not premier.guild:
+        return
+    acteur, _ = await fetch_audit_actor(premier.guild, discord.AuditLogAction.message_bulk_delete)
+    auteurs = {}
+    for m in messages:
+        auteurs[str(m.author)] = auteurs.get(str(m.author), 0) + 1
+    detail = "\n".join(f"• {nom} : `{n}`" for nom, n in
+                       sorted(auteurs.items(), key=lambda kv: -kv[1])[:10])
+    await log_event(
+        premier.guild, "messages", "Suppression en masse",
+        f"`{len(messages)}` messages ont ete supprimes dans "
+        f"{getattr(premier.channel, 'mention', 'un salon')}.",
+        fields=[("👥 Auteurs concernes", detail or "-")],
+        severity="warning", actor=acteur)
+
+
+@bot.event
+async def on_guild_channel_pins_update(channel, last_pin):
+    guild = getattr(channel, "guild", None)
+    if not guild:
+        return
+    await log_event(guild, "messages", "Epinglages modifies",
+                    f"Les messages epingles de {channel.mention} ont change.",
+                    severity="info")
+
+
+@bot.event
+async def on_scheduled_event_create(event):
+    await log_event(
+        event.guild, "events", "Evenement planifie cree",
+        f"**{event.name}** est programme.",
+        fields=[("📅 Debut", fmt(event.start_time)),
+                ("📍 Lieu", getattr(event.channel, "mention", event.location or "-"))],
+        severity="info", actor=event.creator)
+
+
+@bot.event
+async def on_scheduled_event_delete(event):
+    await log_event(event.guild, "events", "Evenement planifie annule",
+                    f"**{event.name}** a ete supprime.",
+                    severity="warning")
+
+
+@bot.event
+async def on_scheduled_event_update(before, after):
+    if before.name == after.name and before.start_time == after.start_time \
+            and str(before.status) == str(after.status):
+        return
+    champs = []
+    if before.name != after.name:
+        champs.append(("📛 Nom", f"`{before.name}` → `{after.name}`"))
+    if before.start_time != after.start_time:
+        champs.append(("📅 Debut", f"{fmt(before.start_time)} → {fmt(after.start_time)}"))
+    if str(before.status) != str(after.status):
+        champs.append(("🔄 Etat", f"`{before.status}` → `{after.status}`"))
+    await log_event(after.guild, "events", "Evenement planifie modifie",
+                    f"**{after.name}** a change.",
+                    fields=champs, severity="info")
+
+
+@bot.event
+async def on_automod_rule_create(rule):
+    await log_event(rule.guild, "automod", "Regle d'automodration creee",
+                    f"**{rule.name}** a ete ajoutee dans l'automod Discord.",
+                    severity="info", actor=rule.creator)
+
+
+@bot.event
+async def on_automod_rule_delete(rule):
+    await log_event(rule.guild, "automod", "Regle d'automodration supprimee",
+                    f"**{rule.name}** a ete retiree de l'automod Discord.",
+                    severity="warning")
+
+
+@bot.event
+async def on_automod_rule_update(rule):
+    await log_event(rule.guild, "automod", "Regle d'automodration modifiee",
+                    f"**{rule.name}** a ete changee.",
+                    severity="info")
+
+
+@bot.event
+async def on_automod_action(execution):
+    """
+    L'automod natif de Discord a agi. Distinct du filtre de ModBot : les
+    deux peuvent tourner ensemble, et savoir lequel a bloque quoi evite de
+    chercher un bug la ou il n'y en a pas.
+    """
+    guild = bot.get_guild(execution.guild_id)
+    if not guild:
+        return
+    membre = guild.get_member(execution.user_id)
+    await log_event(
+        guild, "automod", "Automod Discord declenche",
+        f"Un message de {membre.mention if membre else 'un membre'} a ete traite "
+        "par l'automodration native de Discord.",
+        fields=[("⚙️ Action", str(execution.action.type).split(".")[-1]),
+                ("🔤 Extrait", f"`{(execution.matched_content or '-')[:100]}`")],
+        severity="warning", target=membre)
+
+
+@bot.event
+async def on_integration_create(integration):
+    guild = getattr(integration, "guild", None)
+    if not guild:
+        return
+    await log_event(guild, "server", "Integration ajoutee",
+                    f"Une integration **{getattr(integration, 'name', '?')}** "
+                    "a ete connectee au serveur.",
+                    severity="warning")
+
+
 async def security_maintenance_loop():
     """Leve les modes securite expires et purge les logs trop volumineux."""
     await bot.wait_until_ready()
