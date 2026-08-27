@@ -3075,3 +3075,54 @@ salon que s'ils sont absents. Vérifié sur le site en production.
 règles : aucun champ libre adossé aux listes de rôles ou de salons,
 aucune lecture par rang, et un gestionnaire de clic qui vise un bouton
 nommé.
+
+## 44. Livré le 27 août 2026 — nommer des administrateurs, rubrique 02
+
+Le champ avait été retiré (§ commit `1db3547`) parce qu'il ne servait à rien :
+la liste venait de `DASHBOARD_ADMIN_IDS`, une variable d'hébergeur, et rien
+dans le navigateur ne pouvait la changer. Il fallait donc une **seconde
+source persistante**, sans affaiblir la première.
+
+`admins.json` (gitignoré) recueille les comptes nommés depuis le panneau.
+L'ensemble effectif est l'union des deux ; `DASHBOARD_ADMIN_IDS` reste la
+racine de confiance, et le fichier ne peut que s'y ajouter.
+
+### Les deux règles qui portent la sécurité
+
+**Un fondateur ne peut pas être retiré depuis le panneau** — pas même par un
+autre fondateur. Sans cette barrière, un administrateur nommé pourrait évincer
+celui qui l'a nommé, et plus personne ne reprendrait la main sans accès à
+Railway. `est_fondateur()` distingue les deux origines ; le panneau affiche un
+bouton désactivé qui explique pourquoi, plutôt que pas de bouton du tout.
+
+**Le statut est recalculé à chaque requête.** `api_identity()` le lisait dans
+la session, figée à la connexion : un administrateur retiré gardait ses droits
+jusqu'à l'expiration de son jeton, parfois des jours. Un ajout prend maintenant
+effet immédiatement, un retrait aussi. C'est le correctif le plus important du
+lot, et il valait indépendamment de la fonctionnalité demandée.
+
+### Bornage
+
+Identifiant de 17 à 20 chiffres, 25 administrateurs au maximum, doublons
+refusés, fichier illisible ou entrées malformées ignorés sans faire tomber le
+bot. Chaque nomination et chaque retrait passe par `dashboard_log` avec son
+auteur, et la fiche garde `added_by_id` et `added_at`.
+
+### Un piège d'affichage
+
+`applySiteLanguage()` écrase le texte du HTML par celui des traductions. La
+rubrique a continué d'afficher « un champ de saisie ici n'aurait donné aucun
+droit réel » alors que le champ existait et fonctionnait. Corriger le HTML ne
+suffit jamais : **la valeur vit dans `translations.js`**.
+
+### Tests
+
+`test_admins.py` (32 vérifications) : dix tentatives de contournement, dont
+« un compte nommé évince un fondateur » et « un inconnu nomme quelqu'un ».
+Vérifié aussi sur l'API en production — `GET`, `POST` et `DELETE` répondent
+401 sans session, et `admins.json` n'est pas servi par le site (404).
+
+### Variable d'environnement
+
+`DASHBOARD_ADMIN_IDS` garde son rôle : c'est la liste des fondateurs, et le
+seul moyen de reprendre la main si le fichier est perdu.
