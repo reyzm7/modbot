@@ -2919,3 +2919,46 @@ combinaisons de salons arrivée/départ, l'extraction du compte depuis un lien
 
 298 API · 63 sécurité · 30 IA · 21 anti-arnaque · **39 rôles** · 2 démarrage ·
 i18n vert en 5 langues.
+
+### Passe de vérification — 27 août 2026
+
+Relecture complète de ce qui précède. Trois défauts trouvés, tous corrigés.
+
+**Le champ d'identifiant de rôle, illisible entre 1100 et 1280 px.** Point de
+rupture mal choisi. Juste au-dessus de 1100 px la colonne de droite tombait à
+472 px, et le champ à **75 px** pour un contenu de 182 px : l'identifiant
+défilait hors de vue pendant qu'on le tapait. Rupture remontée à 1280 px, et
+plancher de 150 px sur la colonne — un identifiant Discord fait 18 chiffres.
+
+**Régression introduite par ce correctif.** `.roles-layout .reaction-role-row`
+a une spécificité de (0,2,0) ; la règle qui empile les lignes sous 760 px n'a
+que (0,1,0). Déclarée plus loin et sans borne, la mienne l'emportait à toutes
+les largeurs : sur téléphone la ligne gardait ses cinq colonnes. Bornée à
+761 px et plus.
+
+**La catégorie « Rôles » est coupée d'origine.** Dans `log_event()`,
+`db_insert_guild_log()` est appelé **avant** le test `log_category_enabled` :
+les événements arrivent donc toujours au journal du dashboard. Seule leur copie
+dans un salon Discord dépend de l'interrupteur, et celui de « Rôles » est à
+`False` par défaut — à cause du bruit de « Rôles d'un membre modifiés », qui
+part sur chaque `on_member_update`. Le défaut n'a pas été changé : le retourner
+enverrait ce flot à quatorze serveurs qui ne l'ont pas demandé. Le wiki le dit
+maintenant explicitement.
+
+**Deux suites de tests ajoutées**, parce que les défauts ci-dessus vivaient
+entre les mailles des tests unitaires :
+
+- `test_roles_chaine.py` (22) — un réglage suivi de bout en bout :
+  `apply_dashboard_config` → `serialize_dashboard_config` → relecture par le
+  bot. Vérifie aussi qu'une sauvegarde **sans** la clef `reaction_roles`
+  n'efface rien, alors qu'une liste vide explicite efface bien.
+- `test_roles_captcha.py` (12) — la vraie `appliquer_auto_roles()` sur les
+  quatre combinaisons captcha × attente, plus les bots, les auto-rôles éteints
+  et le rôle déjà porté.
+
+**Vérifié dans le navigateur, sur le site en production**, à 1400 / 1140 / 375 px :
+aucun débordement, navigation par le menu hamburger fonctionnelle, libellé du
+menu qui suit le panneau choisi.
+
+Total : 298 API · 63 sécurité · 30 IA · 21 anti-arnaque · 39 rôles ·
+**22 chaîne** · **12 captcha** · 2 démarrage · i18n vert en 5 langues.
