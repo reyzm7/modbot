@@ -3126,3 +3126,65 @@ Vérifié aussi sur l'API en production — `GET`, `POST` et `DELETE` répondent
 
 `DASHBOARD_ADMIN_IDS` garde son rôle : c'est la liste des fondateurs, et le
 seul moyen de reprendre la main si le fichier est perdu.
+
+## 45. Livré le 27 août 2026 — `/captcha` et `/ia` retirés, deux rubriques à part
+
+Onze sous-commandes et deux groupes en moins. Garder les commandes **en plus**
+du dashboard oblige à maintenir deux chemins pour un même réglage, et c'est
+ainsi qu'ils finissent par diverger.
+
+**29 racines de commandes** sur les 100 que Discord autorise (contre 31), et
+44 commandes au total. Groupes restants : `/securite`, `/backup`, `/giveaway`.
+
+### Le retrait devait être chirurgical
+
+Les fonctions utilitaires sont **imbriquées entre les commandes** —
+`_assurer_role_verifie`, `_assurer_salon_verification`, `set_ai_cfg`,
+`ai_conseil_configuration`. L'API s'en sert. Une suppression par plage de
+lignes les aurait emportées avec elle.
+
+Premier essai raté à noter : mon algorithme s'arrêtait à la première ligne en
+colonne 0 après le décorateur — c'est-à-dire `@app_commands.describe` ou
+`async def`. Seuls les décorateurs partaient, les corps restaient en code mort.
+Le second traverse les décorateurs jusqu'à la signature, puis suit
+l'indentation.
+
+### L'IA n'avait aucune route
+
+Elle n'existait que par `/ia`. Elle traverse maintenant
+`serialize_dashboard_config` et `apply_dashboard_config` comme le reste :
+
+- `sanitize_ai_system()` écarte les salons que le bot ne voit pas — un salon
+  inconnu ne lui ferait jamais passer un message. Une liste vide veut dire
+  « partout », et le distinguer d'un salon supprimé évite qu'une suppression
+  de salon ouvre l'IA sur tout le serveur sans que personne l'ait demandé.
+- `etat_ia_dashboard()` renvoie le fournisseur, le modèle, la présence de la
+  clef et le conseil de configuration. **Jamais la clef**, pas même tronquée :
+  le dashboard est servi à tout administrateur de serveur, et la clef est
+  celle de l'hébergeur, commune à tous.
+- `POST /api/guilds/{id}/ai/reset` efface le contexte, par salon ou pour tout
+  le serveur.
+
+### Les deux rubriques
+
+**Vérification** — le bloc captcha quitte Sécurité, où il était le sixième
+d'une pile. Mêmes réglages, mêmes sélecteurs, même code.
+
+**Assistant IA** — entièrement nouvelle. À ne pas confondre avec l'assistant
+flottant de la page, qui répond sur la configuration du dashboard : celle-ci
+pilote l'IA qui répond aux membres sur Discord. L'état distingue **trois** cas
+là où un interrupteur n'en montrerait que deux : actif, inactif, et « sans
+clef » — actif sans clef d'API est un piège, le réglage est vert et rien ne
+répond.
+
+### Un défaut d'outillage découvert
+
+Le croisement wiki ↔ commandes de `test_api.py` lit
+`../modbot-site/wiki.html`, c'est-à-dire **la copie de travail du dépôt
+principal**, pas celle du worktree. Ce dépôt était resté **7 commits en
+retard** : le croisement testait donc du contenu périmé depuis le début de la
+session. Le dépôt principal a été remis à jour.
+
+**À retenir : après un push vers `main` depuis un worktree, faire un
+`git merge --ff-only origin/main` dans le dépôt principal**, sinon `test_api`
+valide un wiki qui n'est plus celui du site.
