@@ -2962,3 +2962,62 @@ menu qui suit le panneau choisi.
 
 Total : 298 API · 63 sécurité · 30 IA · 21 anti-arnaque · 39 rôles ·
 **22 chaîne** · **12 captcha** · 2 démarrage · i18n vert en 5 langues.
+
+## 42. Livré le 27 août 2026 — pourquoi le salon de départ « disparaissait »
+
+Le correctif de la section 41 portait sur l'**envoi**. Le vrai défaut était à
+l'**enregistrement**, et il survivait donc intact.
+
+### Deux constructeurs de `welcome_system`, dont un périmé
+
+`collectWelcomePayload()` est complet et correct — c'est lui qu'utilise le
+bouton du panneau Bienvenue. Mais `collectDashboardConfig()` en portait une
+copie périmée, et c'est **elle** que traversent toutes les autres sauvegardes :
+bouton global, modale « modifications non enregistrées », publication d'un
+panneau de tickets, publication des rôles-réactions.
+
+Cette copie :
+
+| Clef | Ce qu'elle faisait | Effet |
+|---|---|---|
+| `departure_channel_id` | absente | **le salon de départ était effacé** |
+| `departure_message` | `[data-departure-message]` — n'existe plus | message effacé |
+| `background` | `[data-welcome-bg]` — n'existe plus | image effacée |
+| `departure_enabled` | `.toggle-line input[2]` | lisait la case **« message privé »** |
+| `title`, `embed_enabled` | absentes | remises par défaut |
+
+`sanitize_welcome_system()` repart de `WELCOME_DEFAULTS` : toute clef absente
+est remise à zéro. D'où le scénario vécu — on configure le salon de départ
+depuis le panneau Bienvenue, où cela fonctionne ; on change ensuite n'importe
+quoi ailleurs, on enregistre, et le salon de départ disparaît. Les départs
+repartent alors dans le salon d'arrivée, et le bot a l'air de confondre les deux.
+
+`collectDashboardConfig()` délègue désormais à `collectWelcomePayload()`.
+
+### Détecter toutes les arrivées et tous les départs
+
+- **Symétrie des bots.** Un bot n'avait jamais de message d'arrivée mais avait
+  un message de départ : « Au revoir MonBot » dans un salon où son arrivée
+  n'était jamais passée. Les deux sens sont traités pareil ; leur va-et-vient
+  reste journalisé avec leurs permissions.
+- **Les échecs se voient.** Salon supprimé, permission d'écrire retirée, aucun
+  salon configuré, envoi refusé : ces quatre cas n'allaient que dans la console
+  du serveur, où aucun administrateur ne regarde. Ils partent maintenant dans
+  le journal, catégorie `members`, avec la marche à suivre.
+  `avertir_bienvenue()` temporise à une alerte par heure et par motif — sinon
+  une vague d'arrivées produirait une vague d'alertes identiques.
+- **Le dashboard prévient** quand les messages de départ sont activés sans
+  salon dédié. Le champ vide reste permis, c'est le choix « même salon », mais
+  ce n'est plus un silence.
+
+### Test
+
+`modbot-site/test_bienvenue.py` (24 vérifications) : un seul constructeur,
+chaque sélecteur cité existe vraiment dans le HTML, aucune case lue par son
+rang. **Confronté à la version d'avant le correctif, il échoue en trois
+points** — c'est ce qui en fait un test et non une formalité.
+
+### À faire côté serveur
+
+Le salon de départ effacé ne revient pas tout seul : il faut le choisir à
+nouveau dans le dashboard, une fois. Ensuite il tient.
