@@ -3385,3 +3385,61 @@ compris que **TikTok, Instagram et X servent aux robots une page vide** sans
 clef d'API : ModBot s'y tait plutôt que d'annoncer n'importe quoi.
 
 `test_relais.py` : 32 vérifications.
+
+## 49. Livré le 27 août 2026 — les notes n'arrivaient jamais aux Ratings
+
+Signalé : « quand quelqu'un attribue une note, ça ne la met pas dans rating ».
+
+### La cause
+
+La vue de notation part **en message privé** à la fermeture d'un ticket, avec
+le serveur dans son instance :
+
+```python
+await u.send(embed=dm, file=..., view=VueNotation(gid))
+```
+
+Mais `VueNotation` est une **vue persistante** (`timeout=None`, `custom_id`
+fixes), et au démarrage le bot enregistre `VueNotation()` — **sans serveur**.
+Après le moindre redémarrage, ce sont les boutons de cette vue-là qui
+répondent, et son `gid` vaut `None`.
+
+En message privé, `interaction.guild` vaut `None`. Le repli :
+
+```python
+gid = self.gid or (str(interaction.guild.id) if interaction.guild else None)
+```
+
+ne trouvait donc rien. `if self.gid:` était faux, `add_rating()` n'était jamais
+appelé — **et le membre lisait quand même « Ta note a bien été enregistrée »**.
+Ni lui ni le staff ne pouvaient s'en apercevoir.
+
+Railway redéploie à chaque envoi de code : autant dire que la quasi-totalité
+des notes étaient perdues.
+
+### Le correctif
+
+Le serveur est retenu **au moment où l'on demande la note**, dans
+`rating_attente.json` (gitignoré). `_noter()` le retrouve en trois temps :
+
+1. l'instance de la vue — vaut pour la session en cours ;
+2. le serveur de l'interaction — vaut hors message privé ;
+3. **cette mémoire** — la seule qui subsiste après un redémarrage, et donc le
+   cas courant.
+
+Les invitations de plus de trente jours sont purgées, celles sans date aussi,
+et un fichier illisible ne fait pas tomber le bot.
+
+### Et surtout : ne plus mentir
+
+Quand le serveur reste introuvable, le bot **le dit** au lieu d'annoncer un
+enregistrement qui n'a pas eu lieu. Un échec visible vaut mieux qu'un succès
+imaginaire — c'est ce silence qui a laissé le défaut vivre.
+
+### Ce qui n'était pas en cause
+
+`add_rating()`, `get_rating_stats()`, la sérialisation vers le dashboard et le
+rendu du panneau Ratings : tout ce chemin était sain. Une seule ligne
+manquait, en amont de tout.
+
+`test_notes.py` : 23 vérifications, dont le scénario complet du redémarrage.
