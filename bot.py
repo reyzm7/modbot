@@ -8383,8 +8383,18 @@ async def fetch_social_snapshot(session, url):
     desc = extract(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']')
     image = extract(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']')
     canonical = extract(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']')
-    seed = "|".join([final_url, title, desc, image, canonical, text[:5000]])
+    # L'empreinte portait aussi sur `text[:5000]`, les cinq premiers Ko de
+    # HTML. Sur x.com, on y compte 43 nonces de script, 9 jetons et 4
+    # horodatages en millisecondes — tous differents a chaque requete.
+    # L'empreinte changeait donc a chaque relevé, et le relais annonçait
+    # une « nouveaute » toutes les dix minutes. Seules comptent desormais
+    # les metadonnees qui decrivent la publication elle-meme.
+    seed = "|".join([canonical or final_url, title, desc, image])
     fingerprint = hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()
+    # Une page rendue en JavaScript renvoie une coquille vide aux robots :
+    # ni titre, ni description, ni image. Il n'y a rien a annoncer, et
+    # publier un embed vide serait pire que se taire.
+    vide = not (title or desc or image)
     return {
         "url": final_url,
         "title": title,
@@ -8392,6 +8402,7 @@ async def fetch_social_snapshot(session, url):
         "image": image,
         "canonical": canonical,
         "fingerprint": fingerprint,
+        "empty": vide,
     }
 
 async def dashboard_recurring_loop():
@@ -8431,6 +8442,65 @@ async def dashboard_recurring_loop():
                 set_cfg(guild.id, cfg)
         await asyncio.sleep(60)
 
+# Combien d'empreintes on retient par relais. Une page qui alterne entre
+# deux variantes (test A/B) reviendrait sinon a son etat precedent et
+# serait annoncee une seconde fois, avec le meme vieux contenu.
+SOCIAL_EMPREINTES_RETENUES = 15
+
+# Deux annonces d'un meme relais ne peuvent pas se suivre de plus pres.
+# Filet de securite : meme si une page se met a changer legitimement en
+# boucle, elle ne peut plus inonder un salon.
+SOCIAL_DELAI_MINIMAL = 20 * 60
+
+
+def cle_relais(relay):
+    """
+    Identifie un relais par son LIEN.
+
+    La clef etait la plateforme (« twitter_x »). Deux consequences : deux
+    comptes du meme reseau partageaient un etat, et changer de compte
+    comparait la nouvelle page a l'empreinte de l'ancienne — donc une
+    fausse « nouveaute » des le premier relevé.
+    """
+    lien = clean_short_text(relay.get("link"), "", 500).strip().lower().rstrip("/")
+    return hashlib.sha1(lien.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def relais_doit_annoncer(etat, snapshot, maintenant):
+    """
+    Faut-il annoncer ce relevé ? Retourne (oui, raison de refus).
+
+    La raison n'est pas decorative : elle part dans le journal quand un
+    administrateur se demande pourquoi son relais reste muet.
+    """
+    if snapshot.get("empty"):
+        return False, "page sans metadonnees lisibles"
+    if not etat:
+        return False, "premier relevé"          # on enregistre, sans annoncer
+    if snapshot["fingerprint"] == etat.get("fingerprint"):
+        return False, "rien de neuf"
+    if snapshot["fingerprint"] in (etat.get("vues") or []):
+        return False, "publication deja annoncee"
+    dernier = float(etat.get("annonce_le") or 0)
+    if maintenant - dernier < SOCIAL_DELAI_MINIMAL:
+        return False, "annonce trop recente"
+    return True, ""
+
+
+def memoriser_relais(etat, snapshot, maintenant, annonce):
+    """Nouvel etat d'un relais apres un relevé."""
+    vues = list((etat or {}).get("vues") or [])
+    if snapshot["fingerprint"] not in vues:
+        vues.append(snapshot["fingerprint"])
+    return {
+        "fingerprint": snapshot["fingerprint"],
+        "url": snapshot.get("url", ""),
+        "title": snapshot.get("title", ""),
+        "vues": vues[-SOCIAL_EMPREINTES_RETENUES:],
+        "annonce_le": maintenant if annonce else float((etat or {}).get("annonce_le") or 0),
+    }
+
+
 async def dashboard_social_loop():
     await bot.wait_until_ready()
     timeout = aiohttp.ClientTimeout(total=18)
@@ -8445,6 +8515,7 @@ async def dashboard_social_loop():
                 if not isinstance(states, dict):
                     states = {}
                 changed = False
+                vus_ce_tour = set()
                 for relay in relays:
                     if not isinstance(relay, dict) or not relay.get("enabled"):
                         continue
@@ -8452,6 +8523,10 @@ async def dashboard_social_loop():
                     channel_id = parse_int(relay.get("channel_id"))
                     if not link or not channel_id:
                         continue
+                    # Marquee des maintenant : la purge de fin de tour ne
+                    # doit pas effacer l'etat d'un relais dont le salon est
+                    # seulement momentanement indisponible.
+                    vus_ce_tour.add(cle_relais(relay))
                     channel = guild.get_channel(channel_id)
                     if not channel:
                         continue
@@ -8459,19 +8534,26 @@ async def dashboard_social_loop():
                     if not perms.send_messages:
                         continue
                     platform = clean_short_text(relay.get("platform"), "Réseau", 40)
-                    key = platform.lower().replace("/", "_").replace(" ", "_")
+                    key = cle_relais(relay)
                     try:
                         snapshot = await fetch_social_snapshot(session, link)
                     except Exception:
                         continue
                     if not snapshot:
                         continue
-                    previous = states.get(key)
-                    if previous and previous.get("fingerprint") == snapshot["fingerprint"]:
-                        continue
-                    if not previous:
-                        states[key] = snapshot
-                        changed = True
+
+                    maintenant = now().timestamp()
+                    annoncer, raison = relais_doit_annoncer(
+                        states.get(key), snapshot, maintenant)
+                    if not annoncer:
+                        # On memorise quand meme : sans cela, une page vue
+                        # une fois puis revenue a son etat anterieur serait
+                        # annoncee comme neuve.
+                        nouvel_etat = memoriser_relais(
+                            states.get(key), snapshot, maintenant, False)
+                        if nouvel_etat != states.get(key):
+                            states[key] = nouvel_etat
+                            changed = True
                         continue
                     emoji, color, headline = _social_platform_palette(platform)
                     embed = EG(f"{emoji} {headline} - {platform}", f"Une nouvelle activité a été détectée sur **{platform}**.", color, guild.id)
@@ -8501,8 +8583,16 @@ async def dashboard_social_loop():
                                            allowed_mentions=autorisees)
                     except Exception:
                         continue
-                    states[key] = snapshot
+                    states[key] = memoriser_relais(
+                        states.get(key), snapshot, maintenant, True)
                     changed = True
+
+                # Les relais supprimes laissaient leur etat derriere eux, et
+                # la configuration grossissait a chaque changement de compte.
+                for orpheline in [k for k in states if k not in vus_ce_tour]:
+                    states.pop(orpheline, None)
+                    changed = True
+
                 if changed:
                     cfg["social_relays_state"] = states
                     set_cfg(guild.id, cfg)
