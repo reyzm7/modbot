@@ -3315,3 +3315,73 @@ génériques. Le relais est désormais **silencieux quand il ne peut rien lire d
 fiable** — ce qui est le bon comportement, mais signifie que ces trois réseaux
 resteront moins réactifs que Twitch, dont l'`og:title` change vraiment quand
 la chaîne passe en direct.
+
+## 48. Livré le 27 août 2026 — le même défaut sur les autres réseaux, et YouTube réparé
+
+### Le défaut d'empreinte ne touchait pas que Twitter
+
+Mesuré sur deux relevés à deux secondes d'intervalle, avant correctif :
+
+| Réseau | ancienne empreinte | métadonnées lisibles |
+|---|---|---|
+| Twitch | stable | oui — fonctionnait déjà |
+| **Instagram** | **instable → annonçait à chaque tour** | aucune |
+| **YouTube** | **instable → annonçait à chaque tour** | oui, mais génériques |
+| TikTok | stable | aucune |
+
+Le correctif de la §47 les couvre tous : l'empreinte ne porte plus que sur les
+métadonnées de la publication.
+
+### YouTube passe par son flux RSS
+
+La page d'une chaîne ne dit rien de la dernière vidéo — `og:title` y vaut
+« YouTube ». Le flux `https://www.youtube.com/feeds/videos.xml?channel_id=…`
+est public, sans clef, et donne l'identifiant de chaque vidéo. **C'est cet
+identifiant qui sert d'empreinte** : il ne change que lorsqu'une vidéo paraît.
+Titre réel, miniature réelle, une annonce par vidéo.
+
+Trois formes d'URL gérées : `/channel/UC…` (sans requête), `@handle`, et
+`m.`/sans `www.`. L'hôte est **normalisé sur `www`** : le cookie de
+consentement est posé par hôte, et `youtube.com/@x` redirige vers `www` — le
+cookie ne suivait pas et la bannière européenne revenait, page vide à la clef.
+
+Ce cookie (`SOCS=CAI`) est un **refus**, pas un contournement : aucune
+personnalisation, aucun suivi, et c'est le bot qui lit une page publique.
+
+L'identifiant de chaîne est mis en cache : le résoudre coûte une page de deux
+mégaoctets.
+
+### Même famille de défaut : les messages récurrents
+
+```python
+for key in ("recurring_messages", "tournament"):
+    if key in payload:
+        cfg[key] = payload[key]
+```
+
+Aucune validation, et surtout `last_sent` repris du navigateur — or c'est la
+seule chose qui empêche un message de repartir. Une sauvegarde faite avant le
+chargement de la configuration la remettait à vide, et le message repartait au
+tour suivant. **Le serveur sait quand il a envoyé ; le client n'a pas à le lui
+dire** : `sanitize_recurring_messages()` reprend la date qu'il avait déjà.
+
+Le mode « une seule fois » se désactive maintenant après envoi, ce qu'il ne
+faisait pas.
+
+### Le salon de publication
+
+Les quatre relais demandaient encore « ID du salon Discord ». Ils avaient
+échappé à la conversion de la §43 parce qu'ils ne portaient pas de `list=`, et
+`test_selecteurs.py` ne cherchait que les champs adossés à une datalist. Il
+cherche désormais **tout champ qui réclame un identifiant**, quelle que soit sa
+forme.
+
+### Documentation actualisée
+
+Le wiki expliquait encore comment copier un identifiant de rôle avec le mode
+développeur — plus aucun champ n'en demande. Il laissait aussi croire que les
+quatre réseaux se valent. Il dit maintenant ce que chacun permet réellement, y
+compris que **TikTok, Instagram et X servent aux robots une page vide** sans
+clef d'API : ModBot s'y tait plutôt que d'annoncer n'importe quoi.
+
+`test_relais.py` : 32 vérifications.
