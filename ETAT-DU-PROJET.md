@@ -2821,3 +2821,101 @@ et messages d'erreur nommant la bonne variable.
 
 `test_api.py` passe à **298/298** dans les quatre configurations : aucune
 clef, Anthropic seule, Mistral seule, les deux.
+
+## 41. Livré le 27 août 2026 — rôles automatiques, annonces personnalisées, et deux salons enfin distincts
+
+### Le salon de bienvenue partait dans le salon des départs
+
+`send_dashboard_member_event()` sert les arrivées et les départs. Une seule
+ligne choisissait le salon pour les deux :
+
+```python
+channel_id = parse_int(system.get("departure_channel_id") or system.get("channel_id"))
+```
+
+Dès qu'un serveur configurait un salon de départ, **les messages de bienvenue y
+partaient aussi**. La décision dépend maintenant de `departure`. Le repli sur le
+salon d'arrivée ne vaut plus que pour le départ : un serveur qui ne veut qu'un
+seul salon laisse le champ « départ » vide. L'inverse n'a aucun sens.
+
+### Le panneau des rôles-réactions n'existait dans aucun fichier HTML
+
+Le JS était écrit — `renderReactionPreview()`, l'ajout de lignes, la publication —
+mais `data-reaction-role-list`, `data-reaction-channel` et les autres n'étaient
+nulle part dans le HTML. Tous les accès passaient par `?.`, donc rien ne
+protestait. Pire : `collectDashboardConfig()` faisait
+`querySelectorAll(".reaction-role-row")` sur un DOM vide, obtenait `[]`, et
+l'envoyait. Le bot écrivait cette liste vide dans la config.
+
+**Chaque enregistrement du dashboard effaçait les rôles-réactions du serveur.**
+
+Le panneau existe maintenant, avec les sélecteurs que le JS attendait. Et par
+précaution, les clefs `reaction_*` ne sont plus envoyées du tout quand le
+panneau est absent du DOM : une clef absente laisse la configuration
+tranquille, une clef vide l'écrase.
+
+### Auto-rôles à l'arrivée
+
+Nouveaux : `autoroles_cfg()`, `sanitize_auto_roles()`, `trier_auto_roles()`,
+`appliquer_auto_roles()`. Dix rôles au maximum. Trois garde-fous, chacun pour
+une raison précise :
+
+- **Le captcha passe avant.** `after_captcha` est vrai par défaut. Donner un
+  rôle à l'arrivée alors qu'une vérification est active reviendrait à ouvrir la
+  porte avant de l'avoir fermée. La fonction est appelée à deux endroits —
+  `on_member_join` et la validation du captcha — et chacun ne fait rien si
+  l'autre est de service.
+- **Les bots n'en reçoivent jamais.** Ils arrivent déjà avec les permissions de
+  leur invitation ; leur en ajouter serait une faille.
+- **La hiérarchie est vérifiée avant d'essayer.** Un rôle au-dessus de ModBot,
+  ou géré par une intégration, est écarté et la raison part au journal. Discord
+  refuserait de toute façon, mais en silence.
+
+### Les rôles-réactions laissent enfin une trace
+
+`handle_dashboard_reaction_role()` ne contenait aucun appel à `log_event` : un
+membre pouvait prendre ou rendre un rôle sans que rien ne l'enregistre. Le
+`except Exception: pass` avalait aussi les échecs de hiérarchie. Les deux sont
+corrigés — catégorie `roles`, avec l'emoji, le rôle, et les rôles retirés en
+mode « un seul rôle ».
+
+### Message d'annonce des relais réseaux
+
+`render_social_template()` et `_compte_depuis_lien()`. Quatre variables :
+`{account}`, `{platform}`, `{title}`, `{link}` — en anglais, comme
+`{user}`/`{server}` des messages de bienvenue, pour qu'un exemple copié
+fonctionne quelle que soit la langue du dashboard.
+
+Le texte part dans le **contenu** du message, collé aux mentions. Une mention
+placée dans un embed s'affiche en bleu mais ne notifie personne.
+
+### Mise en page
+
+Le panneau utilisait `.welcome-layout` (`1fr | 380px`), pensé pour un
+formulaire et un aperçu étroit. Dans la colonne de 380 px, le champ
+d'identifiant de rôle tombait à **34 px** — illisible pour un ID à 18 chiffres.
+`.roles-layout` inverse le rapport : 340 px pour les auto-rôles, le reste pour
+les rôles-réactions. Mesuré à 1440 px : 204 px pour l'identifiant, 255 px pour
+le libellé. Une seule colonne sous 1100 px.
+
+### Fichiers touchés
+
+| Fichier | Ce qui change |
+|---|---|
+| `bot.py` | salon de départ, auto-rôles, journalisation des rôles-réactions, message d'annonce |
+| `test_roles.py` | **nouveau** — 39 vérifications |
+| `dashboard.html` | panneau « Rôles », message d'annonce sur les 4 cartes, libellés des salons |
+| `script.js` | auto-rôles, message d'annonce, garde-fou anti-effacement |
+| `translations.js` | 51 clefs × 5 langues |
+| `style.css` | `.roles-layout` |
+| `wiki.html` | section « Rôles automatiques », variables d'annonce, journal |
+
+### Tests
+
+`test_roles.py` couvre ce que les autres suites ne voyaient pas : les quatre
+combinaisons de salons arrivée/départ, l'extraction du compte depuis un lien
+(Twitch, TikTok, X, YouTube), le rendu des variables, et le fait qu'un
+`@everyone` écrit en toutes lettres n'entre pas dans `ping_roles`.
+
+298 API · 63 sécurité · 30 IA · 21 anti-arnaque · **39 rôles** · 2 démarrage ·
+i18n vert en 5 langues.

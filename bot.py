@@ -3867,6 +3867,8 @@ class ModalCaptcha(discord.ui.Modal):
                     f"{interaction.user.mention} a passe la verification.",
                     severity="success", target=interaction.user,
                 )
+                # La porte est franchie : les auto-roles peuvent tomber.
+                await appliquer_auto_roles(interaction.user, apres_captcha=True)
             else:
                 embed = E("⚠️ Code correct, acces bloque", erreur, 0xFAA61A)
             await safe_ephemeral(interaction, embed=embed)
@@ -5803,6 +5805,7 @@ def serialize_dashboard_config(guild):
         "country": cfg.get("pays") or "",
         "welcome": {**WELCOME_DEFAULTS, **(cfg.get("welcome_system") or {})},
         "reaction_roles": cfg.get("reaction_roles", []),
+        "auto_roles": autoroles_cfg(gid),
         "reaction_title": cfg.get("reaction_title") or "Choisis tes roles",
         "reaction_description": cfg.get("reaction_description") or "Clique sur une reaction pour recevoir ou retirer le role correspondant.",
         "reaction_roles_channel_id": str(cfg.get("reaction_roles_channel_id") or ""),
@@ -5921,6 +5924,9 @@ async def apply_dashboard_config(guild, payload):
         cfg["reaction_title"] = clean_short_text(payload.get("reaction_title"), "Choisis tes roles", 120)
     if "reaction_description" in payload:
         cfg["reaction_description"] = clean_short_text(payload.get("reaction_description"), "Clique sur une reaction pour recevoir ou retirer le role correspondant.", 600)
+
+    if "auto_roles" in payload:
+        cfg["auto_roles"] = sanitize_auto_roles(guild, payload.get("auto_roles"))
 
     if "welcome_system" in payload:
         cfg["welcome_system"] = sanitize_welcome_system(payload.get("welcome_system"))
@@ -8044,8 +8050,54 @@ def sanitize_social_relays(brut):
             "enabled": bool(item.get("enabled")),
             "ping_roles": roles,
             "ping_everyone": bool(item.get("ping_everyone")),
+            "message": clean_short_text(item.get("message"), "", 400),
         })
     return relais
+
+
+def _compte_depuis_lien(lien):
+    """
+    Extrait le nom du compte d'un lien de reseau social.
+
+    « https://twitch.tv/zerator/ » donne « zerator ». Les reseaux ne
+    partagent aucune convention : on prend le dernier segment utile, en
+    retirant l'arobase de TikTok et les parametres de suivi.
+    """
+    texte = str(lien or "").split("?")[0].split("#")[0].rstrip("/")
+    if not texte:
+        return ""
+    segment = texte.rsplit("/", 1)[-1]
+    # YouTube place la chaine derriere /channel/ ou /c/ : le dernier
+    # segment reste le bon. Twitter et Instagram aussi.
+    return segment.lstrip("@")[:60]
+
+
+def render_social_template(template, relay, snapshot):
+    """
+    Remplace les variables du message d'annonce.
+
+    Chaque variable existe en francais et en anglais : le dashboard est
+    traduit en cinq langues, imposer une seule ecriture serait arbitraire.
+    """
+    texte = str(template or "")
+    if not texte:
+        return ""
+    lien = str(relay.get("link") or "")
+    compte = _compte_depuis_lien(lien)
+    plateforme = clean_short_text(relay.get("platform"), "Reseau", 40)
+    titre = str((snapshot or {}).get("title") or "")
+    url = str((snapshot or {}).get("url") or "") or lien
+    description = str((snapshot or {}).get("description") or "")
+    valeurs = {
+        "{compte}": compte, "{account}": compte,
+        "{plateforme}": plateforme, "{platform}": plateforme,
+        "{titre}": titre, "{title}": titre,
+        "{lien}": url, "{link}": url, "{url}": url,
+        "{description}": description,
+    }
+    for clef, valeur in valeurs.items():
+        texte = texte.replace(clef, valeur)
+    return texte[:400]
 
 
 def mentions_relais(guild, relay):
@@ -8215,8 +8267,16 @@ async def dashboard_social_loop():
                     view = discord.ui.View()
                     view.add_item(discord.ui.Button(label="Ouvrir" if "twitch" not in platform.lower() else "Watch Stream", url=snapshot.get("url") or link))
                     contenu, autorisees = mentions_relais(guild, relay)
+
+                    # Mentions et message d'annonce voyagent ensemble dans
+                    # le CONTENU : une mention placee dans l'embed s'affiche
+                    # en bleu mais ne previent personne.
+                    annonce = render_social_template(
+                        relay.get("message"), relay, snapshot)
+                    corps = "\n".join(x for x in (contenu, annonce) if x)
+
                     try:
-                        await channel.send(content=contenu or None, embed=embed, view=view,
+                        await channel.send(content=corps or None, embed=embed, view=view,
                                            allowed_mentions=autorisees)
                     except Exception:
                         continue
@@ -9883,6 +9943,154 @@ async def build_member_event_card(member, system, departure=False):
     nom_fichier = f"{'departure' if departure else 'welcome'}-{member.guild.id}-{member.id}.png"
     return discord.File(sortie, filename=nom_fichier)
 
+# ════════════════════════════════════════════════
+#  AUTO-ROLES A L'ARRIVEE
+# ════════════════════════════════════════════════
+
+AUTOROLE_MAX = 10
+
+
+def autoroles_cfg(gid):
+    """
+    Reglages des roles donnes automatiquement a l'arrivee.
+
+    `after_captcha` est vrai par defaut, et c'est deliberé : donner un role
+    a l'arrivee alors qu'une verification est active reviendrait a ouvrir
+    la porte avant de l'avoir fermee. Tant que le captcha est actif, les
+    auto-roles attendent qu'il soit passe.
+    """
+    cfg = get_cfg(gid)
+    brut = cfg.get("auto_roles") if isinstance(cfg.get("auto_roles"), dict) else {}
+    roles = []
+    for r in (brut.get("roles") or [])[:AUTOROLE_MAX]:
+        rid = parse_int(r)
+        if rid and str(rid) not in roles:
+            roles.append(str(rid))
+    return {
+        "enabled": bool(brut.get("enabled")),
+        "roles": roles,
+        "after_captcha": brut.get("after_captcha", True) is not False,
+    }
+
+
+def sanitize_auto_roles(guild, brut):
+    """Valide ce qui vient du dashboard : des identifiants, rien d'autre."""
+    if not isinstance(brut, dict):
+        return {"enabled": False, "roles": [], "after_captcha": True}
+    roles = []
+    for r in (brut.get("roles") or [])[:AUTOROLE_MAX]:
+        rid = parse_int(r)
+        if not rid or str(rid) in roles:
+            continue
+        role = guild.get_role(rid)
+        # Un role gere par une integration ne peut pas etre attribue a la
+        # main : Discord le refuse. On l'ecarte des la sauvegarde plutot
+        # que d'echouer en silence a chaque arrivee.
+        if role and role.managed:
+            continue
+        roles.append(str(rid))
+    return {
+        "enabled": bool(brut.get("enabled")),
+        "roles": roles,
+        "after_captcha": brut.get("after_captcha", True) is not False,
+    }
+
+
+def trier_auto_roles(guild, ids):
+    """
+    Separe ce qui est attribuable de ce qui ne l'est pas.
+
+    Retourne (roles, refus) ou `refus` est une liste de raisons lisibles,
+    destinees au journal : un administrateur doit pouvoir comprendre
+    pourquoi un role n'a pas ete donne sans lire le code.
+    """
+    roles, refus = [], []
+    sommet = guild.me.top_role
+    for rid in ids:
+        if not str(rid).isdigit():
+            continue
+        role = guild.get_role(int(rid))
+        if not role:
+            refus.append(f"`{rid}` (role supprime)")
+            continue
+        if role.managed:
+            refus.append(f"{role.mention} (gere par une integration)")
+            continue
+        if role >= sommet:
+            refus.append(f"{role.mention} (au-dessus de ModBot)")
+            continue
+        roles.append(role)
+    return roles, refus
+
+
+async def appliquer_auto_roles(member, apres_captcha=False):
+    """
+    Donne les roles automatiques a un membre qui arrive.
+
+    `apres_captcha` distingue les deux moments d'appel : l'arrivee, et la
+    validation du captcha. Chacun ne fait rien si l'autre est de service.
+    """
+    guild = member.guild
+    gid = str(guild.id)
+    reglages = autoroles_cfg(gid)
+    if not reglages["enabled"] or not reglages["roles"]:
+        return
+
+    # Les bots n'ont rien a faire ici : ils arrivent deja avec les
+    # permissions de leur invitation, leur en ajouter serait une faille.
+    if member.bot:
+        return
+
+    captcha_actif = captcha_cfg(gid)["enabled"]
+    attendre = captcha_actif and reglages["after_captcha"]
+    if attendre and not apres_captcha:
+        return          # le captcha n'est pas encore passe
+    if apres_captcha and not attendre:
+        return          # deja donne a l'arrivee, on ne repasse pas
+
+    if not guild.me.guild_permissions.manage_roles:
+        await log_event(
+            guild, "roles", "Auto-roles impossibles",
+            f"{member.mention} vient d'arriver, mais ModBot n'a pas la "
+            "permission **Gerer les roles**.",
+            severity="warning", target=member)
+        return
+
+    roles, refus = trier_auto_roles(guild, reglages["roles"])
+    a_donner = [r for r in roles if r not in member.roles]
+
+    donnes = []
+    if a_donner:
+        try:
+            await member.add_roles(*a_donner, reason="ModBot auto-roles")
+            donnes = a_donner
+        except discord.Forbidden:
+            refus.append("permission refusee par Discord")
+        except Exception as ex:
+            refus.append(f"echec ({type(ex).__name__})")
+
+    if not donnes and not refus:
+        return
+
+    champs = [("Membre", f"{member.mention} (`{member.id}`)")]
+    if donnes:
+        champs.append(("Roles attribues", " ".join(r.mention for r in donnes)))
+    if refus:
+        champs.append(("Non attribues", "\n".join(refus[:6])))
+    champs.append(("Declencheur",
+                   "Verification reussie" if apres_captcha else "Arrivee sur le serveur"))
+
+    await log_event(
+        guild, "roles",
+        "Auto-roles attribues" if donnes else "Auto-roles en echec",
+        f"{member.mention} a recu ses roles automatiques."
+        if donnes else f"Aucun role automatique n'a pu etre donne a {member.mention}.",
+        fields=champs, severity="success" if donnes else "warning",
+        target=member)
+    dashboard_log("auto_roles", guild, str(member),
+                  ", ".join(r.name for r in donnes) or "aucun role attribue")
+
+
 async def send_dashboard_member_event(member, departure=False):
     cfg = get_cfg(member.guild.id)
     system = cfg.get("welcome_system") or {}
@@ -9902,7 +10110,17 @@ async def send_dashboard_member_event(member, departure=False):
             pass
     if not system.get(enabled_key):
         return
-    channel_id = parse_int(system.get("departure_channel_id") or system.get("channel_id"))
+
+    # Cette ligne servait aux DEUX cas : des qu'un salon de depart etait
+    # configure, le message de bienvenue y partait aussi. Le repli sur le
+    # salon d'arrivee ne vaut que pour le depart — un serveur qui ne veut
+    # qu'un seul salon laisse le champ « depart » vide. L'inverse n'a
+    # aucun sens : un salon de depart n'est jamais un salon d'accueil.
+    if departure:
+        channel_id = parse_int(system.get("departure_channel_id")
+                               or system.get("channel_id"))
+    else:
+        channel_id = parse_int(system.get("channel_id"))
     if not channel_id:
         return
     channel = member.guild.get_channel(channel_id)
@@ -10044,6 +10262,10 @@ async def on_member_join(member):
 
     await send_dashboard_member_event(member, departure=False)
 
+    # Auto-roles. La fonction decide elle-meme si c'est le bon moment :
+    # quand une verification est active, elle laisse la main au captcha.
+    await appliquer_auto_roles(member, apres_captcha=False)
+
     # Captcha : on oriente simplement vers le salon de verification.
     # Aucun code n'est envoye en MP — le defi est genere au clic sur le
     # bouton, dans une reponse ephemere. Un membre qui a ferme ses MP peut
@@ -10136,19 +10358,58 @@ async def handle_dashboard_reaction_role(payload, remove=False):
             member = await guild.fetch_member(payload.user_id)
         except Exception:
             return
+    # Un role au-dessus de ModBot ne peut pas etre attribue. Le dire au
+    # journal vaut mieux que d'echouer sans bruit, comme c'etait le cas.
+    if role >= guild.me.top_role:
+        await log_event(
+            guild, "roles", "Role-reaction impossible",
+            f"{member.mention} a demande {role.mention}, mais ce role est "
+            "au-dessus de ModBot dans la hierarchie.",
+            severity="warning", target=member)
+        return
+
+    retires = []
     try:
         if remove:
             await member.remove_roles(role, reason="ModBot roles reactions")
-            return
-        mode = str(cfg.get("reaction_roles_mode") or "").lower()
-        if "un seul" in mode:
-            configured_role_ids = {parse_int(item.get("role_id")) for item in reaction_roles}
-            configured_roles = [r for r in (guild.get_role(rid or 0) for rid in configured_role_ids) if r and r in member.roles and r.id != role.id]
-            if configured_roles:
-                await member.remove_roles(*configured_roles, reason="ModBot roles reactions mode unique")
-        await member.add_roles(role, reason="ModBot roles reactions")
+        else:
+            mode = str(cfg.get("reaction_roles_mode") or "").lower()
+            if "un seul" in mode:
+                configured_role_ids = {parse_int(item.get("role_id")) for item in reaction_roles}
+                configured_roles = [r for r in (guild.get_role(rid or 0) for rid in configured_role_ids) if r and r in member.roles and r.id != role.id]
+                if configured_roles:
+                    await member.remove_roles(*configured_roles, reason="ModBot roles reactions mode unique")
+                    retires = configured_roles
+            await member.add_roles(role, reason="ModBot roles reactions")
+    except discord.Forbidden:
+        await log_event(
+            guild, "roles", "Role-reaction refuse",
+            f"Discord a refuse la modification de {role.mention} pour "
+            f"{member.mention} : permission **Gerer les roles** manquante.",
+            severity="warning", target=member)
+        return
     except Exception:
-        pass
+        return
+
+    # Le journal ne gardait aucune trace des roles pris par reaction : un
+    # membre pouvait recevoir un role sans que rien ne l'enregistre.
+    champs = [
+        ("Membre", f"{member.mention} (`{member.id}`)"),
+        ("Role", f"{role.mention} (`{role.id}`)"),
+        ("Emoji", emoji),
+    ]
+    if retires:
+        champs.append(("Retires (mode role unique)",
+                       " ".join(r.mention for r in retires)))
+    await log_event(
+        guild, "roles",
+        "Role retire par reaction" if remove else "Role pris par reaction",
+        f"{member.mention} a {'rendu' if remove else 'pris'} {role.mention} "
+        "depuis le panneau de roles-reactions.",
+        fields=champs, severity="warning" if remove else "success",
+        target=member)
+    dashboard_log("reaction_role", guild, str(member),
+                  f"{'-' if remove else '+'} {role.name}")
 
 @bot.event
 async def on_raw_reaction_add(payload):
