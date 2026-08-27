@@ -3243,3 +3243,75 @@ n'avait pas trouvé en une heure.
 
 `test_selecteurs.py` passe à 39 vérifications : reset de police, fond des
 options, `color-scheme`, aucune liste vide.
+
+## 47. Livré le 27 août 2026 — les relais réseaux annonçaient en boucle
+
+Signalé : « quand on met le lien de sa chaîne Twitter, le message du post
+qu'on vient de faire s'envoie plusieurs fois, et ça renvoie aussi d'anciens
+messages ».
+
+### La cause
+
+`fetch_social_snapshot()` calculait l'empreinte d'une page ainsi :
+
+```python
+seed = "|".join([final_url, title, desc, image, canonical, text[:5000]])
+```
+
+`text[:5000]`, ce sont **les cinq premiers kilo-octets de HTML brut**. Mesure
+sur `x.com` : on y compte **43 nonces de script, 9 jetons longs et 4
+horodatages en millisecondes**. Tous changent à chaque requête.
+
+Deux relevés à trois secondes d'intervalle, vérifiés :
+
+| | empreinte |
+|---|---|
+| ancienne formule, relevé 1 | `483c0c4cb31c618d…` |
+| ancienne formule, relevé 2 | `62019e751e054973…` |
+| nouvelle formule, relevés 1 et 2 | `43ece632526e8d74…` (identique) |
+
+Le relais concluait donc « nouvelle publication » **à chaque tour de boucle**,
+soit toutes les dix minutes.
+
+Les *anciens* messages viennent de la même cause : sans session, X sert au
+robot les métadonnées qu'il veut — souvent le profil ou un post épinglé — et ce
+vieux contenu repartait à chaque annonce.
+
+### Le correctif
+
+L'empreinte ne porte plus que sur `canonical || url`, le titre, la description
+et l'image. Plus trois garde-fous, parce qu'une seule barrière ne suffit pas
+quand la page d'en face échappe à notre contrôle :
+
+- **Les quinze dernières empreintes sont retenues par relais.** Une page qui
+  alterne entre deux variantes (test A/B) revenait à un état déjà vu, et le
+  vieux contenu repartait.
+- **Une page sans titre ni description ni image n'est jamais annoncée.** C'est
+  la coquille que renvoie un site rendu en JavaScript ; publier un embed vide
+  serait pire que se taire.
+- **Vingt minutes au minimum entre deux annonces d'un même relais.**
+
+### Un second défaut, trouvé en chemin
+
+L'état était rangé sous une clef dérivée de la **plateforme**
+(`platform.lower()`), pas du lien. Deux comptes du même réseau partageaient
+donc un état, et **changer de compte comparait la nouvelle page à l'empreinte
+de l'ancienne** — une fausse « nouveauté » dès le premier relevé. La clef est
+maintenant l'empreinte du lien, insensible à la casse et à la barre finale.
+Les états des relais supprimés sont purgés, mais un salon momentanément
+indisponible ne fait plus perdre l'état.
+
+### Test
+
+`test_relais.py` (18 vérifications) rejoue le scénario signalé : vingt relevés
+d'une page inchangée et douze alternances entre deux pages doivent rester
+**totalement silencieux**.
+
+### Limite honnête
+
+X, TikTok et Instagram servent aux robots une page rendue en JavaScript. Sans
+clef d'API, ModBot ne peut lire que les métadonnées Open Graph, souvent
+génériques. Le relais est désormais **silencieux quand il ne peut rien lire de
+fiable** — ce qui est le bon comportement, mais signifie que ces trois réseaux
+resteront moins réactifs que Twitch, dont l'`og:title` change vraiment quand
+la chaîne passe en direct.
