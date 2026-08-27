@@ -3188,3 +3188,58 @@ session. Le dépôt principal a été remis à jour.
 **À retenir : après un push vers `main` depuis un worktree, faire un
 `git merge --ff-only origin/main` dans le dépôt principal**, sinon `test_api`
 valide un wiki qui n'est plus celui du site.
+
+## 46. Livré le 27 août 2026 — les listes déroulantes étaient invisibles
+
+Trois défauts signalés, deux causes, toutes deux mesurées dans le navigateur
+plutôt que devinées.
+
+### « On ne peut pas choisir de salon »
+
+Les entrées étaient bien là — **invisibles**. Mesure sur le site :
+
+| | |
+|---|---|
+| `option` background-color | `rgba(0, 0, 0, 0)` — transparent |
+| `option` color | `rgb(232, 236, 244)` — quasi blanc |
+| `:root` color-scheme | `normal` |
+
+Faute de `color-scheme`, le navigateur peint la **liste ouverte** avec sa
+propre couleur, blanche. Texte quasi blanc sur fond blanc : la liste s'ouvrait
+sur du vide. Cela valait pour **toutes** les listes du dashboard, pas seulement
+les nouvelles — mais c'est en convertissant onze réglages en listes que le
+défaut est devenu visible.
+
+Correctif : `color-scheme: dark` sur la racine, plus un fond explicite sur
+`option` pour les moteurs qui ignorent l'héritage dans la liste ouverte.
+
+### « Les polices ne sont pas les mêmes partout »
+
+Le reset disait `button, input { font: inherit }` — **ni `select`, ni
+`textarea`**. Mesure : Inter pour les champs, **Arial** pour les listes,
+**monospace** pour les zones de texte. Trois polices sur la même page.
+
+Même histoire : invisible tant que les réglages étaient des `<input>`.
+
+### Deux fragilités corrigées au passage
+
+- **Quinze listes étaient vides dans le HTML** — une boîte grise sans rien
+  dedans tant que `/resources` n'avait pas répondu. Elles ont maintenant une
+  première option, comme en avaient déjà les salons de bienvenue.
+- **Un bloc `ai` absent laissait les tuiles d'état sur trois tirets**,
+  c'est-à-dire sur un chargement qui n'arriverait jamais. Il est nommé :
+  « Indisponible ». Cette cause-là n'a pas pu être reproduite localement — le
+  cache est en `must-revalidate`, donc ce n'était pas un script périmé — mais
+  une panne muette est maintenant une panne lisible.
+
+### Méthode
+
+Le banc d'essai monté pour reproduire (une copie du dashboard avec une API
+simulée) n'a jamais dépassé l'écran de choix du serveur : l'authentification
+Discord n'est pas simulable simplement. Ce qui a tranché, c'est la **mesure
+des styles calculés** sur le site en production, l'application dévoilée à la
+main. Trois `getComputedStyle` ont donné en une fois ce que l'analyse statique
+n'avait pas trouvé en une heure.
+
+`test_selecteurs.py` passe à 39 vérifications : reset de police, fond des
+options, `color-scheme`, aucune liste vide.
