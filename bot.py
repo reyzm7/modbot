@@ -299,6 +299,7 @@ F_MODS    = chemin_donnees("mod_stats.json")
 F_RATINGS = chemin_donnees("ratings.json")
 F_DASHBOARD_SESSIONS = chemin_donnees("dashboard_sessions.json")
 F_BLACKLIST = chemin_donnees("blacklist.json")
+F_ADMINS = chemin_donnees("admins.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -5583,7 +5584,7 @@ def make_session(user, user_guilds, access_token=""):
         "avatar_url": user_avatar_url(user_id, user.get("avatar")),
         "guild_ids": allowed,
         "manageable_guilds": manageable_guilds,
-        "admin": user_id in DASHBOARD_ADMIN_IDS,
+        "admin": est_admin(user_id),
         "created_at": created.isoformat(),
         "expires_at": (created + timedelta(hours=SESSION_TTL_HOURS)).isoformat(),
     }
@@ -5616,7 +5617,12 @@ async def api_identity(request, admin_required=False):
     if _session_expired(identity):
         drop_session(token)
         raise web.HTTPUnauthorized(text="Session expiree, reconnecte-toi avec Discord.")
-    if admin_required and not identity.get("admin"):
+    # Recalcule, jamais relu depuis la session. Celle-ci fige le statut a
+    # la connexion : un administrateur retire aurait garde ses droits
+    # jusqu'a l'expiration de son jeton, et un administrateur ajoute
+    # aurait du se reconnecter pour en profiter.
+    identity["admin"] = est_admin(identity.get("user_id"))
+    if admin_required and not identity["admin"]:
         raise web.HTTPForbidden(text="Acces administrateur refuse.")
     return identity
 
@@ -7747,38 +7753,164 @@ async def api_admin_database(request):
         "sanctions": db_recent_sanctions(120),
     })
 
+# ════════════════════════════════════════════════
+#  ADMINISTRATEURS DU DASHBOARD
+# ════════════════════════════════════════════════
+
+# Au-dela, ce n'est plus une equipe mais une fuite : la limite rend
+# visible un ajout en masse plutot que de le laisser passer.
+ADMINS_MAX = 25
+
+
+def admins_ajoutes():
+    """
+    Administrateurs nommes depuis le panneau.
+
+    Deuxieme source, jamais la seule : DASHBOARD_ADMIN_IDS reste la
+    racine de confiance, et ce fichier ne peut que s'y ajouter.
+    """
+    data = jload(F_ADMINS)
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): v for k, v in data.items()
+            if str(k).isdigit() and isinstance(v, dict)}
+
+
+def tous_les_admins():
+    return set(DASHBOARD_ADMIN_IDS) | set(admins_ajoutes())
+
+
+def est_fondateur(user_id):
+    """Un fondateur vient de l'hebergeur : le panneau ne peut pas le retirer."""
+    return str(user_id or "") in DASHBOARD_ADMIN_IDS
+
+
+def est_admin(user_id):
+    return str(user_id or "") in tous_les_admins()
+
+
+def nom_utilisateur(user_id):
+    """Nom Discord, s'il partage un serveur avec le bot."""
+    try:
+        utilisateur = bot.get_user(int(user_id))
+        return str(utilisateur) if utilisateur else ""
+    except (TypeError, ValueError):
+        return ""
+
+
 async def api_admin_admins(request):
     """
-    Liste des administrateurs du dashboard, en lecture seule.
+    Liste des administrateurs du dashboard.
 
-    La source de verite est la variable d'environnement DASHBOARD_ADMIN_IDS,
-    cote hebergeur. Elle n'est modifiable que la : une liste modifiable depuis
-    le navigateur permettrait a n'importe qui de s'y ajouter.
+    Deux origines, et la difference compte : un FONDATEUR vient de
+    DASHBOARD_ADMIN_IDS, cote hebergeur, et le panneau ne peut pas le
+    retirer. Les autres ont ete nommes ici, et peuvent l'etre defaits ici.
     """
     identity = await api_identity(request, admin_required=True)
     moi = str(identity.get("user_id") or "")
+    ajoutes = admins_ajoutes()
 
     admins = []
     for admin_id in sorted(DASHBOARD_ADMIN_IDS):
-        nom = ""
-        # Le nom n'est connu que si le compte partage un serveur avec le bot.
-        try:
-            utilisateur = bot.get_user(int(admin_id))
-            nom = str(utilisateur) if utilisateur else ""
-        except (TypeError, ValueError):
-            pass
         admins.append({
             "id": admin_id,
-            "username": nom,
+            "username": nom_utilisateur(admin_id),
             "is_you": admin_id == moi,
+            "founder": True,
+            "removable": False,
+        })
+    for admin_id in sorted(ajoutes):
+        if admin_id in DASHBOARD_ADMIN_IDS:
+            continue
+        fiche = ajoutes[admin_id]
+        admins.append({
+            "id": admin_id,
+            "username": nom_utilisateur(admin_id) or clean_short_text(fiche.get("username"), "", 80),
+            "is_you": admin_id == moi,
+            "founder": False,
+            "removable": True,
+            "added_by": clean_short_text(fiche.get("added_by"), "", 80),
+            "added_at": clean_short_text(fiche.get("added_at"), "", 40),
         })
 
     return api_json({
         "ok": True,
         "admins": admins,
         "source": "DASHBOARD_ADMIN_IDS",
-        "editable": False,
+        "editable": True,
+        "max": ADMINS_MAX,
     }, request=request)
+
+
+async def api_admin_admin_add(request):
+    """
+    Nomme un administrateur.
+
+    Reserve aux administrateurs en place : donner ce droit revient a
+    donner le panneau entier, y compris la blacklist et les sauvegardes.
+    """
+    identity = await api_identity(request, admin_required=True)
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    brut = str(payload.get("user_id") or "").strip()
+    # Un identifiant Discord fait 17 a 20 chiffres. On refuse le reste
+    # plutot que d'enregistrer une ligne qui n'ouvrira jamais rien.
+    if not brut.isdigit() or not (17 <= len(brut) <= 20):
+        raise web.HTTPBadRequest(
+            text="Identifiant Discord invalide. Active le mode developpeur, "
+                 "clic droit sur le membre, « Copier l'identifiant ».")
+
+    if est_admin(brut):
+        raise web.HTTPBadRequest(text="Ce compte est deja administrateur.")
+
+    ajoutes = admins_ajoutes()
+    if len(ajoutes) + len(DASHBOARD_ADMIN_IDS) >= ADMINS_MAX:
+        raise web.HTTPBadRequest(
+            text=f"Limite de {ADMINS_MAX} administrateurs atteinte.")
+
+    ajoutes[brut] = {
+        "username": nom_utilisateur(brut),
+        "added_by": clean_short_text(identity.get("username"), "", 80),
+        "added_by_id": str(identity.get("user_id") or ""),
+        "added_at": now().isoformat(),
+    }
+    jsave(F_ADMINS, ajoutes)
+
+    dashboard_log("admin_add", None, identity.get("username"),
+                  f"{brut} ({ajoutes[brut]['username'] or 'inconnu'})")
+    return api_json({"ok": True, "admin": {
+        "id": brut,
+        "username": ajoutes[brut]["username"],
+        "founder": False,
+        "removable": True,
+        "is_you": brut == str(identity.get("user_id") or ""),
+    }})
+
+
+async def api_admin_admin_remove(request):
+    """Retire un administrateur nomme depuis le panneau."""
+    identity = await api_identity(request, admin_required=True)
+    cible = str(request.match_info.get("user_id") or "").strip()
+
+    if est_fondateur(cible):
+        # Sans cette barriere, un administrateur nomme pourrait evincer
+        # celui qui l'a nomme, et plus personne ne reprendrait la main
+        # sans acces a l'hebergeur.
+        raise web.HTTPForbidden(
+            text="Cet administrateur est declare chez l'hebergeur "
+                 "(DASHBOARD_ADMIN_IDS) : il ne peut pas etre retire d'ici.")
+
+    ajoutes = admins_ajoutes()
+    if cible not in ajoutes:
+        raise web.HTTPNotFound(text="Cet administrateur n'existe pas dans la liste.")
+
+    retire = ajoutes.pop(cible)
+    jsave(F_ADMINS, ajoutes)
+    dashboard_log("admin_remove", None, identity.get("username"),
+                  f"{cible} ({retire.get('username') or 'inconnu'})")
+    return api_json({"ok": True, "removed": cible})
 
 
 async def api_admin_blacklist(request):
@@ -7929,6 +8061,8 @@ async def start_dashboard_api():
 
     # Publication
     app.router.add_post("/api/guilds/{guild_id}/tickets/publish", api_publish_ticket)
+    app.router.add_post("/api/admin/admins", api_admin_admin_add)
+    app.router.add_delete("/api/admin/admins/{user_id}", api_admin_admin_remove)
     app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
     app.router.add_post("/api/guilds/{guild_id}/socials/test", api_test_social)
 

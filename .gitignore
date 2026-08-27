@@ -17,6 +17,7 @@ stats.json
 mod_stats.json
 ratings.json
 blacklist.json
+admins.json
 infractions.json
 dashboard_sessions.json
 dashboard_logs.json
