@@ -297,6 +297,7 @@ F_CONFIG  = chemin_donnees("config.json")
 F_STATS   = chemin_donnees("stats.json")
 F_MODS    = chemin_donnees("mod_stats.json")
 F_RATINGS = chemin_donnees("ratings.json")
+F_RATING_ATTENTE = chemin_donnees("rating_attente.json")
 F_DASHBOARD_SESSIONS = chemin_donnees("dashboard_sessions.json")
 F_BLACKLIST = chemin_donnees("blacklist.json")
 F_ADMINS = chemin_donnees("admins.json")
@@ -1704,6 +1705,50 @@ def load_tickets():
 
 def save_tickets(d):
     jsave(F_TICKETS, d)
+
+# ── De quel serveur parle une note donnee en message prive ? ──────────
+# La vue de notation est persistante : apres un redemarrage, c'est la
+# version enregistree au demarrage qui repond, et elle ne connait aucun
+# serveur. En MP, `interaction.guild` est None : sans cette memoire, la
+# note n'a plus de serveur ou aller.
+
+RATING_ATTENTE_JOURS = 30
+
+
+def rating_attente_poser(user_id, gid):
+    """Retient le serveur au moment ou l'on demande sa note au membre."""
+    donnees = jload(F_RATING_ATTENTE)
+    if not isinstance(donnees, dict):
+        donnees = {}
+    donnees[str(user_id)] = {"guild_id": str(gid), "date": now().isoformat()}
+
+    # Purge : une invitation a noter vieille d'un mois n'a plus de sens,
+    # et ce fichier ne doit pas grossir indefiniment.
+    limite = now().timestamp() - RATING_ATTENTE_JOURS * 86400
+    for uid in list(donnees):
+        try:
+            quand = datetime.fromisoformat(donnees[uid].get("date", "")).timestamp()
+        except (ValueError, TypeError, AttributeError):
+            quand = 0
+        if quand < limite:
+            donnees.pop(uid, None)
+
+    jsave(F_RATING_ATTENTE, donnees)
+
+
+def rating_attente_lire(user_id):
+    """Serveur retenu pour ce membre, ou "" s'il n'y en a pas."""
+    donnees = jload(F_RATING_ATTENTE)
+    if not isinstance(donnees, dict):
+        return ""
+    return str((donnees.get(str(user_id)) or {}).get("guild_id") or "")
+
+
+def rating_attente_oublier(user_id):
+    donnees = jload(F_RATING_ATTENTE)
+    if isinstance(donnees, dict) and donnees.pop(str(user_id), None) is not None:
+        jsave(F_RATING_ATTENTE, donnees)
+
 
 def add_rating(gid, user_id, note, commentaire="", pseudo=""):
     d = jload(F_RATINGS)
@@ -3657,10 +3702,23 @@ class ModalCommentaireNotation(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         texte = (self.commentaire.value or "").strip()
+        enregistree = False
         if self.gid:
             add_rating(self.gid, interaction.user.id, self.note, texte, str(interaction.user))
+            rating_attente_oublier(interaction.user.id)
+            enregistree = True
 
         libelle, emoji = RATING_LABELS.get(self.note, ("Merci", "⭐"))
+        if not enregistree:
+            # On ne dit plus « enregistree » quand elle ne l'est pas : le
+            # membre croyait avoir note, et le staff ne voyait rien venir.
+            await safe_ephemeral(interaction, embed=E(
+                "⚠️ Note non rattachee",
+                "Ta note n'a pas pu etre reliee a un serveur. Redemande la "
+                "fermeture d'un ticket, ou laisse ton avis directement sur "
+                "le serveur.", 0xFAA61A))
+            return
+
         e = EG(f"{emoji} Merci pour ton avis !",
                f"Ta note **{rating_stars(self.note)} {self.note}/5** — *{libelle}* a bien ete enregistree.",
                0xFFD700, self.gid)
@@ -3703,7 +3761,13 @@ class VueNotation(discord.ui.View):
         self.gid = str(gid) if gid else None
 
     async def _noter(self, interaction: discord.Interaction, note: int):
-        gid = self.gid or (str(interaction.guild.id) if interaction.guild else None)
+        # Trois sources, dans cet ordre : l'instance de la vue, le serveur
+        # de l'interaction, puis la memoire posee a l'envoi du MP. La
+        # troisieme est la seule qui subsiste apres un redemarrage, et
+        # c'est le cas courant : Railway redeploie a chaque envoi de code.
+        gid = (self.gid
+               or (str(interaction.guild.id) if interaction.guild else "")
+               or rating_attente_lire(interaction.user.id))
         # Le modal recueille le commentaire, puis enregistre la note
         await interaction.response.send_modal(ModalCommentaireNotation(gid, note))
 
@@ -4186,6 +4250,10 @@ class VueTicket(discord.ui.View):
                     f = await make_transcript(interaction.channel, tdata)
                     dm = EG(tr(gid, "ticket_closed_title"), f"Ton ticket **{tdata.get('nom', interaction.channel.name)}** a ete ferme.", 0xED4245, gid)
                     f.seek(0)
+                    # Retenu AVANT l'envoi : c'est ce qui permettra de
+                    # rattacher la note a ce serveur meme apres un
+                    # redemarrage du bot.
+                    rating_attente_poser(uid, gid)
                     await u.send(embed=dm, file=discord.File(f, filename=f"transcript-{interaction.channel.name}.txt"), view=VueNotation(gid))
                 except Exception:
                     pass

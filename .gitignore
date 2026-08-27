@@ -33,3 +33,4 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+rating_attente.json
