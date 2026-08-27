@@ -166,6 +166,90 @@ casse = bot_mod.cle_relais({"platform": "X", "link": "https://X.com/Compte_A"})
 verifier("la casse ne change pas la clef", t1 == casse)
 
 
+# ══════════════════════════════════════════════════════════════════════
+print("\n--- YouTube passe par son flux RSS ---")
+
+corps_yt = source[source.index("async def youtube_derniere_video"):][:2500]
+verifier("l'empreinte YouTube est l'identifiant de la video",
+         'hashlib.sha1(video.encode("utf-8")).hexdigest()' in corps_yt)
+verifier("le flux officiel est utilise",
+         "youtube.com/feeds/videos.xml" in source)
+verifier("la page n'est plus la source pour YouTube",
+         "if est_lien_youtube(url):" in source)
+
+resolution = source[source.index("async def youtube_id_de_chaine"):][:1800]
+verifier("un lien /channel/ est reconnu sans requete",
+         '/channel/(UC[A-Za-z0-9_-]{20,})' in resolution)
+verifier("le consentement europeen est refuse, pas contourne",
+         '"SOCS": "CAI"' in resolution)
+verifier("l'hote est normalise sur www",
+         "https://www.youtube.com" in resolution and "m\\.)?youtube" in resolution)
+verifier("l'identifiant de chaine est mis en cache",
+         "_youtube_chaines" in resolution)
+
+
+# ══════════════════════════════════════════════════════════════════════
+print("\n--- Messages recurrents : la date d'envoi ne vient pas du client ---")
+
+
+class FauxSalonR:
+    def __init__(self, cid):
+        self.id = cid
+
+
+class FauxGuildR:
+    id = 42
+
+    def get_channel(self, cid):
+        return FauxSalonR(cid)
+
+
+g = FauxGuildR()
+existants = [{"name": "Regles", "channel_id": "700", "content": "Lis les regles",
+              "interval": 60, "unit": "minutes", "mode": "repeat",
+              "last_sent": "2026-08-27T10:00:00+00:00"}]
+
+# Le navigateur renvoie la meme liste, mais avec last_sent vide : c'est
+# le cas qui faisait repartir le message au tour suivant.
+depuis_client = [{"name": "Regles", "channel_id": "700", "content": "Lis les regles",
+                  "interval": 60, "unit": "minutes", "mode": "repeat",
+                  "last_sent": ""}]
+propre = bot_mod.sanitize_recurring_messages(g, depuis_client, existants)
+verifier("la date d'envoi du serveur est conservee",
+         propre[0]["last_sent"] == "2026-08-27T10:00:00+00:00",
+         repr(propre[0]["last_sent"]))
+
+# Meme si le client tente d'imposer une date future.
+triche = [dict(depuis_client[0], last_sent="2099-01-01T00:00:00+00:00")]
+propre = bot_mod.sanitize_recurring_messages(g, triche, existants)
+verifier("une date envoyee par le client est ignoree",
+         propre[0]["last_sent"] == "2026-08-27T10:00:00+00:00",
+         repr(propre[0]["last_sent"]))
+
+# Un message sans salon ou sans contenu ne sert a rien.
+propre = bot_mod.sanitize_recurring_messages(
+    g, [{"name": "Vide", "channel_id": "", "content": "x"},
+        {"name": "Muet", "channel_id": "700", "content": ""}], [])
+verifier("un message sans salon ou sans contenu est ecarte",
+         propre == [], str(propre))
+
+# Une charge utile qui n'est pas une liste ne doit rien effacer.
+verifier("une charge utile invalide conserve l'existant",
+         bot_mod.sanitize_recurring_messages(g, "n'importe quoi", existants) == existants)
+
+borne = bot_mod.sanitize_recurring_messages(
+    g, [{"name": str(i), "channel_id": "700", "content": "x"} for i in range(60)], [])
+verifier("le nombre de messages est borne", len(borne) <= 25, str(len(borne)))
+
+rapide = bot_mod.sanitize_recurring_messages(
+    g, [{"name": "R", "channel_id": "700", "content": "x", "interval": 0}], [])
+verifier("un intervalle nul est releve", rapide[0]["interval"] >= 1,
+         str(rapide[0]["interval"]))
+
+verifier("un message « une seule fois » se desactive apres envoi",
+         'if str(message.get("mode")) == "once":' in source)
+
+
 rates = [n for n, ok, _ in resultats if not ok]
 print("\n" + "=" * 62)
 print(f"RESULTAT : {len(resultats) - len(rates)}/{len(resultats)} verifications passees")

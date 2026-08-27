@@ -5881,6 +5881,60 @@ def serialize_dashboard_config(guild):
         "logs": dashboard_guild_logs(gid),
     }
 
+def cle_message_recurrent(message):
+    """Ce qui identifie un message recurrent d'une sauvegarde a l'autre."""
+    return (clean_short_text(message.get("name"), "", 80).strip().lower(),
+            str(parse_int(message.get("channel_id")) or ""))
+
+
+def sanitize_recurring_messages(guild, brut, existants):
+    """
+    Valide la liste venue du dashboard, et conserve les dates d'envoi.
+
+    `last_sent` n'est jamais repris du navigateur : c'est la seule chose
+    qui empeche un message de repartir en boucle, et une page qui
+    l'oublie le remettrait a zero. Le serveur reprend donc la date qu'il
+    avait deja pour ce message.
+    """
+    if not isinstance(brut, list):
+        return existants if isinstance(existants, list) else []
+
+    connus = {}
+    for ancien in (existants or []):
+        if isinstance(ancien, dict):
+            connus[cle_message_recurrent(ancien)] = ancien.get("last_sent") or ""
+
+    propres = []
+    for item in brut[:25]:
+        if not isinstance(item, dict):
+            continue
+        salon = parse_int(item.get("channel_id"))
+        contenu = clean_short_text(item.get("content"), "", 1900)
+        if not salon or not contenu:
+            continue
+        # Un intervalle trop court transformerait le message recurrent en
+        # inondation : cinq minutes au moins, une semaine au plus.
+        try:
+            intervalle = int(item.get("interval") or 30)
+        except (TypeError, ValueError):
+            intervalle = 30
+        unite = clean_short_text(item.get("unit"), "minutes", 20).lower()
+        if unite not in ("minutes", "heures", "hours", "jours", "days"):
+            unite = "minutes"
+        propre = {
+            "enabled": item.get("enabled", True) is not False,
+            "name": clean_short_text(item.get("name"), "Message recurrent", 80),
+            "channel_id": str(salon),
+            "interval": max(1, min(intervalle, 10000)),
+            "unit": unite,
+            "content": contenu,
+            "mode": "once" if str(item.get("mode")) == "once" else "repeat",
+        }
+        propre["last_sent"] = connus.get(cle_message_recurrent(propre), "")
+        propres.append(propre)
+    return propres
+
+
 async def apply_dashboard_config(guild, payload):
     gid = str(guild.id)
     cfg = get_cfg(gid)
@@ -5997,9 +6051,15 @@ async def apply_dashboard_config(guild, payload):
     if "social_relays" in payload:
         cfg["social_relays"] = sanitize_social_relays(payload.get("social_relays"))
 
-    for key in ("recurring_messages", "tournament"):
-        if key in payload:
-            cfg[key] = payload[key]
+    # `cfg[key] = payload[key]` ecrivait ces deux listes telles quelles :
+    # aucune validation, et `last_sent` repris du navigateur alors que
+    # c'est la seule chose qui empeche un message de repartir en boucle.
+    if "recurring_messages" in payload:
+        cfg["recurring_messages"] = sanitize_recurring_messages(
+            guild, payload.get("recurring_messages"), cfg.get("recurring_messages"))
+
+    if "tournament" in payload and isinstance(payload.get("tournament"), dict):
+        cfg["tournament"] = payload["tournament"]
 
     set_cfg(gid, cfg)
     dashboard_log("config_update", guild, payload.get("actor", "dashboard"), "Configuration sauvegardee depuis le dashboard")
@@ -8354,6 +8414,10 @@ def mentions_relais(guild, relay):
         everyone=everyone, roles=roles or False, users=False)
 
 
+SOCIAL_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+
+
 def _social_platform_palette(platform):
     p = str(platform or "").lower()
     if "twitch" in p:
@@ -8362,13 +8426,118 @@ def _social_platform_palette(platform):
         return "🎵", 0x111111, "Nouvelle vidéo"
     if "instagram" in p:
         return "📸", 0xE1306C, "Nouvelle publication"
+    if "youtube" in p:
+        return "▶", 0xFF0000, "Nouvelle vidéo"
     if "twitter" in p or "x" == p.strip():
         return "𝕏", 0x1DA1F2, "Nouvelle publication"
     return "📣", 0x5865F2, "Nouvelle publication"
 
+# ── YouTube : le flux RSS plutot que la page ──────────────────────────
+# Une page de chaine ne dit rien de la derniere video (og:title vaut
+# « YouTube ») et son HTML change a chaque requete. Le flux RSS est
+# public, sans clef, et porte l'identifiant de chaque video : une
+# empreinte qui ne bouge que lorsqu'une video parait.
+
+YOUTUBE_FLUX = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
+
+# L'identifiant de chaine est stable : le rechercher coute une page de
+# deux megaoctets, autant ne le faire qu'une fois par lien.
+_youtube_chaines = {}
+
+
+def est_lien_youtube(url):
+    return "youtube.com" in str(url or "").lower() or "youtu.be" in str(url or "").lower()
+
+
+async def youtube_id_de_chaine(session, url):
+    """Identifiant UC... d'une chaine, depuis n'importe quelle forme de lien."""
+    # Normalise sur www : le cookie de consentement est pose par hote, et
+    # « youtube.com/@x » redirige vers « www.youtube.com » — le cookie ne
+    # suivait pas, et la banniere revenait.
+    lien = re.sub(r"^https?://(?:m\.)?youtube\.com", "https://www.youtube.com",
+                  str(url or ""), flags=re.I)
+    direct = re.search(r"/channel/(UC[A-Za-z0-9_-]{20,})", lien)
+    if direct:
+        return direct.group(1)
+    if lien in _youtube_chaines:
+        return _youtube_chaines[lien]
+    try:
+        # Sans cookie de consentement, YouTube redirige vers sa banniere
+        # europeenne et sert une page qui ne contient pas l'identifiant.
+        # « SOCS=CAI » est l'equivalent d'un refus : aucune personnalisation,
+        # aucun suivi. Rien de personnel ne circule ici — c'est le bot qui
+        # lit une page publique, pas un visiteur.
+        async with session.get(lien,
+                               headers={"User-Agent": SOCIAL_AGENT},
+                               cookies={"SOCS": "CAI", "CONSENT": "PENDING+987"},
+                               allow_redirects=True) as reponse:
+            if reponse.status >= 400:
+                return ""
+            page = await reponse.text(errors="ignore")
+    except Exception:
+        return ""
+    trouve = (re.search(r"channel_id=(UC[A-Za-z0-9_-]{20,})", page)
+              or re.search(r'itemprop="identifier"\s+content="(UC[A-Za-z0-9_-]{20,})"', page)
+              or re.search(r'"browseId"\s*:\s*"(UC[A-Za-z0-9_-]{20,})"', page))
+    identifiant = trouve.group(1) if trouve else ""
+    _youtube_chaines[lien] = identifiant
+    return identifiant
+
+
+async def youtube_derniere_video(session, url):
+    """Derniere video d'une chaine, sous la forme d'un snapshot."""
+    chaine = await youtube_id_de_chaine(session, url)
+    if not chaine:
+        return None
+    try:
+        async with session.get(YOUTUBE_FLUX.format(chaine),
+                               headers={"User-Agent": SOCIAL_AGENT}) as reponse:
+            if reponse.status >= 400:
+                return None
+            flux = await reponse.text(errors="ignore")
+    except Exception:
+        return None
+
+    entree = re.search(r"<entry>(.*?)</entry>", flux, re.S)
+    if not entree:
+        return None
+    bloc = entree.group(1)
+
+    def champ(motif):
+        trouve = re.search(motif, bloc, re.S)
+        return clean_short_text(trouve.group(1), "", 600) if trouve else ""
+
+    video = champ(r"<yt:videoId>([^<]+)</yt:videoId>")
+    if not video:
+        return None
+    titre = champ(r"<title>([^<]+)</title>")
+    lien = champ(r'<link rel="alternate" href="([^"]+)"') or f"https://www.youtube.com/watch?v={video}"
+    vignette = champ(r'<media:thumbnail url="([^"]+)"')
+    resume = champ(r"<media:description>([^<]*)</media:description>")
+
+    return {
+        "url": lien,
+        "title": titre,
+        "description": resume,
+        "image": vignette,
+        "canonical": lien,
+        # L'identifiant de la video EST l'empreinte : il ne change que
+        # lorsqu'une nouvelle video parait, jamais autrement.
+        "fingerprint": hashlib.sha1(video.encode("utf-8")).hexdigest(),
+        "empty": not titre,
+    }
+
+
 async def fetch_social_snapshot(session, url):
+    # YouTube a un flux public : on le prefere a la page, qui ne dit rien
+    # de la derniere video.
+    if est_lien_youtube(url):
+        depuis_flux = await youtube_derniere_video(session, url)
+        if depuis_flux:
+            return depuis_flux
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        "User-Agent": SOCIAL_AGENT,
         "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
     }
     async with session.get(url, headers=headers, allow_redirects=True) as response:
@@ -8436,6 +8605,9 @@ async def dashboard_recurring_loop():
                 except Exception:
                     continue
                 message["last_sent"] = now().isoformat()
+                # Un message « une seule fois » ne doit plus jamais repartir.
+                if str(message.get("mode")) == "once":
+                    message["enabled"] = False
                 changed = True
             if changed:
                 cfg["recurring_messages"] = messages
