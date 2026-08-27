@@ -10091,7 +10091,33 @@ async def appliquer_auto_roles(member, apres_captcha=False):
                   ", ".join(r.name for r in donnes) or "aucun role attribue")
 
 
+# Un serveur qui perd son salon de bienvenue le perd pour TOUS ses
+# arrivants : sans temporisation, une vague d'arrivees produirait une
+# vague d'alertes identiques. Une par heure et par motif suffit.
+_ALERTES_BIENVENUE = {}
+
+
+async def avertir_bienvenue(guild, titre, description):
+    """Signale une configuration de bienvenue cassee, au plus une fois par heure."""
+    clef = (guild.id, titre)
+    maintenant = now().timestamp()
+    dernier = _ALERTES_BIENVENUE.get(clef, 0)
+    if maintenant - dernier < 3600:
+        return
+    _ALERTES_BIENVENUE[clef] = maintenant
+    await log_event(guild, "members", titre, description, severity="warning")
+
+
 async def send_dashboard_member_event(member, departure=False):
+    # Les bots n'ont jamais eu de message d'arrivee (on_member_join les
+    # renvoie vers signaler_arrivee_bot), mais ils avaient un message de
+    # depart : « Au revoir MonBot » s'affichait dans un salon ou son
+    # arrivee n'etait jamais passee. Les deux sens sont maintenant
+    # traites pareil — leur va-et-vient reste journalise, avec leurs
+    # permissions, ce qui est l'information utile pour un bot.
+    if getattr(member, "bot", False):
+        return
+
     cfg = get_cfg(member.guild.id)
     system = cfg.get("welcome_system") or {}
     enabled_key = "departure_enabled" if departure else "enabled"
@@ -10121,10 +10147,28 @@ async def send_dashboard_member_event(member, departure=False):
                                or system.get("channel_id"))
     else:
         channel_id = parse_int(system.get("channel_id"))
+    quoi = "de depart" if departure else "d'arrivee"
     if not channel_id:
+        # Un salon manquant est une erreur de configuration silencieuse :
+        # l'administrateur croit que le bot ne detecte plus les arrivees.
+        await avertir_bienvenue(
+            member.guild, f"Aucun salon {quoi} n'est configure",
+            f"Les messages {quoi} sont actives, mais aucun salon n'est "
+            "choisi dans le dashboard.")
         return
     channel = member.guild.get_channel(channel_id)
     if not channel:
+        await avertir_bienvenue(
+            member.guild, f"Le salon {quoi} n'existe plus",
+            f"Le salon `{channel_id}` a ete supprime ou n'est plus visible "
+            "par ModBot. Choisis-en un autre dans le dashboard.")
+        return
+
+    droits = channel.permissions_for(member.guild.me)
+    if not droits.send_messages:
+        await avertir_bienvenue(
+            member.guild, f"Ecriture refusee dans le salon {quoi}",
+            f"ModBot n'a pas la permission d'ecrire dans {channel.mention}.")
         return
     template = system.get("departure_message" if departure else "message")
     default = "Au revoir {username}." if departure else "Bienvenue {user} sur {server} !"
@@ -10196,6 +10240,15 @@ async def send_dashboard_member_event(member, departure=False):
                               member.guild, member, content)
             except Exception as ex2:
                 print(f"send_dashboard_member_event {member.guild.id} (sans carte): {ex2}")
+                await avertir_bienvenue(
+                    member.guild, f"Message {quoi} non publie",
+                    f"L'envoi dans {channel.mention} a echoue : "
+                    f"`{type(ex2).__name__}`.")
+        else:
+            await avertir_bienvenue(
+                member.guild, f"Message {quoi} non publie",
+                f"L'envoi dans {channel.mention} a echoue : "
+                f"`{type(ex).__name__}`.")
 
 async def signaler_arrivee_bot(membre):
     """
