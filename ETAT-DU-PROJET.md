@@ -3021,3 +3021,57 @@ points** — c'est ce qui en fait un test et non une formalité.
 
 Le salon de départ effacé ne revient pas tout seul : il faut le choisir à
 nouveau dans le dashboard, une fois. Ensuite il tient.
+
+## 43. Livré le 27 août 2026 — plus aucun identifiant à taper
+
+Le dashboard reçoit déjà les rôles et les salons du serveur de
+`/api/guilds/{id}/resources`, filtrés à la source (`api_guild_resources`
+écarte `@everyone` et les rôles gérés par une intégration). Onze champs
+demandaient pourtant de coller un nombre à 18 chiffres — et une faute de
+frappe n'y produit aucune erreur, seulement un réglage qui ne fait rien.
+
+| Champ | Avant | Après |
+|---|---|---|
+| Auto-rôles | saisie d'identifiants | liste d'ajout + pastilles, 10 max |
+| Salon du panneau de rôles | saisie | liste déroulante |
+| Rôle d'une ligne de rôle-réaction | saisie | liste déroulante |
+| Mentions des relais (×4) | saisie | liste + pastilles, 8 max par relais |
+| Salons système (×5) | saisie | listes déroulantes nommées |
+| Salon des tickets | saisie | liste déroulante |
+| Image d'option de ticket | URL à coller | galerie du téléphone |
+
+### L'image d'option de ticket
+
+`reduireEmoji()` recadre au centre en **128×128** — la forme d'un emoji,
+pas celle d'une carte de bienvenue — puis descend en qualité jusqu'à
+passer sous les **256 Ko** que Discord accepte. PNG d'abord pour garder la
+transparence, JPEG en repli. Le bot savait déjà lire une URL `data:` :
+`_telecharger_image()` s'en charge depuis la livraison des tickets.
+
+### Deux défauts trouvés en chemin
+
+**Le bouton « Ajouter une option » produisait une ligne à quatre champs**
+là où celle chargée du serveur en a cinq. Les champs étant lus par leur
+rang, `inputs[2]` valait la description et `inputs[3]` n'existait pas :
+la description finissait dans le libellé, et la description était perdue.
+
+**Le gestionnaire de clic des options supprimait la ligne pour n'importe
+quel `<button>`.** Dès que la cellule d'image en a contenu deux, cliquer
+« Image » effaçait l'option entière — c'est ce qui a fait disparaître deux
+lignes pendant les essais. Il vise désormais `[data-option-remove]`.
+
+Les deux sont la même erreur que celle qui avait effacé le salon de départ
+(§42) : **désigner un élément par sa position au lieu de son nom**.
+
+### Le captcha
+
+Rien à faire : le rôle et le salon étaient déjà des listes déroulantes,
+envoyés à `api_captcha_setup`, qui les honore et ne crée un rôle ou un
+salon que s'ils sont absents. Vérifié sur le site en production.
+
+### Test
+
+`modbot-site/test_selecteurs.py` (34 vérifications) verrouille trois
+règles : aucun champ libre adossé aux listes de rôles ou de salons,
+aucune lecture par rang, et un gestionnaire de clic qui vise un bouton
+nommé.
