@@ -6161,6 +6161,11 @@ async def api_health(request):
         # apres un changement de variable, sans attendre Discord.
         "started_at": PROCESS_STARTED_AT.isoformat(),
         "client_id": DISCORD_CLIENT_ID,
+        # Sans volume, le disque est efface a chaque redeploiement : les
+        # sessions du dashboard partent avec, et tout le monde doit se
+        # reconnecter. Le dire ici evite de le deviner.
+        "persistent_storage": DATA_DIR != BASE_DIR,
+        "session_ttl_hours": SESSION_TTL_HOURS,
         "version": "2.0",
     }, request=request)
 
@@ -7199,6 +7204,39 @@ async def api_ai_reset(request):
     return api_json({"ok": True, "cleared": efaces})
 
 
+async def publier_panneau_captcha(guild, salon):
+    """
+    Publie le panneau de verification, apres avoir retire le precedent.
+
+    Sans cela, chaque « Installer et publier » en ajoutait un de plus :
+    trois clics, trois panneaux, et autant de boutons qui repondent
+    encore. Le membre ne sait plus lequel utiliser, et le salon se
+    remplit.
+    """
+    gid = str(guild.id)
+    ancien = parse_int(get_cfg(gid).get("captcha_message_id"))
+    ancien_salon = parse_int(get_cfg(gid).get("captcha_channel"))
+    if ancien:
+        cible = guild.get_channel(ancien_salon) if ancien_salon else salon
+        for candidat in {cible, salon}:
+            if not candidat:
+                continue
+            try:
+                message = await candidat.fetch_message(ancien)
+                await message.delete()
+                break
+            except (discord.NotFound, discord.Forbidden, AttributeError):
+                continue
+            except Exception:
+                continue
+
+    message = await salon.send(
+        embed=build_captcha_panel_embed(guild, captcha_cfg(gid)),
+        view=VueCaptchaPanel())
+    update_cfg(gid, "captcha_message_id", str(message.id))
+    return message
+
+
 async def api_captcha_setup(request):
     """
     Met le captcha en place, en creant ce qui manque.
@@ -7250,9 +7288,7 @@ async def api_captcha_setup(request):
     message_id = ""
     if payload.get("publish", True):
         try:
-            message = await salon.send(
-                embed=build_captcha_panel_embed(guild, captcha_cfg(gid)),
-                view=VueCaptchaPanel())
+            message = await publier_panneau_captcha(guild, salon)
             message_id = str(message.id)
         except discord.Forbidden:
             raise web.HTTPForbidden(
@@ -7291,8 +7327,9 @@ async def api_captcha_panel(request):
         raise web.HTTPBadRequest(text="Le salon de verification n'existe plus.")
 
     try:
-        message = await salon.send(
-            embed=build_captcha_panel_embed(guild, reglages), view=VueCaptchaPanel())
+        # Meme chemin que l'installation : republier retire le panneau
+        # precedent au lieu d'en ajouter un.
+        message = await publier_panneau_captcha(guild, salon)
     except discord.Forbidden:
         raise web.HTTPForbidden(text=f"ModBot ne peut pas ecrire dans #{salon.name}.")
 
@@ -8218,7 +8255,12 @@ async def start_dashboard_api():
     global _dashboard_api_runner
     if _dashboard_api_runner:
         return
-    app = web.Application(middlewares=[api_cors_middleware], client_max_size=2 * 1024 * 1024)
+    # Deux megaoctets ne suffisaient plus : la sauvegarde porte les images
+    # des options de ticket et la carte de bienvenue, toutes en `data:`.
+    # Quelques images suffisaient a depasser la limite, et aiohttp
+    # repondait un 413 nu que le dashboard affichait tel quel.
+    app = web.Application(middlewares=[api_cors_middleware],
+                          client_max_size=12 * 1024 * 1024)
 
     # Authentification
     app.router.add_route("*", "/api/health", api_health)
@@ -10255,13 +10297,41 @@ def render_member_template(template, member):
     ne pas casser les configurations existantes.
     """
     text = str(template or "")
-    compte = str(getattr(member.guild, "member_count", 0) or 0)
+    guild = member.guild
+    compte = str(getattr(guild, "member_count", 0) or 0)
+
+    # Le rang d'arrivee se lit mieux que le total brut : « tu es notre
+    # 1250e membre » dit quelque chose, « 1250 membres » beaucoup moins.
+    rang = compte
+    cree_le = getattr(member, "created_at", None)
+    arrive_le = getattr(member, "joined_at", None)
+    proprietaire = getattr(guild, "owner", None)
+
+    def horodatage(moment, style="D"):
+        """Date affichee dans le fuseau de chaque lecteur, par Discord."""
+        if not moment:
+            return "?"
+        return f"<t:{int(moment.timestamp())}:{style}>"
+
     replacements = {
         # Ecriture documentee
         "{user}": member.mention,
         "{username}": member.display_name,
-        "{server}": member.guild.name,
+        "{server}": guild.name,
         "{memberCount}": compte,
+        # Ajouts
+        "{userTag}": str(member),
+        "{userId}": str(member.id),
+        "{userAvatar}": str(getattr(member.display_avatar, "url", "")),
+        "{memberOrdinal}": rang,
+        "{serverIcon}": str(getattr(guild.icon, "url", "") or ""),
+        "{owner}": str(getattr(proprietaire, "display_name", "") or "?"),
+        "{accountCreated}": horodatage(cree_le),
+        "{accountAge}": horodatage(cree_le, "R"),
+        "{joinedAt}": horodatage(arrive_le),
+        "{boostCount}": str(getattr(guild, "premium_subscription_count", 0) or 0),
+        "{channelCount}": str(len(getattr(guild, "text_channels", []) or [])),
+        "{roleCount}": str(max(0, len(getattr(guild, "roles", []) or []) - 1)),
         # Variantes tolerees
         "{membercount}": compte,
         "{member_count}": compte,
