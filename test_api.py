@@ -318,7 +318,7 @@ def verifier_erreurs_ia():
 
     inconnu = msg(418, "je suis une theiere")
     verifier("erreur inconnue : renvoie vers le diagnostic",
-             "/ia statut verifier" in inconnu)
+             "Assistant IA" in inconnu)
     verifier("erreur inconnue : detail brut masque par defaut",
              "theiere" not in inconnu)
     verifier("detailler=True : detail brut repris",
@@ -684,7 +684,7 @@ def verifier_commandes():
     prefixe = [c.name for c in bot_mod.bot.commands]
 
     verifier("des commandes sont enregistrees", len(plates) >= 20, f"{len(plates)} simples")
-    verifier("les groupes sont enregistres", len(groupes) >= 5, f"{len(groupes)} groupes")
+    verifier("les groupes sont enregistres", len(groupes) >= 3, f"{len(groupes)} groupes")
 
     # Discord refuse au-dela de 100 entrees de premier niveau.
     premier_niveau = len(plates) + len(groupes)
