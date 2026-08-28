@@ -400,7 +400,16 @@ FICHIERS_SAUVEGARDES = (
     "tickets.json",
     "giveaways.json",
     "infractions.json",
+    # Sans volume monte, le disque est efface a chaque redeploiement. Ces
+    # deux-la manquaient : les notes du support et les administrateurs
+    # nommes depuis le panneau disparaissaient a chaque envoi de code.
+    "ratings.json",
+    "admins.json",
 )
+
+# dashboard_sessions.json n'y sera JAMAIS : il contient les jetons OAuth
+# des membres. Une reconnexion coute dix secondes ; un jeton depose dans
+# un salon Discord ne se rattrape pas.
 
 _sauvegarde_a_faire = False
 _sauvegarde_derniere = None
