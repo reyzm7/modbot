@@ -3443,3 +3443,74 @@ rendu du panneau Ratings : tout ce chemin était sain. Une seule ligne
 manquait, en amont de tout.
 
 `test_notes.py` : 23 vérifications, dont le scénario complet du redémarrage.
+
+## 50. Livré le 27 août 2026 — sept défauts signalés d'un coup
+
+### 1. Aucun emoji saisissable sur ordinateur
+
+Sur téléphone le clavier en propose ; sur ordinateur il faut connaître un
+raccourci ou ouvrir une table de caractères. Les champs restaient vides.
+
+Une **palette de 81 emojis** s'ouvre au clic sur le champ. Pas de bibliothèque :
+quelques dizaines d'emojis couvrent ce qu'on met sur un bouton de ticket ou une
+ligne de rôle, et le champ reste modifiable à la main pour le reste. La palette
+est posée sur le document, pas dans la ligne — un `overflow` de parent la
+couperait.
+
+### 2. Onze variables de plus
+
+`{userTag}`, `{userId}`, `{userAvatar}`, `{memberOrdinal}`, `{serverIcon}`,
+`{owner}`, `{accountCreated}`, `{accountAge}`, `{joinedAt}`, `{boostCount}`,
+`{channelCount}`, `{roleCount}`. Les dates passent par l'horodatage Discord
+(`<t:…:R>`) : chaque lecteur les voit dans son fuseau. Treize puces cliquables
+au lieu de quatre.
+
+### 3. Se reconnecter à chaque fois — la cause était ailleurs
+
+`/api/health` expose maintenant `persistent_storage`. Il vaut **`False`** :
+**aucun volume n'est monté sur Railway**, donc le disque est effacé à chaque
+redéploiement — et `dashboard_sessions.json` avec.
+
+Pire : la sauvegarde Discord couvrait config, blacklist, tickets, giveaways et
+infractions, mais **ni `ratings.json` ni `admins.json`**. Les notes du support
+et les administrateurs nommés depuis le panneau disparaissaient à chaque envoi
+de code. Les deux y sont maintenant.
+
+`dashboard_sessions.json` n'y sera jamais : il contient les **jetons OAuth** des
+membres. Une reconnexion coûte dix secondes ; un jeton déposé dans un salon
+Discord ne se rattrape pas.
+
+**Le vrai remède est un volume Railway** — action côté hébergeur. Sans lui, tout
+ce qui n'est pas dans la liste de sauvegarde repart de zéro.
+
+### 4. `loadGuildResources is not defined`
+
+La fonction s'appelle `loadDashboardResources`. L'appel avec l'autre nom levait
+une `ReferenceError` qui interrompait tout ce qui suivait dans le panneau de
+vérification. Une ligne.
+
+### 5. Mots filtrés : ni sur téléphone, ni avec Entrée
+
+C'était une **zone de texte** enregistrée par la sauvegarde générale. Sur
+téléphone ce bouton est loin, et dans une zone de texte la touche Entrée ajoute
+une ligne au lieu de valider — on croyait avoir ajouté le mot, il n'était nulle
+part. C'est maintenant un champ, un bouton et des pastilles : Entrée valide, une
+liste séparée par des virgules s'ajoute d'un coup, un clic retire.
+
+### 6. Le panneau de vérification en triple
+
+Chaque « Installer et publier » en postait un nouveau **sans retirer le
+précédent**. `publier_panneau_captcha()` supprime l'ancien avant d'envoyer, et
+« Republier » passe par le même chemin — il y avait deux endroits qui
+publiaient, et ils divergeaient.
+
+### 7. « erreur connexion modbot 413 »
+
+413 = charge trop lourde. La limite était de **deux mégaoctets**, et la
+sauvegarde porte les images des options de ticket et la carte de bienvenue,
+toutes en `data:`. Quelques images suffisaient à la dépasser, et aiohttp
+répondait un 413 nu que le dashboard affichait tel quel.
+
+Limite portée à douze mégaoctets, **et** les images d'option bornées à 64 Ko
+côté site : un PNG de 128×128 n'a jamais besoin des 256 Ko que Discord tolère.
+Corriger la limite sans corriger la source aurait seulement repoussé le mur.
