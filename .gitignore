@@ -24,8 +24,7 @@ dashboard_logs.json
 captcha_pending.json
 giveaways.json
 
-# Le premium a été supprimé du projet. Le bot n'écrit plus ce fichier ;
-# la ligne reste pour qu'un ancien premium.json local ne soit pas committé.
+# Abonnements et cadeaux premium, par serveur.
 premium.json
 
 # Python

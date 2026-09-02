@@ -8,7 +8,9 @@ import urllib.parse
 from datetime import datetime, timezone, timedelta
 from aiohttp import web
 
+import hmac
 import security_core as sc
+import premium_core as pc
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -91,6 +93,7 @@ DASHBOARD_API_TOKEN = os.environ.get("DASHBOARD_API_TOKEN", "").strip()
 DASHBOARD_ALLOWED_ORIGINS = os.environ.get("DASHBOARD_ALLOWED_ORIGINS", "*")
 DASHBOARD_SITE_URL = os.environ.get("DASHBOARD_SITE_URL", "https://modbot-website.vercel.app/dashboard.html")
 DASHBOARD_ADMIN_IDS = {x.strip() for x in os.environ.get("DASHBOARD_ADMIN_IDS", "1189681599965573131").split(",") if x.strip()}
+ROLE_PREMIUM_NOM = os.environ.get("MODBOT_PREMIUM_ROLE", "ModBot Premium").strip() or "ModBot Premium"
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "1510405235544424620").strip()
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
 DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "").strip()
@@ -301,6 +304,7 @@ F_RATING_ATTENTE = chemin_donnees("rating_attente.json")
 F_DASHBOARD_SESSIONS = chemin_donnees("dashboard_sessions.json")
 F_BLACKLIST = chemin_donnees("blacklist.json")
 F_ADMINS = chemin_donnees("admins.json")
+F_PREMIUM = chemin_donnees("premium.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -405,6 +409,9 @@ FICHIERS_SAUVEGARDES = (
     # nommes depuis le panneau disparaissaient a chaque envoi de code.
     "ratings.json",
     "admins.json",
+    # Un abonnement paye qui disparaitrait au redeploiement serait
+    # une facture sans contrepartie.
+    "premium.json",
 )
 
 # dashboard_sessions.json n'y sera JAMAIS : il contient les jetons OAuth
@@ -5128,7 +5135,7 @@ def resolve_cors_origin(request):
 # nominative et n'acceptent aucune authentification, donc restreindre leur
 # CORS n'apporterait rien — et casserait l'affichage si le site change de
 # domaine sans que DASHBOARD_ALLOWED_ORIGINS soit mis a jour.
-CORS_PUBLIC_PATHS = ("/api/public/",)
+CORS_PUBLIC_PATHS = ("/api/public/", "/api/premium/offers")
 
 
 def apply_cors(response, request=None):
@@ -5943,6 +5950,12 @@ def serialize_dashboard_config(guild):
         "reaction_roles": cfg.get("reaction_roles", []),
         "auto_roles": autoroles_cfg(gid),
         "ai": etat_ia_dashboard(gid),
+        "premium": {
+            **premium_etat(gid),
+            # Le dashboard verrouille ce qui n'est pas ouvert : il lui
+            # faut le detail, pas seulement « premium oui/non ».
+            "features": pc.fonctionnalites_ouvertes(est_premium(gid)),
+        },
         "reaction_title": cfg.get("reaction_title") or "Choisis tes roles",
         "reaction_description": cfg.get("reaction_description") or "Clique sur une reaction pour recevoir ou retirer le role correspondant.",
         "reaction_roles_channel_id": str(cfg.get("reaction_roles_channel_id") or ""),
@@ -8058,6 +8071,407 @@ def nom_utilisateur(user_id):
         return ""
 
 
+# ════════════════════════════════════════════════
+#  PREMIUM
+# ════════════════════════════════════════════════
+#
+# Le premium est une DATE DE FIN, jamais un booleen. Un booleen se
+# desynchronise le jour ou un paiement echoue et que personne ne repasse
+# derriere ; une date se perime toute seule.
+#
+# La decision vit dans premium_core.py, qui ne connait ni Discord ni le
+# reseau. Ici on ne fait que lire et ecrire le fichier.
+
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+STRIPE_API = "https://api.stripe.com/v1"
+
+# Les tarifs sont resolus une fois depuis les identifiants de produit :
+# un produit peut porter plusieurs tarifs, seul l'actif nous interesse.
+_stripe_tarifs = {}
+
+
+def premium_tout():
+    donnees = jload(F_PREMIUM)
+    return donnees if isinstance(donnees, dict) else {}
+
+
+def premium_fiche(gid):
+    return premium_tout().get(str(gid)) or {}
+
+
+def premium_etat(gid):
+    """Etat complet d'un serveur, tel que le dashboard l'affiche."""
+    return pc.etat_premium(premium_fiche(gid))
+
+
+def est_premium(gid):
+    return premium_etat(gid)["active"]
+
+
+def premium_ecrire(gid, fiche):
+    donnees = premium_tout()
+    donnees[str(gid)] = fiche
+    jsave(F_PREMIUM, donnees)
+    return fiche
+
+
+def premium_prolonger(gid, jours, source, plan="", auteur=""):
+    return premium_ecrire(str(gid), pc.prolonger(
+        premium_fiche(gid), jours, source, plan, auteur))
+
+
+def premium_revoquer(gid, auteur=""):
+    return premium_ecrire(str(gid), pc.revoquer(premium_fiche(gid), auteur))
+
+
+def premium_par_abonnement(abonnement_id):
+    """Retrouve le serveur derriere un abonnement Stripe."""
+    for gid, fiche in premium_tout().items():
+        if isinstance(fiche, dict) and fiche.get("subscription") == abonnement_id:
+            return gid
+    return ""
+
+
+async def exiger_premium(guild, fonctionnalite):
+    """
+    Leve une erreur claire si le serveur n'a pas le premium.
+
+    Le message nomme la fonctionnalite : « acces refuse » tout court
+    laisse l'administrateur chercher ce qui manque.
+    """
+    if est_premium(guild.id):
+        return
+    titre = (pc.FONCTIONNALITES.get(fonctionnalite) or {}).get("titre", fonctionnalite)
+    raise web.HTTPPaymentRequired(
+        text=f"« {titre} » fait partie de ModBot Premium. "
+             "Rubrique « Premium » du site pour l'activer.")
+
+
+# ── Stripe, par son API REST ──────────────────────────────────────────
+# Pas de bibliotheque : trois appels suffisent, et une dependance de
+# moins est une dependance qui ne cassera pas au prochain deploiement.
+
+async def stripe_appel(session, methode, chemin, donnees=None):
+    if not STRIPE_SECRET_KEY:
+        raise web.HTTPServiceUnavailable(
+            text="Le paiement n'est pas configure sur ce ModBot.")
+    entetes = {"Authorization": f"Bearer {STRIPE_SECRET_KEY}"}
+    url = f"{STRIPE_API}{chemin}"
+    async with session.request(methode, url, headers=entetes, data=donnees) as reponse:
+        corps = await reponse.json()
+        if reponse.status >= 400:
+            message = (corps.get("error") or {}).get("message") or "Stripe a refuse la demande."
+            print(f"stripe {chemin}: {message}")
+            raise web.HTTPBadGateway(text=message)
+        return corps
+
+
+async def stripe_tarif_du_produit(session, produit):
+    """Identifiant de tarif actif d'un produit, mis en cache."""
+    if produit in _stripe_tarifs:
+        return _stripe_tarifs[produit]
+    corps = await stripe_appel(
+        session, "GET", f"/prices?product={produit}&active=true&limit=1")
+    tarifs = corps.get("data") or []
+    if not tarifs:
+        raise web.HTTPBadGateway(
+            text=f"Aucun tarif actif pour le produit {produit} dans Stripe.")
+    _stripe_tarifs[produit] = tarifs[0]["id"]
+    return _stripe_tarifs[produit]
+
+
+def stripe_signature_valide(corps, entete):
+    """
+    Verifie la signature d'un webhook Stripe.
+
+    Sans cette verification, n'importe qui pourrait poster « paiement
+    reussi » sur l'adresse du webhook et s'offrir le premium.
+    """
+    if not STRIPE_WEBHOOK_SECRET:
+        return False
+    horodatage, signatures = "", []
+    for morceau in str(entete or "").split(","):
+        clef, _, valeur = morceau.strip().partition("=")
+        if clef == "t":
+            horodatage = valeur
+        elif clef == "v1":
+            signatures.append(valeur)
+    if not horodatage or not signatures:
+        return False
+
+    # Une signature rejouee des heures plus tard n'a rien a faire ici.
+    try:
+        if abs(now().timestamp() - int(horodatage)) > 300:
+            return False
+    except (TypeError, ValueError):
+        return False
+
+    attendue = hmac.new(
+        STRIPE_WEBHOOK_SECRET.encode("utf-8"),
+        f"{horodatage}.".encode("utf-8") + corps,
+        hashlib.sha256).hexdigest()
+    # compare_digest : une comparaison naive fuit la signature attendue
+    # par le temps qu'elle met a echouer.
+    return any(hmac.compare_digest(attendue, s) for s in signatures)
+
+
+async def api_premium_offres(request):
+    """
+    Les offres, pour la page publique.
+
+    Aucune authentification : ce sont des tarifs affiches, pas des
+    donnees de serveur. Aucun identifiant Stripe n'en sort non plus —
+    le site n'a pas besoin de les connaitre pour afficher un prix.
+    """
+    offres = []
+    for clef, offre in pc.OFFRES.items():
+        offres.append({
+            "key": clef,
+            "label": offre["libelle"],
+            "price": offre["prix"],
+            "period": offre["periode"],
+            "saving": offre["economie"],
+            "days": offre["jours"],
+        })
+    fonctionnalites = [
+        {"key": clef, "title": f["titre"], "summary": f["resume"], "icon": f["icone"]}
+        for clef, f in pc.FONCTIONNALITES.items()
+    ]
+    reponse = api_json({
+        "ok": True,
+        "offers": offres,
+        "features": fonctionnalites,
+        "checkout_available": bool(STRIPE_SECRET_KEY),
+    }, request=request)
+    return reponse
+
+
+async def api_premium_etat(request):
+    """Etat premium d'un serveur, pour son dashboard."""
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    return api_json({"ok": True, "premium": premium_etat(guild.id)}, request=request)
+
+
+async def api_premium_checkout(request):
+    """
+    Ouvre une page de paiement Stripe pour ce serveur.
+
+    L'identifiant du serveur voyage dans les metadonnees de la session :
+    c'est ce que le webhook relira pour savoir QUI crediter. Sans lui, un
+    paiement arriverait sans destinataire.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    clef = str(payload.get("plan") or "").strip()
+    offre = pc.OFFRES.get(clef)
+    if not offre:
+        raise web.HTTPBadRequest(
+            text="Offre inconnue. Choisis mensuel, semestriel ou annuel.")
+
+    site = (DASHBOARD_SITE_URL or "").rsplit("/", 1)[0] or DASHBOARD_SITE_URL
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        tarif = await stripe_tarif_du_produit(session, offre["produit"])
+        corps = await stripe_appel(session, "POST", "/checkout/sessions", {
+            "mode": "subscription",
+            "line_items[0][price]": tarif,
+            "line_items[0][quantity]": "1",
+            "success_url": f"{site}/premium.html?paiement=reussi",
+            "cancel_url": f"{site}/premium.html?paiement=annule",
+            "client_reference_id": str(guild.id),
+            "metadata[guild_id]": str(guild.id),
+            "metadata[plan]": clef,
+            "metadata[guild_name]": guild.name[:80],
+            "subscription_data[metadata][guild_id]": str(guild.id),
+            "subscription_data[metadata][plan]": clef,
+            "allow_promotion_codes": "true",
+        })
+
+    dashboard_log("premium_checkout", guild, identity.get("username"), clef)
+    return api_json({"ok": True, "url": corps.get("url", "")}, request=request)
+
+
+async def api_stripe_webhook(request):
+    """
+    Ce que Stripe nous raconte.
+
+    La signature est verifiee AVANT de lire quoi que ce soit : sans elle,
+    n'importe qui pourrait poster « paiement reussi » a cette adresse et
+    s'offrir le premium.
+    """
+    corps = await request.read()
+    if not stripe_signature_valide(corps, request.headers.get("Stripe-Signature", "")):
+        raise web.HTTPUnauthorized(text="Signature Stripe invalide.")
+
+    try:
+        evenement = json.loads(corps.decode("utf-8", "ignore"))
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Corps illisible.")
+
+    type_evenement = str(evenement.get("type") or "")
+    objet = (evenement.get("data") or {}).get("object") or {}
+    meta = objet.get("metadata") or {}
+    gid = str(meta.get("guild_id") or objet.get("client_reference_id") or "")
+    plan = str(meta.get("plan") or "")
+
+    if type_evenement == "checkout.session.completed" and gid:
+        jours = (pc.OFFRES.get(plan) or {}).get("jours", 31)
+        fiche = pc.prolonger(premium_fiche(gid), jours, "stripe", plan, "Stripe")
+        fiche["subscription"] = str(objet.get("subscription") or "")
+        fiche["customer"] = str(objet.get("customer") or "")
+        premium_ecrire(gid, fiche)
+        print(f"premium: {gid} credite de {jours} jours ({plan})")
+        await annoncer_premium(gid, plan, "stripe")
+
+    elif type_evenement == "invoice.paid":
+        # Renouvellement : on repousse depuis la date de fin en cours.
+        abonnement = str(objet.get("subscription") or "")
+        cible = gid or premium_par_abonnement(abonnement)
+        if cible:
+            fiche_actuelle = premium_fiche(cible)
+            plan = plan or str(fiche_actuelle.get("plan") or "mensuel")
+            jours = (pc.OFFRES.get(plan) or {}).get("jours", 31)
+            premium_ecrire(cible, pc.prolonger(
+                fiche_actuelle, jours, "stripe", plan, "Stripe"))
+            print(f"premium: {cible} renouvele de {jours} jours")
+
+    elif type_evenement in ("customer.subscription.deleted",
+                            "customer.subscription.updated"):
+        abonnement = str(objet.get("id") or "")
+        cible = gid or premium_par_abonnement(abonnement)
+        if cible:
+            fiche = premium_fiche(cible)
+            # Resilie : on NE COUPE PAS tout de suite. La periode est
+            # payee, elle doit etre servie jusqu'au bout.
+            fiche["cancel_at_period_end"] = bool(objet.get("cancel_at_period_end"))
+            if type_evenement.endswith("deleted"):
+                fiche["cancel_at_period_end"] = True
+            premium_ecrire(cible, fiche)
+
+    # Stripe reessaie tant qu'il n'a pas de 2xx : on repond toujours.
+    return api_json({"ok": True, "received": type_evenement})
+
+
+async def annoncer_premium(gid, plan, source):
+    """Journalise l'activation et donne le role premium s'il existe."""
+    guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
+    if not guild:
+        return
+    libelle = (pc.OFFRES.get(plan) or {}).get("libelle", plan or "Premium")
+    etat = premium_etat(gid)
+    await log_event(
+        guild, "admin", "ModBot Premium active",
+        f"Le serveur passe en premium ({libelle}).",
+        fields=[("Offre", libelle), ("Origine", source),
+                ("Jusqu'au", etat["until"][:10] or "?")],
+        severity="success")
+    await donner_role_premium(guild)
+
+
+async def donner_role_premium(guild):
+    """
+    Pose le role premium sur le serveur, en le creant au besoin.
+
+    Discretement : si ModBot n'a pas le droit de gerer les roles, ce
+    n'est pas une raison pour faire echouer un paiement qui, lui, a
+    reussi.
+    """
+    if not est_premium(guild.id):
+        return None
+    if not guild.me.guild_permissions.manage_roles:
+        return None
+    role = discord.utils.get(guild.roles, name=ROLE_PREMIUM_NOM)
+    if role is None:
+        try:
+            role = await guild.create_role(
+                name=ROLE_PREMIUM_NOM, colour=discord.Colour(0xF1C40F),
+                hoist=True, reason="ModBot Premium")
+        except Exception:
+            return None
+    return role
+
+
+async def api_admin_premium_grant(request):
+    """
+    Un administrateur du bot offre du premium a un serveur.
+
+    Reserve aux administrateurs, et journalise avec son auteur : offrir
+    du premium a une valeur, ca ne doit pas se faire sans trace.
+    """
+    identity = await api_identity(request, admin_required=True)
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    gid = str(payload.get("guild_id") or "").strip()
+    duree = str(payload.get("duration") or "").strip()
+    if not gid.isdigit() or not (17 <= len(gid) <= 20):
+        raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
+    if duree not in pc.DUREES_CADEAU:
+        raise web.HTTPBadRequest(
+            text="Duree inconnue. Choisis 1mois, 6mois ou 1an.")
+
+    auteur = clean_short_text(identity.get("username"), "", 80) or "Dashboard"
+    jours = pc.DUREES_CADEAU[duree]
+    premium_prolonger(gid, jours, "admin", duree, auteur)
+    etat = premium_etat(gid)
+
+    guild = bot.get_guild(int(gid))
+    nom = guild.name if guild else gid
+    dashboard_log("premium_grant", guild, auteur, f"{nom}: {duree}")
+    if guild:
+        await log_event(
+            guild, "admin", "Premium offert",
+            f"**{auteur}** a offert {duree} de ModBot Premium a ce serveur.",
+            fields=[("Duree", duree), ("Jusqu'au", etat["until"][:10])],
+            severity="success")
+        await donner_role_premium(guild)
+
+    return api_json({"ok": True, "guild_id": gid, "guild_name": nom,
+                     "premium": etat})
+
+
+async def api_admin_premium_revoke(request):
+    """Retire le premium d'un serveur."""
+    identity = await api_identity(request, admin_required=True)
+    gid = str(request.match_info.get("guild_id") or "").strip()
+    if not gid.isdigit():
+        raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
+
+    auteur = clean_short_text(identity.get("username"), "", 80) or "Dashboard"
+    premium_revoquer(gid, auteur)
+    guild = bot.get_guild(int(gid))
+    dashboard_log("premium_revoke", guild, auteur, gid)
+    if guild:
+        await log_event(guild, "admin", "Premium retire",
+                        f"**{auteur}** a retire ModBot Premium de ce serveur.",
+                        severity="warning")
+    return api_json({"ok": True, "guild_id": gid, "premium": premium_etat(gid)})
+
+
+async def api_admin_premium_list(request):
+    """Tous les serveurs premium, pour le panneau d'administration."""
+    await api_identity(request, admin_required=True)
+    lignes = []
+    for gid, fiche in premium_tout().items():
+        etat = pc.etat_premium(fiche)
+        guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
+        lignes.append({
+            "guild_id": gid,
+            "guild_name": guild.name if guild else "",
+            "members": getattr(guild, "member_count", 0) if guild else 0,
+            **etat,
+        })
+    lignes.sort(key=lambda x: (not x["active"], x["guild_name"].lower()))
+    return api_json({"ok": True, "guilds": lignes})
+
+
 async def api_admin_admins(request):
     """
     Liste des administrateurs du dashboard.
@@ -8327,6 +8741,13 @@ async def start_dashboard_api():
     # Publication
     app.router.add_post("/api/guilds/{guild_id}/tickets/publish", api_publish_ticket)
     app.router.add_post("/api/guilds/{guild_id}/ai/reset", api_ai_reset)
+    app.router.add_get("/api/premium/offers", api_premium_offres)
+    app.router.add_post("/api/stripe/webhook", api_stripe_webhook)
+    app.router.add_get("/api/guilds/{guild_id}/premium", api_premium_etat)
+    app.router.add_post("/api/guilds/{guild_id}/premium/checkout", api_premium_checkout)
+    app.router.add_get("/api/admin/premium", api_admin_premium_list)
+    app.router.add_post("/api/admin/premium", api_admin_premium_grant)
+    app.router.add_delete("/api/admin/premium/{guild_id}", api_admin_premium_revoke)
     app.router.add_post("/api/admin/admins", api_admin_admin_add)
     app.router.add_delete("/api/admin/admins/{user_id}", api_admin_admin_remove)
     app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
