@@ -5966,6 +5966,8 @@ def serialize_dashboard_config(guild):
         "reaction_roles": cfg.get("reaction_roles", []),
         "auto_roles": autoroles_cfg(gid),
         "ai": etat_ia_dashboard(gid),
+        "voice": vocal_cfg(gid),
+        "events": evenements_cfg(gid),
         "premium": {
             **premium_etat(gid),
             # Le dashboard verrouille ce qui n'est pas ouvert : il lui
@@ -6150,6 +6152,14 @@ async def apply_dashboard_config(guild, payload):
 
     if "ai" in payload:
         cfg["ai_system"] = sanitize_ai_system(guild, payload.get("ai"))
+
+    if "voice" in payload:
+        cfg["voice_system"] = sanitize_voice_system(
+            guild, payload.get("voice"), cfg.get("voice_system"))
+
+    if "events" in payload:
+        cfg["events"] = sanitize_evenements(
+            guild, payload.get("events"), cfg.get("events"))
 
     if "welcome_system" in payload:
         cfg["welcome_system"] = sanitize_welcome_system(payload.get("welcome_system"))
@@ -6373,7 +6383,19 @@ async def api_guild_resources(request):
         if role.is_default() or role.managed:
             continue
         roles.append(serialize_role(role))
-    return api_json({"ok": True, "guild": serialize_guild(guild), "channels": channels, "roles": roles})
+    # Salons vocaux et categories dans des listes SEPAREES : les
+    # melanger a `channels` casserait tous les selecteurs qui attendent
+    # des salons textes.
+    vocaux = [{"id": str(c.id), "name": c.name, "type": "voice"}
+              for c in sorted(getattr(guild, "voice_channels", []),
+                              key=lambda ch: ch.position)
+              if c.permissions_for(me).view_channel]
+    categories = [{"id": str(c.id), "name": c.name, "type": "category"}
+                  for c in sorted(getattr(guild, "categories", []),
+                                  key=lambda ch: ch.position)]
+    return api_json({"ok": True, "guild": serialize_guild(guild),
+                     "channels": channels, "roles": roles,
+                     "voice_channels": vocaux, "categories": categories})
 
 async def api_get_guild_config(request):
     identity = await api_identity(request)
@@ -8508,6 +8530,276 @@ async def api_admin_premium_list(request):
     return api_json({"ok": True, "guilds": lignes})
 
 
+# ════════════════════════════════════════════════
+#  EVENEMENTS
+# ════════════════════════════════════════════════
+#
+# Le compte a rebours n'est pas rafraichi par une boucle : Discord sait
+# afficher un horodatage relatif qui se met a jour seul, dans le fuseau
+# de chaque lecteur. Une boucle qui reediterait le message chaque minute
+# couterait des requetes pour un resultat moins bon.
+
+EVENEMENTS_MAX = 25
+PARTICIPANTS_AFFICHES = 20
+
+
+def evenements_cfg(gid):
+    cfg = get_cfg(gid)
+    liste = cfg.get("events")
+    return liste if isinstance(liste, list) else []
+
+
+def evenements_ecrire(gid, liste):
+    cfg = get_cfg(gid)
+    cfg["events"] = liste[:EVENEMENTS_MAX]
+    set_cfg(gid, cfg)
+    return cfg["events"]
+
+
+def evenement_par_message(gid, message_id):
+    """
+    Retrouve un evenement par le message qui le porte.
+
+    C'est ce qui permet au bouton d'inscription d'etre une vue
+    persistante sans identifiant : apres un redemarrage, la vue ne sait
+    rien, mais le message, lui, est toujours la.
+    """
+    for evenement in evenements_cfg(gid):
+        if str(evenement.get("message_id") or "") == str(message_id):
+            return evenement
+    return None
+
+
+def sanitize_evenement(guild, brut, existant=None):
+    """Valide un evenement venu du dashboard."""
+    ancien = existant if isinstance(existant, dict) else {}
+    if not isinstance(brut, dict):
+        return None
+    titre = clean_short_text(brut.get("title"), "", 120)
+    salon = parse_int(brut.get("channel_id"))
+    if not titre or not salon or guild.get_channel(salon) is None:
+        return None
+
+    debut = clean_short_text(brut.get("starts_at"), "", 40)
+    try:
+        # On valide la date ici : une date illisible donnerait un compte
+        # a rebours absurde a tous les membres du serveur.
+        moment = datetime.fromisoformat(debut) if debut else None
+        if moment and not moment.tzinfo:
+            moment = moment.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        moment = None
+
+    return {
+        "id": clean_short_text(brut.get("id"), "", 40) or secrets.token_hex(6),
+        "title": titre,
+        "description": clean_short_text(brut.get("description"), "", 1500),
+        "image": clean_short_text(brut.get("image"), "", 400000),
+        "channel_id": str(salon),
+        "starts_at": moment.isoformat() if moment else "",
+        "max": max(0, min(parse_int(brut.get("max")) or 0, 5000)),
+        # Ni le message publie ni la liste des inscrits ne viennent du
+        # navigateur : ce sont des faits que le bot a constates.
+        "message_id": str(ancien.get("message_id") or ""),
+        "participants": [str(x) for x in (ancien.get("participants") or [])
+                         if str(x).isdigit()],
+    }
+
+
+def sanitize_evenements(guild, brut, existants):
+    connus = {}
+    for ancien in (existants or []):
+        if isinstance(ancien, dict) and ancien.get("id"):
+            connus[str(ancien["id"])] = ancien
+    propres = []
+    for item in (brut or [])[:EVENEMENTS_MAX]:
+        if not isinstance(item, dict):
+            continue
+        propre = sanitize_evenement(guild, item, connus.get(str(item.get("id") or "")))
+        if propre:
+            propres.append(propre)
+    return propres
+
+
+def embed_evenement(guild, evenement):
+    """L'affiche de l'evenement, telle que les membres la voient."""
+    gid = str(guild.id)
+    embed = EG(evenement.get("title", "Evenement"),
+               evenement.get("description", ""), Palette.PREMIUM, gid)
+
+    debut = evenement.get("starts_at")
+    if debut:
+        try:
+            moment = datetime.fromisoformat(debut)
+            if not moment.tzinfo:
+                moment = moment.replace(tzinfo=timezone.utc)
+            horodatage = int(moment.timestamp())
+            # Deux formats : la date complete, et le relatif qui se met a
+            # jour tout seul chez chaque lecteur.
+            embed.add_field(
+                name="Rendez-vous",
+                value=f"<t:{horodatage}:F>\n<t:{horodatage}:R>", inline=True)
+        except (ValueError, TypeError):
+            pass
+
+    participants = evenement.get("participants") or []
+    maximum = int(evenement.get("max") or 0)
+    compte = f"`{len(participants)}`" + (f" / `{maximum}`" if maximum else "")
+    embed.add_field(name="Participants", value=compte, inline=True)
+
+    if participants:
+        noms = []
+        for uid in participants[:PARTICIPANTS_AFFICHES]:
+            membre = guild.get_member(int(uid)) if str(uid).isdigit() else None
+            noms.append(membre.mention if membre else f"<@{uid}>")
+        reste = len(participants) - len(noms)
+        texte = " ".join(noms) + (f" … et {reste} autre(s)" if reste > 0 else "")
+        embed.add_field(name="Inscrits", value=texte[:1024], inline=False)
+
+    image = evenement.get("image")
+    if image and str(image).startswith(("http", "data:image/")):
+        # Discord ne sait pas afficher une image `data:` : elle sert
+        # d'apercu au dashboard, pas d'illustration ici.
+        if str(image).startswith("http"):
+            try:
+                embed.set_image(url=image)
+            except Exception:
+                pass
+    return embed
+
+
+class VueEvenement(discord.ui.View):
+    """
+    Inscription et desistement.
+
+    Vue persistante : elle ne connait aucun evenement. C'est le message
+    qui l'identifie — meme lecon que les notes du support, ou une vue
+    persistante avait perdu son serveur apres un redemarrage.
+    """
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _basculer(self, interaction, inscrire):
+        guild = interaction.guild
+        if guild is None:
+            return
+        gid = str(guild.id)
+        liste = evenements_cfg(gid)
+        evenement = evenement_par_message(gid, interaction.message.id)
+        if evenement is None:
+            return await safe_ephemeral(interaction, embed=E(
+                "Evenement introuvable",
+                "Cette affiche ne correspond plus a aucun evenement.", 0xFAA61A))
+
+        uid = str(interaction.user.id)
+        participants = [str(x) for x in (evenement.get("participants") or [])]
+        maximum = int(evenement.get("max") or 0)
+
+        if inscrire:
+            if uid in participants:
+                return await safe_ephemeral(interaction, embed=E(
+                    "Deja inscrit", "Tu figures deja sur la liste.", 0x5865F2))
+            if maximum and len(participants) >= maximum:
+                return await safe_ephemeral(interaction, embed=E(
+                    "Complet", f"Cet evenement est limite a {maximum} participants.",
+                    0xFAA61A))
+            participants.append(uid)
+            titre, texte, couleur = ("Inscription enregistree",
+                                     "A tout a l'heure !", 0x43B581)
+        else:
+            if uid not in participants:
+                return await safe_ephemeral(interaction, embed=E(
+                    "Pas inscrit", "Tu ne figures pas sur la liste.", 0x5865F2))
+            participants.remove(uid)
+            titre, texte, couleur = ("Desistement enregistre",
+                                     "Ta place est rerendue.", 0xFAA61A)
+
+        evenement["participants"] = participants
+        evenements_ecrire(gid, liste)
+
+        try:
+            await interaction.message.edit(
+                embed=embed_evenement(guild, evenement), view=self)
+        except Exception:
+            pass
+        await safe_ephemeral(interaction, embed=E(titre, texte, couleur))
+        await log_event(
+            guild, "events",
+            "Inscription a un evenement" if inscrire else "Desistement",
+            f"{interaction.user.mention} — **{evenement.get('title')}**",
+            fields=[("Participants", str(len(participants)))],
+            severity="info", actor=interaction.user)
+
+    @discord.ui.button(label="Je participe", emoji="✅",
+                       style=discord.ButtonStyle.success, custom_id="event_join")
+    async def rejoindre(self, interaction: discord.Interaction, _bouton):
+        await self._basculer(interaction, True)
+
+    @discord.ui.button(label="Me desister", emoji="✖️",
+                       style=discord.ButtonStyle.secondary, custom_id="event_leave")
+    async def partir(self, interaction: discord.Interaction, _bouton):
+        await self._basculer(interaction, False)
+
+
+async def publier_evenement(guild, evenement):
+    """
+    Publie l'affiche, en retirant la precedente.
+
+    Republier sans supprimer laisserait deux affiches actives, chacune
+    avec son bouton — et les inscriptions se repartiraient entre les
+    deux sans que personne ne comprenne pourquoi.
+    """
+    salon = guild.get_channel(int(evenement["channel_id"]))
+    if salon is None:
+        raise web.HTTPBadRequest(text="Le salon de publication n'existe plus.")
+
+    ancien = parse_int(evenement.get("message_id"))
+    if ancien:
+        try:
+            message = await salon.fetch_message(ancien)
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass
+        except Exception:
+            pass
+
+    try:
+        message = await salon.send(embed=embed_evenement(guild, evenement),
+                                   view=VueEvenement())
+    except discord.Forbidden:
+        raise web.HTTPForbidden(text=f"ModBot ne peut pas ecrire dans #{salon.name}.")
+    evenement["message_id"] = str(message.id)
+    return message
+
+
+async def api_evenements_publier(request):
+    """Publie ou republie l'affiche d'un evenement."""
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    await exiger_premium(guild, "events")
+
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    cible = clean_short_text(payload.get("id"), "", 40)
+
+    liste = evenements_cfg(str(guild.id))
+    evenement = next((e for e in liste if str(e.get("id")) == cible), None)
+    if evenement is None:
+        raise web.HTTPNotFound(text="Evenement introuvable.")
+
+    await publier_evenement(guild, evenement)
+    evenements_ecrire(str(guild.id), liste)
+
+    dashboard_log("event_publish", guild, identity.get("username"),
+                  evenement.get("title", ""))
+    await log_event(guild, "events", "Evenement publie",
+                    f"**{evenement.get('title')}** est en ligne.",
+                    severity="success")
+    return api_json({"ok": True, "message_id": evenement["message_id"]})
+
+
 async def api_admin_admins(request):
     """
     Liste des administrateurs du dashboard.
@@ -8777,6 +9069,7 @@ async def start_dashboard_api():
     # Publication
     app.router.add_post("/api/guilds/{guild_id}/tickets/publish", api_publish_ticket)
     app.router.add_post("/api/guilds/{guild_id}/ai/reset", api_ai_reset)
+    app.router.add_post("/api/guilds/{guild_id}/events/publish", api_evenements_publier)
     app.router.add_get("/api/premium/offers", api_premium_offres)
     app.router.add_post("/api/stripe/webhook", api_stripe_webhook)
     app.router.add_get("/api/guilds/{guild_id}/premium", api_premium_etat)
@@ -11571,6 +11864,209 @@ async def on_raw_reaction_add(payload):
 async def on_raw_reaction_remove(payload):
     await handle_dashboard_reaction_role(payload, remove=True)
 
+# ════════════════════════════════════════════════
+#  VOCAUX PERSONNALISES
+# ════════════════════════════════════════════════
+#
+# Un salon sert de porte d'entree. Qui s'y connecte se voit creer son
+# propre salon, y est deplace, et en devient maitre. Le salon disparait
+# des qu'il se vide.
+
+# Se reconnecter en rafale creerait un salon par tentative.
+VOCAL_DELAI_CREATION = 8
+_vocal_dernieres_creations = {}
+
+
+def vocal_cfg(gid):
+    cfg = get_cfg(gid)
+    brut = cfg.get("voice_system") if isinstance(cfg.get("voice_system"), dict) else {}
+    return {
+        "enabled": bool(brut.get("enabled")),
+        "hub_id": str(brut.get("hub_id") or ""),
+        "category_id": str(brut.get("category_id") or ""),
+        "name_template": clean_short_text(
+            brut.get("name_template"), "Salon de {username}", 90),
+        "user_limit": max(0, min(int(brut.get("user_limit") or 0), 99)),
+        "temporaires": [str(x) for x in (brut.get("temporaires") or []) if str(x).isdigit()],
+    }
+
+
+def sanitize_voice_system(guild, brut, existant=None):
+    """
+    Valide les reglages venus du dashboard.
+
+    `temporaires` n'est JAMAIS repris du navigateur : c'est la liste des
+    salons que le bot a lui-meme crees. Un client qui l'ecraserait
+    laisserait des salons orphelins que plus rien ne supprimerait.
+    """
+    ancien = existant if isinstance(existant, dict) else {}
+    if not isinstance(brut, dict):
+        return ancien
+    hub = parse_int(brut.get("hub_id"))
+    categorie = parse_int(brut.get("category_id"))
+    return {
+        "enabled": bool(brut.get("enabled")),
+        "hub_id": str(hub) if hub and guild.get_channel(hub) else "",
+        "category_id": str(categorie) if categorie and guild.get_channel(categorie) else "",
+        "name_template": clean_short_text(
+            brut.get("name_template"), "Salon de {username}", 90),
+        "user_limit": max(0, min(parse_int(brut.get("user_limit")) or 0, 99)),
+        "temporaires": [str(x) for x in (ancien.get("temporaires") or []) if str(x).isdigit()],
+    }
+
+
+def vocal_memoriser(gid, salon_id, ajouter=True):
+    """Tient a jour la liste des salons crees par le bot."""
+    cfg = get_cfg(gid)
+    bloc = cfg.get("voice_system") if isinstance(cfg.get("voice_system"), dict) else {}
+    liste = [str(x) for x in (bloc.get("temporaires") or []) if str(x).isdigit()]
+    salon_id = str(salon_id)
+    if ajouter and salon_id not in liste:
+        liste.append(salon_id)
+    elif not ajouter and salon_id in liste:
+        liste.remove(salon_id)
+    else:
+        return
+    bloc["temporaires"] = liste[-60:]
+    cfg["voice_system"] = bloc
+    set_cfg(gid, cfg)
+
+
+def nom_vocal(gabarit, membre):
+    """Le nom du salon, avec les variables du createur."""
+    texte = str(gabarit or "Salon de {username}")
+    for clef, valeur in (("{username}", membre.display_name),
+                         ("{user}", membre.display_name),
+                         ("{tag}", str(membre))):
+        texte = texte.replace(clef, valeur)
+    # Discord tronque a 100 caracteres et refuse un nom vide.
+    return (texte.strip() or f"Salon de {membre.display_name}")[:100]
+
+
+async def creer_vocal_personnalise(membre, reglages):
+    """
+    Cree le salon du membre, l'y deplace, et lui en donne les clefs.
+
+    Les droits accordes sont ceux du proprietaire d'un salon, pas ceux
+    d'un moderateur : renommer, limiter, expulser de SON salon. Rien qui
+    deborde sur le reste du serveur.
+    """
+    guild = membre.guild
+    hub = guild.get_channel(int(reglages["hub_id"]))
+    if hub is None:
+        return None
+
+    categorie = None
+    if reglages["category_id"]:
+        categorie = guild.get_channel(int(reglages["category_id"]))
+    categorie = categorie or hub.category
+
+    droits = {
+        membre: discord.PermissionOverwrite(
+            manage_channels=True,     # renommer, changer la limite
+            move_members=True,        # expulser de son salon
+            mute_members=True,
+            deafen_members=True,
+            connect=True,
+            view_channel=True,
+        ),
+        guild.me: discord.PermissionOverwrite(
+            manage_channels=True, connect=True, view_channel=True, move_members=True),
+    }
+
+    try:
+        salon = await guild.create_voice_channel(
+            name=nom_vocal(reglages["name_template"], membre),
+            category=categorie,
+            user_limit=reglages["user_limit"],
+            overwrites=droits,
+            reason=f"[ModBot] Vocal personnalise de {membre}")
+        await membre.move_to(salon, reason="[ModBot] Vocal personnalise")
+    except discord.Forbidden:
+        await avertir_vocal(
+            guild, "Vocal personnalise impossible",
+            "ModBot a besoin de « Gerer les salons » et « Deplacer les membres ».")
+        return None
+    except discord.HTTPException as ex:
+        print(f"creer_vocal_personnalise {guild.id}: {ex}")
+        return None
+
+    vocal_memoriser(guild.id, salon.id, True)
+    await log_event(
+        guild, "voice", "Vocal personnalise cree",
+        f"{membre.mention} a ouvert son salon {salon.mention}.",
+        fields=[("Salon", salon.name), ("Proprietaire", str(membre))],
+        severity="success", actor=membre)
+    return salon
+
+
+async def fermer_vocal_vide(salon):
+    """Supprime un salon temporaire devenu vide."""
+    if salon is None or getattr(salon, "members", None) is None:
+        return
+    if salon.members:
+        return
+    gid = str(salon.guild.id)
+    if str(salon.id) not in vocal_cfg(gid)["temporaires"]:
+        return          # pas un salon du bot : on n'y touche pas
+    try:
+        await salon.delete(reason="[ModBot] Vocal personnalise vide")
+    except (discord.NotFound, discord.Forbidden):
+        pass
+    except Exception as ex:
+        print(f"fermer_vocal_vide {gid}: {ex}")
+    vocal_memoriser(gid, salon.id, False)
+
+
+async def avertir_vocal(guild, titre, description):
+    """Une seule alerte par heure et par motif : sinon c'est une avalanche."""
+    return await avertir_bienvenue(guild, titre, description)
+
+
+async def nettoyer_vocaux_orphelins():
+    """
+    Au demarrage : ferme les salons temporaires restes vides.
+
+    Un redemarrage pendant qu'un salon existait le laisserait derriere
+    lui pour toujours. C'est la seule raison pour laquelle la liste vit
+    dans la configuration et pas en memoire.
+    """
+    for guild in list(bot.guilds):
+        reglages = vocal_cfg(guild.id)
+        if not reglages["temporaires"]:
+            continue
+        for salon_id in list(reglages["temporaires"]):
+            salon = guild.get_channel(int(salon_id))
+            if salon is None:
+                vocal_memoriser(guild.id, salon_id, False)
+                continue
+            if not salon.members:
+                await fermer_vocal_vide(salon)
+
+
+async def gerer_vocaux_personnalises(membre, before, after):
+    """Point d'entree, appele par on_voice_state_update."""
+    guild = membre.guild
+    reglages = vocal_cfg(guild.id)
+    if not reglages["enabled"] or not reglages["hub_id"]:
+        return
+    if not est_premium(guild.id):
+        return
+
+    # Un salon qu'on quitte et qui se vide s'efface.
+    if before.channel is not None and before.channel is not after.channel:
+        await fermer_vocal_vide(before.channel)
+
+    # La porte d'entree : on la franchit, on n'y reste pas.
+    if after.channel is not None and str(after.channel.id) == reglages["hub_id"]:
+        clef = (guild.id, membre.id)
+        dernier = _vocal_dernieres_creations.get(clef, 0)
+        if now().timestamp() - dernier < VOCAL_DELAI_CREATION:
+            return
+        _vocal_dernieres_creations[clef] = now().timestamp()
+        await creer_vocal_personnalise(membre, reglages)
+
+
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot: return
@@ -11585,6 +12081,7 @@ async def on_voice_state_update(member, before, after):
                 add_voice_min(uid, gid, secs)
 
     await journaliser_vocal(member, before, after)
+    await gerer_vocaux_personnalises(member, before, after)
 
 # ════════════════════════════════════════════════════════════════════
 #  SECURITE — ANTI-RAID / ANTI-NUKE / LOGS / BACKUPS
@@ -14823,6 +15320,7 @@ async def on_ready():
     _sauvegarde_a_faire = True
     # Vues persistantes uniquement (timeout=None + custom_id partout)
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
+              VueEvenement(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher(),
               VueCaptchaPanel(), VueGiveaway(), VueTraduction()]:
         try:
@@ -14835,6 +15333,10 @@ async def on_ready():
         print(f"Erreur API dashboard : {err}")
     if not _dashboard_recurring_task or _dashboard_recurring_task.done():
         _dashboard_recurring_task = asyncio.create_task(dashboard_recurring_loop())
+    try:
+        await nettoyer_vocaux_orphelins()
+    except Exception as err:
+        print(f"nettoyage des vocaux : {err}")
     if not _dashboard_social_task or _dashboard_social_task.done():
         _dashboard_social_task = asyncio.create_task(dashboard_social_loop())
     if not _security_task or _security_task.done():
