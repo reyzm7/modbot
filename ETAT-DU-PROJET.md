@@ -3514,3 +3514,74 @@ répondait un 413 nu que le dashboard affichait tel quel.
 Limite portée à douze mégaoctets, **et** les images d'option bornées à 64 Ko
 côté site : un PNG de 128×128 n'a jamais besoin des 256 Ko que Discord tolère.
 Corriger la limite sans corriger la source aurait seulement repoussé le mur.
+
+## 51. Livré le 2 septembre 2026 — ModBot Premium, de bout en bout
+
+**La règle « le premium a été supprimé, ne le réintroduis pas » est caduque.**
+ModBot a désormais une offre payante. Ce qui suit la remplace.
+
+### Le socle
+
+`premium_core.py` ne connaît ni discord.py ni aiohttp : il décide à partir de
+dates. Une règle gouverne tout : **le premium est une date de fin, jamais un
+booléen.** Un booléen se désynchronise le jour où un paiement échoue et que
+personne ne repasse derrière ; une date se périme toute seule. Un fichier
+illisible **ferme** le premium, il ne l'ouvre pas.
+
+**Prolonger part de la date existante** quand elle est encore devant : offrir
+6 mois à un serveur abonné pour 1 mois donne 7 mois, pas 6.
+
+Trois offres, identifiants de produit Stripe :
+
+| | | |
+|---|---|---|
+| Mensuel | 2,99 € | `prod_VBacboQrHxAVvM` |
+| 6 mois | 13,99 € | `prod_VBadXpcUuo4Dq3` |
+| Annuel | 35 € | `prod_VBaeJ5BcijYmHF` |
+
+Les identifiants de **tarif** (`price_…`) sont résolus au premier appel : un
+produit peut en porter plusieurs, seul l'actif compte.
+
+### Stripe, sans bibliothèque
+
+Trois appels REST suffisent, et une dépendance de moins est une dépendance qui
+ne cassera pas au prochain déploiement. La signature des webhooks est vérifiée
+**avant de lire quoi que ce soit**, avec `compare_digest` et un rejet des
+horodatages de plus de cinq minutes. Sans cela, n'importe qui posterait
+« paiement réussi » à cette adresse et s'offrirait le premium.
+
+Un abonnement résilié n'est pas coupé le jour même : la période est payée, elle
+est servie jusqu'au bout.
+
+**Deux variables chez l'hébergeur** : `STRIPE_SECRET_KEY`,
+`STRIPE_WEBHOOK_SECRET`. Sans elles, les boutons disent « bientôt disponible »
+au lieu d'ouvrir une page de paiement qui échouerait.
+
+### Les verrous, au point d'effet
+
+Verrouiller à l'enregistrement ne suffirait pas : un serveur qui a configuré ses
+relais puis perdu son abonnement continuerait d'annoncer. Le contrôle est donc
+posé **là où la fonctionnalité agit**. Les réglages, eux, sont conservés — se
+réabonner doit tout retrouver en l'état.
+
+Les **cinq catégories de journal de base restent ouvertes à tous** : un serveur
+gratuit doit pouvoir tracer ses sanctions et ses arrivées.
+
+`get_ecfg()` consulte le premium pour chaque embed : un cache de trente
+secondes, vidé à chaque écriture **et par la restauration d'une sauvegarde**,
+qui écrit les fichiers derrière son dos.
+
+### Ce qui reste à écrire
+
+Deux des neuf fonctionnalités annoncées **n'existent pas encore** : les vocaux
+personnalisés et le système d'événements. Leur verrou est en place et la page
+Premium les annonce ; le code, lui, reste à faire. C'est le prochain lot.
+
+### Le site
+
+Page Premium (prix en haut, neuf carrés en bas), page partenaires, menu d'accès
+unique, accueil sans rail de commandes ni patch notes, démo à deux écrans.
+
+Un piège rencontré deux fois : **`applySiteLanguage()` écrase le texte du HTML
+par celui des traductions**. Corriger le HTML ne suffit jamais — la valeur vit
+dans `translations.js`.
