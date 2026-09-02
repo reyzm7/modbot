@@ -94,6 +94,11 @@ async def faux_log_event(guild, categorie, titre, description="", **k):
 bot_mod.log_event = faux_log_event
 bot_mod.dashboard_log = lambda *a, **k: None
 
+# Les auto-roles sont passes sous verrou premium. Ce fichier teste le
+# declenchement, pas le verrou : on ouvre l'abonnement pour tous les
+# scenarios, et un test dedie verifie plus bas que le verrou tient.
+bot_mod.est_premium = lambda *a, **k: True
+
 
 async def scenario(nom, captcha_actif, after_captcha, gid):
     """Retourne (roles recus a l'arrivee, roles recus apres le captcha)."""
@@ -205,6 +210,35 @@ try:
     print(f"\n  ({len(retires)} serveur(s) de test retire(s) de config.json)")
 except Exception as ex:
     print("\n  ATTENTION : nettoyage impossible (%s)" % ex)
+
+
+# ══════════════════════════════════════════════════════════════════════
+print(chr(10) + "--- Le verrou premium ---")
+
+async def sans_premium():
+    """Sans abonnement, aucun role ne tombe — et rien n'est efface."""
+    gid = "930000000000000006"
+    cfg = bot_mod.get_cfg(gid)
+    cfg["auto_roles"] = {"enabled": True, "roles": ["100"], "after_captcha": False}
+    cfg["captcha_enabled"] = False
+    bot_mod.set_cfg(gid, cfg)
+
+    bot_mod.est_premium = lambda *a, **k: False
+    try:
+        membre = FauxMembre(FauxGuild(int(gid)))
+        await bot_mod.appliquer_auto_roles(membre, apres_captcha=False)
+        recus = [r.name for r in membre.recus]
+    finally:
+        bot_mod.est_premium = lambda *a, **k: True
+    return recus, bot_mod.get_cfg(gid).get("auto_roles", {})
+
+
+recus, garde = asyncio.run(sans_premium())
+verifier("sans premium, aucun role automatique n'est donne", recus == [], str(recus))
+verifier("sans premium, les reglages sont conserves tels quels",
+         garde.get("roles") == ["100"] and garde.get("enabled") is True,
+         str(garde))
+
 
 rates = [n for n, ok, _ in resultats if not ok]
 print("\n" + "=" * 62)

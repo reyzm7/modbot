@@ -231,6 +231,80 @@ verifier("un salon qui n'est pas au bot n'est jamais supprime",
          'if str(salon.id) not in vocal_cfg(gid)["temporaires"]:' in source)
 
 
+
+# ======================================================================
+print(chr(10) + "--- L'affiche vient de la galerie ---")
+
+# Un PNG 1x1 transparent, le plus petit fichier valide qui soit.
+PNG_1x1 = ("data:image/png;base64,"
+           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk"
+           "YAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+
+fichier = bot_mod.fichier_evenement({"image": PNG_1x1})
+verifier("une image de galerie devient une piece jointe",
+         fichier is not None and fichier.filename == bot_mod.EVENEMENT_IMAGE_NOM,
+         getattr(fichier, "filename", "aucun"))
+
+verifier("une URL ne devient pas une piece jointe",
+         bot_mod.fichier_evenement({"image": "https://exemple.test/a.png"}) is None)
+verifier("une absence d'image ne devient rien",
+         bot_mod.fichier_evenement({}) is None)
+verifier("une base64 illisible est ecartee, sans lever",
+         bot_mod.fichier_evenement({"image": "data:image/png;base64,pas-du-base64!!"}) is None)
+verifier("une image sans base64 est ecartee",
+         bot_mod.fichier_evenement({"image": "data:image/png,abc"}) is None)
+
+# Une affiche enorme ferait echouer l'envoi cote Discord : on la refuse
+# avant, plutot que de publier un message sans son image.
+enorme = "data:image/png;base64," + ("A" * (bot_mod.EVENEMENT_IMAGE_MAX * 2))
+verifier("une image trop lourde est refusee",
+         bot_mod.fichier_evenement({"image": enorme}) is None)
+
+embed = bot_mod.embed_evenement(guild, {
+    "title": "Tournoi", "description": "", "image": PNG_1x1,
+    "channel_id": "800", "participants": [], "max": 0})
+verifier("l'affiche pointe vers la piece jointe",
+         (embed.image.url or "") == "attachment://" + bot_mod.EVENEMENT_IMAGE_NOM,
+         str(embed.image.url))
+
+embed_url = bot_mod.embed_evenement(guild, {
+    "title": "Tournoi", "description": "", "image": "https://exemple.test/a.png",
+    "channel_id": "800", "participants": [], "max": 0})
+verifier("une URL reste une URL dans l'affiche",
+         (embed_url.image.url or "") == "https://exemple.test/a.png",
+         str(embed_url.image.url))
+
+source_pub = source[source.index("async def publier_evenement"):][:1600]
+verifier("la publication joint le fichier quand il y en a un",
+         'envoi["file"] = fichier' in source_pub)
+
+
+# ======================================================================
+print(chr(10) + "--- Les salons vocaux remontent tous ---")
+
+bloc_ressources = source[source.index("async def api_guild_resources"):][:1800]
+verifier("la liste vocale n'est plus filtree sur la visibilite",
+         "if c.permissions_for(me).view_channel]" not in bloc_ressources)
+verifier("les salons de conference sont inclus",
+         "stage_channels" in bloc_ressources)
+verifier("chaque salon dit s'il est visible du bot",
+         '"visible": bool(c.permissions_for(me).view_channel)' in bloc_ressources)
+verifier("chaque salon porte sa categorie",
+         '"category": c.category.name if c.category else ""' in bloc_ressources)
+
+
+# ======================================================================
+print(chr(10) + "--- Les roles automatiques sont premium ---")
+
+bloc_roles = source[source.index("async def appliquer_auto_roles"):][:1400]
+verifier("les auto-roles exigent le premium",
+         "if not est_premium(guild.id):" in bloc_roles)
+verifier("le verrou se pose apres la lecture des reglages, pas avant",
+         bloc_roles.index("reglages = autoroles_cfg") < bloc_roles.index("est_premium"))
+verifier("auto_roles figure dans les fonctionnalites premium",
+         "auto_roles" in bot_mod.pc.FONCTIONNALITES)
+
+
 nettoyer()
 rates = [n for n, ok, _ in resultats if not ok]
 print("\n" + "=" * 62)

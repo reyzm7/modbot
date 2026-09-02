@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import json, os, re, sys, asyncio, io, aiohttp, random, string, html, unicodedata, base64, hashlib, sqlite3, time
+import binascii
 import copy
 import secrets
 import urllib.parse
@@ -6386,10 +6387,20 @@ async def api_guild_resources(request):
     # Salons vocaux et categories dans des listes SEPAREES : les
     # melanger a `channels` casserait tous les selecteurs qui attendent
     # des salons textes.
-    vocaux = [{"id": str(c.id), "name": c.name, "type": "voice"}
-              for c in sorted(getattr(guild, "voice_channels", []),
-                              key=lambda ch: ch.position)
-              if c.permissions_for(me).view_channel]
+    # Tous les salons vocaux, y compris ceux que le bot ne voit pas encore,
+    # et les salons de conference. Les masquer donnait une liste trouee que
+    # le proprietaire lisait comme un bug ; `visible` dit la verite sans
+    # rien cacher, et le panneau peut le signaler.
+    vocaux = []
+    for c in sorted(list(getattr(guild, "voice_channels", []))
+                    + list(getattr(guild, "stage_channels", [])),
+                    key=lambda ch: ((ch.category.position if ch.category else -1),
+                                    ch.position)):
+        vocaux.append({
+            "id": str(c.id), "name": c.name, "type": "voice",
+            "category": c.category.name if c.category else "",
+            "visible": bool(c.permissions_for(me).view_channel),
+        })
     categories = [{"id": str(c.id), "name": c.name, "type": "category"}
                   for c in sorted(getattr(guild, "categories", []),
                                   key=lambda ch: ch.position)]
@@ -8621,6 +8632,37 @@ def sanitize_evenements(guild, brut, existants):
     return propres
 
 
+EVENEMENT_IMAGE_NOM = "evenement.png"
+EVENEMENT_IMAGE_MAX = 4 * 1024 * 1024      # la limite d'un envoi Discord ordinaire
+
+
+def fichier_evenement(evenement):
+    """
+    Transforme l'image de la galerie en piece jointe.
+
+    Discord n'affiche pas une image « data: » dans un embed : l'URL doit
+    pointer quelque part. Plutot que d'exiger de l'utilisateur qu'il
+    heberge son affiche ailleurs, on joint le fichier au message et
+    l'embed le designe par `attachment://` — Discord fait alors lui-meme
+    l'hebergement.
+
+    Renvoie None si l'image est une URL, absente, ou illisible.
+    """
+    image = evenement.get("image") or ""
+    if not isinstance(image, str) or not image.startswith("data:image/"):
+        return None
+    try:
+        entete, charge = image.split(",", 1)
+        if "base64" not in entete:
+            return None
+        octets = base64.b64decode(charge, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    if not octets or len(octets) > EVENEMENT_IMAGE_MAX:
+        return None
+    return discord.File(io.BytesIO(octets), filename=EVENEMENT_IMAGE_NOM)
+
+
 def embed_evenement(guild, evenement):
     """L'affiche de l'evenement, telle que les membres la voient."""
     gid = str(guild.id)
@@ -8656,15 +8698,15 @@ def embed_evenement(guild, evenement):
         texte = " ".join(noms) + (f" … et {reste} autre(s)" if reste > 0 else "")
         embed.add_field(name="Inscrits", value=texte[:1024], inline=False)
 
-    image = evenement.get("image")
-    if image and str(image).startswith(("http", "data:image/")):
-        # Discord ne sait pas afficher une image `data:` : elle sert
-        # d'apercu au dashboard, pas d'illustration ici.
-        if str(image).startswith("http"):
-            try:
-                embed.set_image(url=image)
-            except Exception:
-                pass
+    image = str(evenement.get("image") or "")
+    if image.startswith("http"):
+        try:
+            embed.set_image(url=image)
+        except Exception:
+            pass
+    elif image.startswith("data:image/"):
+        # L'image voyage avec le message : `attachment://` la designe.
+        embed.set_image(url=f"attachment://{EVENEMENT_IMAGE_NOM}")
     return embed
 
 
@@ -8764,9 +8806,12 @@ async def publier_evenement(guild, evenement):
         except Exception:
             pass
 
+    fichier = fichier_evenement(evenement)
+    envoi = {"embed": embed_evenement(guild, evenement), "view": VueEvenement()}
+    if fichier is not None:
+        envoi["file"] = fichier
     try:
-        message = await salon.send(embed=embed_evenement(guild, evenement),
-                                   view=VueEvenement())
+        message = await salon.send(**envoi)
     except discord.Forbidden:
         raise web.HTTPForbidden(text=f"ModBot ne peut pas ecrire dans #{salon.name}.")
     evenement["message_id"] = str(message.id)
@@ -11419,6 +11464,12 @@ async def appliquer_auto_roles(member, apres_captcha=False):
     gid = str(guild.id)
     reglages = autoroles_cfg(gid)
     if not reglages["enabled"] or not reglages["roles"]:
+        return
+
+    # Le verrou se pose ici, au point d'effet, et pas a l'enregistrement :
+    # le serveur garde ses reglages, ils reprennent tels quels le jour ou
+    # l'abonnement revient.
+    if not est_premium(guild.id):
         return
 
     # Les bots n'ont rien a faire ici : ils arrivent deja avec les

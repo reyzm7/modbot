@@ -183,8 +183,8 @@ verifier("annuel = prod_VBaeJ5BcijYmHF",
          pc.OFFRES["annuel"]["produit"] == "prod_VBaeJ5BcijYmHF")
 
 attendues = {"embed_colors", "images", "logs_complets", "social_relays",
-             "voice", "events", "dm", "premium_role", "ai"}
-verifier("les neuf fonctionnalites demandees sont la",
+             "voice", "events", "auto_roles", "dm", "premium_role", "ai"}
+verifier("les dix fonctionnalites demandees sont la",
          set(pc.FONCTIONNALITES) == attendues,
          str(sorted(set(pc.FONCTIONNALITES) ^ attendues)))
 

@@ -110,6 +110,11 @@ FONCTIONNALITES = {
         "resume": "Un rôle donné sur ton serveur, pour que ça se voie.",
         "icone": "u-mask",
     },
+    "auto_roles": {
+        "titre": "Rôles automatiques",
+        "resume": "Un rôle donné dès l'arrivée, ou après le captcha, sans rien faire à la main.",
+        "icone": "u-mask",
+    },
     "ai": {
         "titre": "Assistant IA",
         "resume": "ModBot répond à tes membres quand on le mentionne.",
