@@ -50,6 +50,7 @@ bot_mod.F_PREMIUM = os.path.join(bot_mod.BASE_DIR, "premium.test.json")
 def nettoyer():
     if os.path.exists(bot_mod.F_PREMIUM):
         os.remove(bot_mod.F_PREMIUM)
+    bot_mod.premium_oublier_cache()
 
 
 nettoyer()
@@ -76,6 +77,9 @@ verifier("une date passee ne donne rien, meme avec un champ « actif »",
 
 # Un fichier illisible ne doit pas ouvrir le premium a tout le monde.
 io.open(bot_mod.F_PREMIUM, "w", encoding="utf-8").write("pas du JSON")
+# Ecrit a la main, donc derriere le dos du cache : on le vide, comme le
+# fait la restauration d'une sauvegarde.
+bot_mod.premium_oublier_cache()
 verifier("un fichier illisible ferme, il n'ouvre pas",
          not bot_mod.est_premium(SERVEUR))
 nettoyer()
@@ -171,12 +175,12 @@ for clef, offre in pc.OFFRES.items():
              str(offre["produit"]).startswith("prod_"), offre["produit"])
 
 # Les identifiants donnes par l'utilisateur, verbatim.
-verifier("mensuel = prod_VAcFciOQQBcHku",
-         pc.OFFRES["mensuel"]["produit"] == "prod_VAcFciOQQBcHku")
-verifier("semestriel = prod_VAcFRbfj6rO7Sw",
-         pc.OFFRES["semestriel"]["produit"] == "prod_VAcFRbfj6rO7Sw")
-verifier("annuel = prod_VAcGhDETPNDduw",
-         pc.OFFRES["annuel"]["produit"] == "prod_VAcGhDETPNDduw")
+verifier("mensuel = prod_VBacboQrHxAVvM",
+         pc.OFFRES["mensuel"]["produit"] == "prod_VBacboQrHxAVvM")
+verifier("semestriel = prod_VBadXpcUuo4Dq3",
+         pc.OFFRES["semestriel"]["produit"] == "prod_VBadXpcUuo4Dq3")
+verifier("annuel = prod_VBaeJ5BcijYmHF",
+         pc.OFFRES["annuel"]["produit"] == "prod_VBaeJ5BcijYmHF")
 
 attendues = {"embed_colors", "images", "logs_complets", "social_relays",
              "voice", "events", "dm", "premium_role", "ai"}

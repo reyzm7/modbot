@@ -589,6 +589,10 @@ def appliquer_sauvegarde(charge):
             repris.append(nom)
         except OSError:
             continue
+    # La restauration ecrit les fichiers directement : le cache du
+    # premium parlerait encore de l'etat d'avant.
+    if "premium.json" in repris:
+        premium_oublier_cache()
     return repris
 
 
@@ -948,7 +952,11 @@ def get_ecfg(gid):
     bot_name = get_bot_display_name(gid)
     return {
         "name":        bot_name,
-        "color":       cfg.get("embed_color",  DEFAULT_EMBED_COLOR),
+        # Couleur personnalisee : premium. Sans abonnement on retombe
+        # sur celle de ModBot — le reglage reste enregistre, il se
+        # rallume tout seul au retour du premium.
+        "color":       (cfg.get("embed_color", DEFAULT_EMBED_COLOR)
+                        if est_premium(gid) else DEFAULT_EMBED_COLOR),
         "footer":      cfg.get("embed_footer") or f"{bot_name} - Protection de votre communaute",
         "logo":        cfg.get("embed_logo", None),
         "banner":      cfg.get("embed_banner", None),
@@ -2429,6 +2437,9 @@ async def handle_ai_mention(message):
     gid = str(message.guild.id)
     reglages = ai_cfg(gid)
     if not reglages["enabled"] or not ai_available():
+        return False
+    # L'IA coute des appels a un service payant : c'est du premium.
+    if not est_premium(gid):
         return False
 
     # Restriction eventuelle a certains salons
@@ -4606,6 +4617,11 @@ async def preparer_emojis_ticket(guild):
     chemin de rendu.
     """
     questions = get_ticket_questions(guild.id)
+    # Une image d'option devient un emoji du serveur : c'est du premium.
+    # Les options gardent leur image enregistree, elle redeviendra un
+    # emoji au prochain « publier » une fois l'abonnement repris.
+    if not est_premium(guild.id):
+        return questions
     change = False
     for index, q in enumerate(questions):
         if q.get("image") and not str(q.get("emoji", "")).startswith("<"):
@@ -8091,9 +8107,28 @@ STRIPE_API = "https://api.stripe.com/v1"
 _stripe_tarifs = {}
 
 
+# get_ecfg() consulte le premium pour CHAQUE embed construit. Relire le
+# fichier a chaque fois mettrait le disque a genoux sur un serveur actif.
+# Trente secondes suffisent : un abonnement qui s'active se voit au pire
+# une demi-minute plus tard, et toute ecriture vide le cache aussitot.
+_premium_cache = {"donnees": None, "expire": 0.0}
+PREMIUM_CACHE_SECONDES = 30
+
+
 def premium_tout():
+    maintenant = time.time()
+    if _premium_cache["donnees"] is not None and maintenant < _premium_cache["expire"]:
+        return _premium_cache["donnees"]
     donnees = jload(F_PREMIUM)
-    return donnees if isinstance(donnees, dict) else {}
+    donnees = donnees if isinstance(donnees, dict) else {}
+    _premium_cache["donnees"] = donnees
+    _premium_cache["expire"] = maintenant + PREMIUM_CACHE_SECONDES
+    return donnees
+
+
+def premium_oublier_cache():
+    _premium_cache["donnees"] = None
+    _premium_cache["expire"] = 0.0
 
 
 def premium_fiche(gid):
@@ -8110,9 +8145,10 @@ def est_premium(gid):
 
 
 def premium_ecrire(gid, fiche):
-    donnees = premium_tout()
+    donnees = dict(premium_tout())
     donnees[str(gid)] = fiche
     jsave(F_PREMIUM, donnees)
+    premium_oublier_cache()
     return fiche
 
 
@@ -9219,6 +9255,11 @@ async def dashboard_social_loop():
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while not bot.is_closed():
             for guild in list(bot.guilds):
+                # Surveiller cinq plateformes toutes les dix minutes coute
+                # du temps machine : c'est du premium. Les reglages restent
+                # enregistres et repartent seuls au retour de l'abonnement.
+                if not est_premium(guild.id):
+                    continue
                 cfg = get_cfg(guild.id)
                 relays = cfg.get("social_relays")
                 if not isinstance(relays, list) or not relays:
@@ -11172,7 +11213,10 @@ async def send_dashboard_member_event(member, departure=False):
     cfg = get_cfg(member.guild.id)
     system = cfg.get("welcome_system") or {}
     enabled_key = "departure_enabled" if departure else "enabled"
-    dm_enabled = bool(system.get("dm_enabled")) and not departure
+    # Le message prive fait partie du premium : c'est un envoi par
+    # membre, et Discord le limite severement.
+    dm_enabled = (bool(system.get("dm_enabled")) and not departure
+                  and est_premium(member.guild.id))
     if not system.get(enabled_key) and not dm_enabled:
         return
     if dm_enabled:
@@ -11239,6 +11283,10 @@ async def send_dashboard_member_event(member, departure=False):
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.set_footer(text=f"{member.guild.name} — {member.guild.member_count} membres")
 
+        # L'image de fond de la carte fait partie du premium : elle est
+        # stockee, redimensionnee et renvoyee a chaque arrivee.
+        if not est_premium(member.guild.id):
+            system = {**system, "background": "", "image": ""}
         card_file = await build_member_event_card(member, system, departure)
         if card_file:
             embed.set_image(url=f"attachment://{card_file.filename}")
@@ -11741,6 +11789,12 @@ LOG_CATEGORIES = {
 def log_category_enabled(gid, category):
     spec = LOG_CATEGORIES.get(category) or {}
     defaut = bool(spec.get("defaut", True))
+    # Les categories qui ne sont pas actives d'origine sont le « journal
+    # complet » : elles font partie du premium. Celles de base restent
+    # ouvertes a tous — un serveur gratuit doit pouvoir tracer ses
+    # sanctions et ses arrivees.
+    if not defaut and not est_premium(gid):
+        return False
     toggles = get_cfg(gid).get("logs_enabled")
     if not isinstance(toggles, dict) or category not in toggles:
         return defaut

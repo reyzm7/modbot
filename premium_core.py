@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 # produit peut en porter plusieurs, et seul le tarif actif compte.
 OFFRES = {
     "mensuel": {
-        "produit": "prod_VAcFciOQQBcHku",
+        "produit": "prod_VBacboQrHxAVvM",
         "libelle": "Mensuel",
         "prix": "2,99 €",
         "periode": "par mois",
@@ -39,7 +39,7 @@ OFFRES = {
         "economie": "",
     },
     "semestriel": {
-        "produit": "prod_VAcFRbfj6rO7Sw",
+        "produit": "prod_VBadXpcUuo4Dq3",
         "libelle": "6 mois",
         "prix": "13,99 €",
         "periode": "tous les 6 mois",
@@ -48,7 +48,7 @@ OFFRES = {
         "economie": "22 %",
     },
     "annuel": {
-        "produit": "prod_VAcGhDETPNDduw",
+        "produit": "prod_VBaeJ5BcijYmHF",
         "libelle": "Annuel",
         "prix": "35 €",
         "periode": "par an",
