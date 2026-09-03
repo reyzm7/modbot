@@ -83,6 +83,9 @@ DEFAULT_LOGS        = 1510422154725036062
 DEFAULT_SUGGESTIONS = 1510422091340709898
 DEFAULT_REPORTS     = 1510422117290868926
 DEFAULT_PATCHNOTES  = 1510440693070430324
+# Le salon ou tombent les paiements. Il n'est sur aucun serveur
+# client : c'est le salon de l'equipe, et lui seul.
+SALON_PAIEMENTS     = 1544885978907283567
 DEFAULT_TICKETS     = 1510600280016818357
 DEFAULT_BOT_NAME    = "ModBot"
 DEFAULT_EMBED_COLOR = 0x5865F2
@@ -8470,7 +8473,7 @@ def licence_creer(uid, plan, source, jours=None, auteur="", abonnement=""):
     return licence_poser(uid, licence)
 
 
-async def appliquer_licence_au_serveur(licence, gid):
+async def appliquer_licence_au_serveur(licence, gid, auteur=None):
     """
     Ecrit le premium du serveur a l'echeance de la licence.
 
@@ -8489,6 +8492,12 @@ async def appliquer_licence_au_serveur(licence, gid):
     fiche["source"] = licence.get("source") or "stripe"
     fiche["plan"] = licence.get("plan") or ""
     fiche["licence"] = licence.get("id") or ""
+    # Qui a pose la place. Un serveur premium sans nom derriere ne
+    # s'explique plus six mois apres, quand quelqu'un demande pourquoi.
+    if auteur:
+        fiche["activated_by"] = str(auteur.get("nom") or "")
+        fiche["activated_by_id"] = str(auteur.get("id") or "")
+        fiche["activated_at"] = pc.maintenant().isoformat()
     fiche.setdefault("since", pc.maintenant().isoformat())
     fiche["updated_at"] = pc.maintenant().isoformat()
     premium_ecrire(str(gid), fiche)
@@ -8563,11 +8572,11 @@ async def api_activer_licence(request):
         }
         raise web.HTTPBadRequest(text=messages.get(raison, "Activation impossible."))
 
+    auteur = clean_short_text(identity.get("username"), "", 80) or uid
     licence = pc.activer_licence(licence, gid)
     licence_poser(uid, licence)
-    etat = await appliquer_licence_au_serveur(licence, gid)
-
-    auteur = clean_short_text(identity.get("username"), "", 80) or uid
+    etat = await appliquer_licence_au_serveur(
+        licence, gid, auteur={"nom": auteur, "id": uid})
     dashboard_log("premium_activate", guild, auteur,
                   f"{guild.name}: {licence.get('plan')}")
     await log_event(
@@ -8667,6 +8676,16 @@ async def api_stripe_webhook(request):
                                 abonnement=str(objet.get("subscription") or ""))
         print(f"premium: licence {licence['id']} pour {uid} "
               f"({plan}, {licence['places']} place(s))")
+        profil = profil_discord(uid)
+        offre = pc.OFFRES.get(plan) or {}
+        await annoncer_paiement(
+            "Nouvel abonnement",
+            f"**{profil['name'] or uid}** vient de souscrire.",
+            [("Offre", offre.get("libelle", plan)),
+             ("Montant", offre.get("prix", "?")),
+             ("Places", licence["places"]),
+             ("Acheteur", f"<@{uid}>"),
+             ("Jusqu'au", str(licence.get("until"))[:10])])
 
     elif type_evenement == "checkout.session.completed" and gid:
         # Un paiement d'avant les licences : il visait un serveur. On
@@ -8696,6 +8715,17 @@ async def api_stripe_webhook(request):
                 await appliquer_licence_au_serveur(licence, serveur)
             print(f"premium: licence {licence.get('id')} renouvelee "
                   f"({jours} jours, {len(licence.get('servers') or [])} serveur(s))")
+            profil = profil_discord(proprietaire)
+            offre = pc.OFFRES.get(plan) or {}
+            await annoncer_paiement(
+                "Abonnement renouvele",
+                f"**{profil['name'] or proprietaire}** a ete preleve.",
+                [("Offre", offre.get("libelle", plan)),
+                 ("Montant", offre.get("prix", "?")),
+                 ("Serveurs", len(licence.get("servers") or [])),
+                 ("Abonne", f"<@{proprietaire}>"),
+                 ("Jusqu'au", str(licence.get("until"))[:10])],
+                couleur=0x5865F2)
             return api_json({"ok": True, "received": type_evenement})
 
         cible = gid or premium_par_abonnement(abonnement)
@@ -8719,6 +8749,22 @@ async def api_stripe_webhook(request):
             if type_evenement.endswith("deleted"):
                 fiche["cancel_at_period_end"] = True
             premium_ecrire(cible, fiche)
+
+    if type_evenement == "customer.subscription.deleted":
+        # Une resiliation compte autant qu'un paiement : c'est le meme
+        # salon qui doit l'apprendre, sans avoir a la deviner.
+        proprietaire, licence = licence_par_abonnement(str(objet.get("id") or ""))
+        if licence is not None:
+            profil = profil_discord(proprietaire)
+            await annoncer_paiement(
+                "Abonnement resilie",
+                f"**{profil['name'] or proprietaire}** ne sera plus preleve. "
+                "La periode deja payee reste servie jusqu'a son terme.",
+                [("Offre", str(licence.get("plan") or "")),
+                 ("Serveurs", len(licence.get("servers") or [])),
+                 ("Abonne", f"<@{proprietaire}>"),
+                 ("Fin", str(licence.get("until"))[:10])],
+                couleur=0xFAA61A)
 
     # Stripe reessaie tant qu'il n'a pas de 2xx : on repond toujours.
     return api_json({"ok": True, "received": type_evenement})
@@ -8763,6 +8809,88 @@ async def donner_role_premium(guild):
     return role
 
 
+def profil_discord(uid):
+    """
+    Pseudo et avatar d'une personne, autant qu'on les connaisse.
+
+    On ne va pas les chercher sur le reseau : `get_user` lit le cache que
+    le bot tient de ses serveurs. Une personne qu'il ne partage avec
+    nous ne sera affichee que par son identifiant — mieux vaut un
+    identifiant honnete qu'une requete par ligne de tableau.
+    """
+    user = bot.get_user(int(uid)) if str(uid).isdigit() else None
+    if user is None:
+        return {"id": str(uid), "name": "", "avatar": ""}
+    return {
+        "id": str(uid),
+        "name": user.global_name or user.name,
+        "avatar": str(user.display_avatar.url),
+    }
+
+
+async def api_admin_premium_acheteurs(request):
+    """
+    Qui a achete, et qui a pose ses places.
+
+    C'est la question qu'on se pose vraiment : quelqu'un a paye et n'a
+    rien active, il faut peut-etre l'aider. Une place dormante n'est pas
+    une bonne nouvelle.
+    """
+    await api_identity(request, admin_required=True)
+    lignes = []
+    for uid, brutes in licences_toutes().items():
+        licences = [l for l in (brutes or []) if isinstance(l, dict)]
+        if not licences:
+            continue
+        etats = [pc.etat_licence(l) for l in licences]
+        vivantes = [e for e in etats if e["active"]]
+        serveurs = []
+        for etat in etats:
+            for gid in etat["servers"]:
+                guild = bot.get_guild(int(gid)) if gid.isdigit() else None
+                serveurs.append({"id": gid,
+                                 "name": guild.name if guild else gid})
+        lignes.append({
+            **profil_discord(uid),
+            "licences": etats,
+            "places": sum(e["places"] for e in vivantes),
+            "libres": sum(e["free"] for e in vivantes),
+            "servers": serveurs,
+            "active": bool(vivantes),
+            # Ce qui compte a l'oeil : a-t-il paye sans rien poser ?
+            "dormant": bool(vivantes) and not serveurs,
+        })
+    # Les places dormantes d'abord : ce sont elles qui demandent une
+    # action, le reste va bien tout seul.
+    lignes.sort(key=lambda x: (not x["dormant"], not x["active"],
+                               (x["name"] or x["id"]).lower()))
+    return api_json({"ok": True, "buyers": lignes})
+
+
+async def annoncer_paiement(titre, description, champs, couleur=0x43B581):
+    """
+    Previent l'equipe qu'un paiement vient de tomber.
+
+    Le salon est fixe et hors des serveurs clients : une alerte de
+    paiement n'a rien a faire dans le journal d'un serveur, et surtout
+    pas chez le client. Si le salon est introuvable, on ne fait rien de
+    plus que l'ecrire dans la sortie du bot — un paiement ne doit jamais
+    echouer parce qu'une annonce a echoue.
+    """
+    try:
+        salon = bot.get_channel(SALON_PAIEMENTS)
+        if salon is None:
+            salon = await bot.fetch_channel(SALON_PAIEMENTS)
+        embed = discord.Embed(title=titre, description=description,
+                              color=couleur, timestamp=now())
+        for nom, valeur in champs:
+            embed.add_field(name=nom, value=str(valeur) or "-", inline=True)
+        embed.set_footer(text="ModBot Premium")
+        await salon.send(embed=embed)
+    except Exception as erreur:
+        print(f"annonce paiement impossible : {erreur}")
+
+
 async def api_admin_premium_grant(request):
     """
     Un administrateur du bot offre du premium a un serveur.
@@ -8796,6 +8924,15 @@ async def api_admin_premium_grant(request):
         licence = licence_creer(uid, plan, "admin",
                                 jours=pc.DUREES_CADEAU[duree], auteur=auteur)
         dashboard_log("premium_grant_user", None, auteur, f"{uid}: {duree}")
+        profil = profil_discord(uid)
+        await annoncer_paiement(
+            "Premium offert",
+            f"**{auteur}** a offert une licence a "
+            f"**{profil['name'] or uid}**.",
+            [("Duree", duree),
+             ("Places", licence.get("places", 1)),
+             ("Beneficiaire", f"<@{uid}>")],
+            couleur=0xF1C40F)
         return api_json({"ok": True, "target": "user", "user_id": uid,
                          "licence": pc.etat_licence(licence)})
 
@@ -8808,6 +8945,12 @@ async def api_admin_premium_grant(request):
     guild = bot.get_guild(int(gid))
     nom = guild.name if guild else gid
     dashboard_log("premium_grant", guild, auteur, f"{nom}: {duree}")
+    await annoncer_paiement(
+        "Premium offert",
+        f"**{auteur}** a offert du premium au serveur **{nom}**.",
+        [("Duree", duree), ("Serveur", nom),
+         ("Jusqu'au", str(etat["until"])[:10])],
+        couleur=0xF1C40F)
     if guild:
         await log_event(
             guild, "admin", "Premium offert",
@@ -8849,6 +8992,9 @@ async def api_admin_premium_list(request):
             "guild_id": gid,
             "guild_name": guild.name if guild else "",
             "members": getattr(guild, "member_count", 0) if guild else 0,
+            "activated_by": str(fiche.get("activated_by") or ""),
+            "activated_by_id": str(fiche.get("activated_by_id") or ""),
+            "activated_at": str(fiche.get("activated_at") or ""),
             **etat,
         })
     lignes.sort(key=lambda x: (not x["active"], x["guild_name"].lower()))
@@ -9433,6 +9579,7 @@ async def start_dashboard_api():
     app.router.add_post("/api/public/visite", api_visite_ping)
     app.router.add_get("/api/public/visites", api_visites_lecture)
     app.router.add_get("/api/admin/visites", api_admin_visites)
+    app.router.add_get("/api/admin/premium/acheteurs", api_admin_premium_acheteurs)
     app.router.add_get("/api/me/licences", api_mes_licences)
     app.router.add_post("/api/me/licences/activer", api_activer_licence)
     app.router.add_post("/api/stripe/webhook", api_stripe_webhook)

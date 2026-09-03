@@ -207,6 +207,65 @@ verifier("licences.json n'est pas versionne",
          "licences.json" in io.open(".gitignore", encoding="utf-8").read())
 
 
+
+# ======================================================================
+print(chr(10) + "--- Qui a active, qui a paye sans activer ---")
+
+bloc_appliquer = source[source.index("async def appliquer_licence_au_serveur"):][:2000]
+verifier("la fiche du serveur retient qui a active",
+         'fiche["activated_by"]' in bloc_appliquer)
+verifier("elle retient aussi quand",
+         'fiche["activated_at"]' in bloc_appliquer)
+
+bloc_activer = source[source.index("async def api_activer_licence"):][:2900]
+verifier("l'activation transmet son auteur",
+         'auteur={"nom": auteur, "id": uid}' in bloc_activer)
+
+bloc_liste = source[source.index("async def api_admin_premium_list"):][:1400]
+verifier("la liste des serveurs expose l'activateur",
+         '"activated_by": str(fiche.get("activated_by") or "")' in bloc_liste)
+
+bloc_acheteurs = source[source.index("async def api_admin_premium_acheteurs"):][:2400]
+verifier("la liste des acheteurs exige un administrateur",
+         "admin_required=True" in bloc_acheteurs)
+verifier("elle distingue une licence jamais posee",
+         '"dormant": bool(vivantes) and not serveurs' in bloc_acheteurs)
+verifier("les licences dormantes remontent en premier",
+         'key=lambda x: (not x["dormant"]' in bloc_acheteurs)
+verifier("elle compte les places encore libres",
+         '"libres": sum(e["free"] for e in vivantes)' in bloc_acheteurs)
+
+bloc_profil = source[source.index("def profil_discord"):][:1000]
+verifier("le profil donne pseudo et avatar",
+         '"avatar": str(user.display_avatar.url)' in bloc_profil)
+verifier("un inconnu ne fait pas planter la liste",
+         'return {"id": str(uid), "name": "", "avatar": ""}' in bloc_profil)
+
+
+# ======================================================================
+print(chr(10) + "--- L'alerte de paiement ---")
+
+verifier("le salon des paiements est celui demande",
+         "SALON_PAIEMENTS     = 1544885978907283567" in source)
+
+bloc_annonce = source[source.index("async def annoncer_paiement"):][:1500]
+verifier("une annonce qui echoue ne casse pas le paiement",
+         "except Exception as erreur:" in bloc_annonce)
+verifier("le salon est cherche puis recupere au besoin",
+         "await bot.fetch_channel(SALON_PAIEMENTS)" in bloc_annonce)
+
+bloc_hook2 = source[source.index("async def api_stripe_webhook"):][:8000]
+for evenement, attendu in (("Nouvel abonnement", "un achat"),
+                           ("Abonnement renouvele", "un renouvellement"),
+                           ("Abonnement resilie", "une resiliation")):
+    verifier("%s est annonce" % attendu, '"%s"' % evenement in bloc_hook2)
+
+bloc_grant = source[source.index("async def api_admin_premium_grant"):][:3200]
+verifier("un cadeau est annonce lui aussi",
+         bloc_grant.count("annoncer_paiement") == 2,
+         str(bloc_grant.count("annoncer_paiement")))
+
+
 rates = [n for n, ok, _ in resultats if not ok]
 print("\n" + "=" * 62)
 print(f"RESULTAT : {len(resultats) - len(rates)}/{len(resultats)} verifications passees")
