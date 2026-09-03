@@ -8673,6 +8673,10 @@ async def api_activer_licence(request):
     licence_poser(uid, licence)
     etat = await appliquer_licence_au_serveur(
         licence, gid, auteur={"nom": auteur, "id": uid})
+    # Le role suit aussi l'activation : une licence creee avant que ce
+    # code n'existe n'a declenche aucun evenement, et son proprietaire
+    # attendrait sinon le balayage horaire pour voir son role.
+    await synchroniser_role_acheteur(uid)
     dashboard_log("premium_activate", guild, auteur,
                   f"{guild.name}: {licence.get('plan')}")
     await log_event(
@@ -16208,6 +16212,11 @@ async def on_ready():
         print(f"reconciliation des licences : {err}")
     # Une echeance ne previent personne : sans ce passage, un role
     # premium resterait pose apres la fin de l'abonnement.
+    # Un serveur support injoignable est une panne silencieuse : le role
+    # ne parait jamais et rien ne le dit. On le dit.
+    if bot.get_guild(SERVEUR_SUPPORT) is None:
+        print(f"role premium: ModBot n'est pas sur le serveur support "
+              f"({SERVEUR_SUPPORT}) — aucun role d'acheteur ne sera pose")
     try:
         await balayer_roles_acheteurs()
     except Exception as err:
