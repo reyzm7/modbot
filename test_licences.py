@@ -266,6 +266,110 @@ verifier("un cadeau est annonce lui aussi",
          str(bloc_grant.count("annoncer_paiement")))
 
 
+
+# ======================================================================
+#  Le scenario complet, avec les vraies fonctions du bot
+#
+#  C'est le seul test qui prouve la promesse : un premium active reste
+#  jusqu'a l'echeance, meme si une sauvegarde anterieure repasse par la.
+# ======================================================================
+print(chr(10) + "--- Un premium active survit a tout ---")
+
+import asyncio
+
+GID = "930000000000000900"
+UID = "440000000000000901"
+
+
+def nettoyer_scenario():
+    donnees = bot_mod.licences_toutes()
+    donnees.pop(UID, None)
+    bot_mod.licences_ecrire(donnees)
+    toutes = dict(bot_mod.premium_tout())
+    toutes.pop(GID, None)
+    bot_mod.jsave(bot_mod.F_PREMIUM, toutes)
+    bot_mod.premium_oublier_cache()
+
+
+nettoyer_scenario()
+
+# 1. Un achat de six mois : trois places.
+licence = bot_mod.licence_creer(UID, "semestriel", "stripe", auteur="Stripe")
+verifier("l'achat cree une licence a trois places",
+         pc.etat_licence(licence)["free"] == 3,
+         str(pc.etat_licence(licence)["free"]))
+verifier("le serveur n'est pas encore premium",
+         not bot_mod.premium_etat(GID)["active"])
+
+# 2. L'acheteur pose une place.
+etat = asyncio.run(bot_mod.appliquer_licence_au_serveur(
+    pc.activer_licence(licence, GID), GID,
+    auteur={"nom": "Acheteur", "id": UID}))
+bot_mod.licence_poser(UID, pc.activer_licence(licence, GID))
+verifier("le serveur devient premium", etat["active"])
+verifier("jusqu'a l'echeance de la licence",
+         etat["until"][:10] == licence["until"][:10],
+         "%s vs %s" % (etat["until"][:10], licence["until"][:10]))
+verifier("et on sait qui l'a active",
+         bot_mod.premium_fiche(GID).get("activated_by") == "Acheteur",
+         str(bot_mod.premium_fiche(GID).get("activated_by")))
+
+# 3. Une sauvegarde ANTERIEURE repasse : premium.json revient en arriere.
+#    C'est exactement ce qui effacait un premium paye.
+sabotage = dict(bot_mod.premium_tout())
+sabotage.pop(GID, None)
+bot_mod.jsave(bot_mod.F_PREMIUM, sabotage)
+bot_mod.premium_oublier_cache()
+verifier("une restauration anterieure efface bien le premium",
+         not bot_mod.premium_etat(GID)["active"])
+
+# 4. La reconciliation le remet, parce que la licence fait foi.
+repares = asyncio.run(bot_mod.reconcilier_licences())
+verifier("la reconciliation le remet d'aplomb",
+         bot_mod.premium_etat(GID)["active"], "%d repare(s)" % repares)
+verifier("a la bonne date",
+         bot_mod.premium_etat(GID)["until"][:10] == licence["until"][:10])
+
+# 5. Elle ne retire jamais des jours a un serveur qui avait mieux.
+fiche = dict(bot_mod.premium_fiche(GID))
+plus_loin = (pc.maintenant() + timedelta(days=900)).isoformat()
+fiche["until"] = plus_loin
+bot_mod.premium_ecrire(GID, fiche)
+asyncio.run(bot_mod.reconcilier_licences())
+verifier("un serveur qui avait mieux garde son avance",
+         bot_mod.premium_etat(GID)["until"][:10] == plus_loin[:10],
+         bot_mod.premium_etat(GID)["until"][:10])
+
+# 6. Le litige rend la place sans toucher a l'echeance de la licence.
+avant = pc.etat_licence(bot_mod.licences_de(UID)[0])
+rendue = bot_mod.licence_liberer_place(UID, licence["id"], GID)
+apres = pc.etat_licence(rendue)
+verifier("le litige rend la place", apres["free"] == avant["free"] + 1,
+         "%d -> %d" % (avant["free"], apres["free"]))
+verifier("le serveur sort de la licence", GID not in apres["servers"],
+         str(apres["servers"]))
+verifier("l'echeance de la licence ne bouge pas",
+         apres["until"] == avant["until"])
+verifier("une place deja rendue ne se rend pas deux fois",
+         bot_mod.licence_liberer_place(UID, licence["id"], GID) is None)
+
+# 7. Apres un litige, la reconciliation ne ressuscite pas le serveur.
+bot_mod.premium_revoquer(GID, "test")
+asyncio.run(bot_mod.reconcilier_licences())
+verifier("un serveur libere ne revient pas tout seul",
+         not bot_mod.premium_etat(GID)["active"])
+
+# 8. On retrouve bien la licence derriere un serveur.
+bot_mod.licence_poser(UID, pc.activer_licence(rendue, GID))
+uid_trouve, licence_trouvee = bot_mod.licence_du_serveur(GID)
+verifier("on retrouve l'acheteur depuis le serveur", uid_trouve == UID,
+         str(uid_trouve))
+verifier("un serveur sans licence ne trouve rien",
+         bot_mod.licence_du_serveur("999999999999999999") == (None, None))
+
+nettoyer_scenario()
+
+
 rates = [n for n, ok, _ in resultats if not ok]
 print("\n" + "=" * 62)
 print(f"RESULTAT : {len(resultats) - len(rates)}/{len(resultats)} verifications passees")

@@ -118,6 +118,16 @@ FONCTIONNALITES = {
         "resume": "Un rôle donné dès l'arrivée, ou après le captcha, sans rien faire à la main.",
         "icone": "u-mask",
     },
+    "recurring": {
+        "titre": "Messages récurrents",
+        "resume": "Un message publié tout seul, à intervalle régulier, dans le salon de votre choix.",
+        "icone": "u-timer",
+    },
+    "security_score": {
+        "titre": "Score de sécurité",
+        "resume": "Une note sur cent, calculée sur vos réglages réels, et les actions à mener en premier.",
+        "icone": "i-shield",
+    },
     "ai": {
         "titre": "Assistant IA",
         "resume": "ModBot répond à tes membres quand on le mentionne.",

@@ -12,6 +12,7 @@ from aiohttp import web
 import hmac
 import security_core as sc
 import premium_core as pc
+import security_score as sc_score
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -418,6 +419,13 @@ FICHIERS_SAUVEGARDES = (
     # Un abonnement paye qui disparaitrait au redeploiement serait
     # une facture sans contrepartie.
     "premium.json",
+    # Et les licences avec : elles disent QUI a paye et combien de
+    # places lui restent. Sans elles, un acheteur perdait ses places
+    # libres au premier redeploiement, sans aucune trace.
+    "licences.json",
+    # Le compteur de visites : le perdre le ferait repartir a son
+    # chiffre de depart, ce qui serait faux.
+    "visites.json",
 )
 
 # dashboard_sessions.json n'y sera JAMAIS : il contient les jetons OAuth
@@ -6618,6 +6626,76 @@ def serialize_security_config(guild):
         },
     }
 
+# ══════════════════════════════════════════════════════════════════════
+#  LE SCORE DE SECURITE
+#
+#  La note ne vient d'aucune impression : chaque point est un reglage
+#  qu'on est alle lire, ici ou chez Discord. Le calcul lui-meme vit dans
+#  security_score.py, sans reseau ni serveur — ce qui le rend verifiable.
+#
+#  Ce fichier ne fait que CONSTATER. Il ne juge pas, il rapporte.
+# ══════════════════════════════════════════════════════════════════════
+
+def collecter_faits_securite(guild):
+    """
+    Ce qu'on constate d'un serveur, pour le noter.
+
+    Rien n'est suppose : une valeur qu'on ne sait pas lire est laissee
+    absente, et le calcul la compte comme manquante. Un score genereux
+    par ignorance serait pire qu'inutile.
+    """
+    gid = str(guild.id)
+    cfg = get_cfg(gid)
+    perms = guild.me.guild_permissions
+
+    # Le nombre de categories de journal REELLEMENT actives, verrou
+    # premium compris : une categorie fermee par le verrou ne trace
+    # rien, elle ne doit donc pas rapporter de point.
+    actives = sum(1 for clef in LOG_CATEGORIES
+                  if log_category_enabled(gid, clef))
+
+    salon_logs = parse_int(cfg.get("salon_logs")) or 0
+
+    return {
+        "antiraid": {"enabled": bool(get_raid_cfg(gid).get("enabled"))},
+        "antinuke": {"enabled": bool(get_nuke_cfg(gid).get("enabled"))},
+        "filter": {"enabled": bool(get_filter_cfg(gid).get("enabled"))},
+        "antiscam": {"enabled": bool(antiscam_cfg(gid).get("enabled"))},
+        "captcha": {"enabled": bool(captcha_cfg(gid).get("enabled"))},
+        "logs": {
+            # Un salon configure mais disparu ne trace plus rien : on
+            # verifie qu'il existe encore.
+            "channel": bool(salon_logs and guild.get_channel(salon_logs)),
+            "categories_actives": actives,
+        },
+        "auto_backup": {"enabled": bool(cfg.get("auto_backup_enabled"))},
+        "permissions": {
+            "ban_members": perms.ban_members,
+            "kick_members": perms.kick_members,
+            "manage_roles": perms.manage_roles,
+            "manage_channels": perms.manage_channels,
+            "moderate_members": perms.moderate_members,
+            "view_audit_log": perms.view_audit_log,
+        },
+        "discord": {
+            "verification_level": int(getattr(guild.verification_level, "value", 0)),
+            "explicit_content_filter": int(
+                getattr(guild.explicit_content_filter, "value", 0)),
+            "mfa_required": int(getattr(guild, "mfa_level", 0) or 0) > 0,
+        },
+    }
+
+
+async def api_score_securite(request):
+    """La note du serveur, et ce qu'il faut faire pour la monter."""
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    await exiger_premium(guild, "security_score")
+    faits = collecter_faits_securite(guild)
+    return api_json({"ok": True, "score": sc_score.calculer(faits),
+                     "faits": faits}, request=request)
+
+
 async def api_get_guild_security(request):
     identity = await api_identity(request)
     guild = await api_guild_from_request(request, identity)
@@ -8828,6 +8906,128 @@ def profil_discord(uid):
     }
 
 
+async def reconcilier_licences():
+    """
+    Reconstruit le premium des serveurs a partir des licences.
+
+    Les licences sont la source, le premium d'un serveur en est la
+    consequence. Une restauration de sauvegarde peut remettre un
+    premium.json anterieur a une activation : sans ce passage, le
+    serveur perdrait un premium paye alors que la licence compte
+    toujours la place comme posee.
+
+    On ne fait qu'AJOUTER : un serveur dont la date est deja plus
+    lointaine garde la sienne, et une licence expiree ne ressuscite
+    rien.
+
+    Renvoie le nombre de serveurs remis d'aplomb.
+    """
+    repares = 0
+    for uid, brutes in licences_toutes().items():
+        for licence in (brutes if isinstance(brutes, list) else []):
+            if not isinstance(licence, dict):
+                continue
+            etat = pc.etat_licence(licence)
+            if not etat["active"]:
+                continue
+            for gid in etat["servers"]:
+                fin_serveur = pc.lire_date(premium_fiche(gid).get("until"))
+                fin_licence = pc.lire_date(licence.get("until"))
+                if fin_serveur and fin_licence and fin_serveur >= fin_licence:
+                    continue        # le serveur a deja au moins autant
+                await appliquer_licence_au_serveur(licence, gid)
+                repares += 1
+    if repares:
+        print(f"premium: {repares} serveur(s) remis d'aplomb depuis les licences")
+    return repares
+
+
+def licence_liberer_place(uid, licence_id, gid):
+    """
+    Retire un serveur d'une licence sans toucher a l'echeance.
+
+    C'est le geste du litige : quelqu'un s'est trompe de serveur. On lui
+    rend sa place — la licence retrouve un creneau libre — et le serveur
+    perd le premium qu'il n'aurait pas du recevoir. L'echeance de la
+    licence, elle, ne bouge pas : l'acheteur ne perd pas un jour.
+    """
+    licences = licences_de(uid)
+    licence = next((l for l in licences if str(l.get("id")) == str(licence_id)), None)
+    if licence is None:
+        return None
+    serveurs = [str(g) for g in (licence.get("servers") or [])]
+    if str(gid) not in serveurs:
+        return None
+    licence = dict(licence)
+    licence["servers"] = [g for g in serveurs if g != str(gid)]
+    licence["updated_at"] = pc.maintenant().isoformat()
+    licence_poser(uid, licence)
+    return licence
+
+
+def licence_du_serveur(gid):
+    """(uid, licence) de la licence qui a ouvert ce serveur, ou (None, None)."""
+    for uid, brutes in licences_toutes().items():
+        for licence in (brutes if isinstance(brutes, list) else []):
+            if not isinstance(licence, dict):
+                continue
+            if str(gid) in [str(g) for g in (licence.get("servers") or [])]:
+                return uid, licence
+    return None, None
+
+
+async def api_admin_premium_litige(request):
+    """
+    Le litige : rendre sa place a quelqu'un qui s'est trompe de serveur.
+
+    Different de « retirer » : retirer coupe le premium et l'acheteur
+    perd la place, definitivement. Le litige la lui REND — la licence
+    retrouve un creneau libre, qu'il pourra poser ailleurs — tout en
+    coupant le premium du serveur concerne.
+
+    Reserve aux administrateurs du bot, et journalise : c'est un geste
+    commercial, il doit laisser une trace.
+    """
+    identity = await api_identity(request, admin_required=True)
+    gid = str(request.match_info.get("guild_id") or "").strip()
+    if not gid.isdigit():
+        raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
+
+    uid, licence = licence_du_serveur(gid)
+    if licence is None:
+        raise web.HTTPNotFound(
+            text="Ce serveur n'a pas ete ouvert par une licence : "
+                 "utilise « Retirer ».")
+
+    licence = licence_liberer_place(uid, licence.get("id"), gid)
+    premium_revoquer(gid, clean_short_text(identity.get("username"), "", 80))
+
+    auteur = clean_short_text(identity.get("username"), "", 80) or "Dashboard"
+    guild = bot.get_guild(int(gid))
+    nom = guild.name if guild else gid
+    dashboard_log("premium_litige", guild, auteur, f"{nom} -> place rendue a {uid}")
+
+    profil = profil_discord(uid)
+    await annoncer_paiement(
+        "Litige resolu",
+        f"**{auteur}** a rendu sa place a **{profil['name'] or uid}**.",
+        [("Serveur libere", nom),
+         ("Offre", str(licence.get("plan") or "")),
+         ("Places libres", pc.etat_licence(licence)["free"]),
+         ("Acheteur", f"<@{uid}>")],
+        couleur=0xFAA61A)
+
+    if guild:
+        await log_event(
+            guild, "admin", "Premium retire (litige)",
+            "La place premium posee sur ce serveur a ete rendue a son "
+            "acheteur, a sa demande.",
+            severity="warning")
+
+    return api_json({"ok": True, "guild_id": gid, "user_id": uid,
+                     "licence": pc.etat_licence(licence)})
+
+
 async def api_admin_premium_acheteurs(request):
     """
     Qui a achete, et qui a pose ses places.
@@ -8992,6 +9192,11 @@ async def api_admin_premium_list(request):
             "guild_id": gid,
             "guild_name": guild.name if guild else "",
             "members": getattr(guild, "member_count", 0) if guild else 0,
+            # Le litige n'a de sens que pour un serveur ouvert par une
+            # licence : sur un cadeau direct, il n'y a aucune place a
+            # rendre. Le dashboard s'en sert pour n'afficher le bouton
+            # que la ou il peut agir.
+            "licence": str(fiche.get("licence") or ""),
             "activated_by": str(fiche.get("activated_by") or ""),
             "activated_by_id": str(fiche.get("activated_by_id") or ""),
             "activated_at": str(fiche.get("activated_at") or ""),
@@ -9580,6 +9785,8 @@ async def start_dashboard_api():
     app.router.add_get("/api/public/visites", api_visites_lecture)
     app.router.add_get("/api/admin/visites", api_admin_visites)
     app.router.add_get("/api/admin/premium/acheteurs", api_admin_premium_acheteurs)
+    app.router.add_post("/api/admin/premium/{guild_id}/litige", api_admin_premium_litige)
+    app.router.add_get("/api/guilds/{guild_id}/security/score", api_score_securite)
     app.router.add_get("/api/me/licences", api_mes_licences)
     app.router.add_post("/api/me/licences/activer", api_activer_licence)
     app.router.add_post("/api/stripe/webhook", api_stripe_webhook)
@@ -9967,6 +10174,11 @@ async def dashboard_recurring_loop():
             cfg = get_cfg(guild.id)
             messages = cfg.get("recurring_messages")
             if not isinstance(messages, list) or not messages:
+                continue
+            # Le verrou se pose ici, au point d'effet : le serveur garde
+            # ses messages programmes, ils repartent tels quels le jour
+            # ou l'abonnement revient.
+            if not est_premium(guild.id):
                 continue
             changed = False
             for message in messages:
@@ -15859,6 +16071,12 @@ async def on_ready():
         await nettoyer_vocaux_orphelins()
     except Exception as err:
         print(f"nettoyage des vocaux : {err}")
+    # Une sauvegarde restauree peut etre anterieure a une activation :
+    # les licences font foi, on reconstruit le premium a partir d'elles.
+    try:
+        await reconcilier_licences()
+    except Exception as err:
+        print(f"reconciliation des licences : {err}")
     if not _dashboard_social_task or _dashboard_social_task.done():
         _dashboard_social_task = asyncio.create_task(dashboard_social_loop())
     if not _security_task or _security_task.done():
