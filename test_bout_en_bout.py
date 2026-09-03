@@ -80,9 +80,10 @@ class FauxMoi:
     top_role = FauxRole("ModBot")
 
 
-class FauxNiveau:
-    def __init__(self, valeur):
-        self.value = valeur
+# Les VRAIES enumerations de discord.py, pas des objets a `.value`.
+# Un faux commode cachait le defaut : `int()` sur ces enumerations leve,
+# et `bool()` y vaut VRAI meme pour un niveau zero.
+import discord as _discord
 
 
 class FauxGuild:
@@ -92,9 +93,9 @@ class FauxGuild:
         self.member_count = 120
         self.me = FauxMoi()
         self.roles = []
-        self.verification_level = FauxNiveau(3)
-        self.explicit_content_filter = FauxNiveau(2)
-        self.mfa_level = 1
+        self.verification_level = _discord.VerificationLevel.high
+        self.explicit_content_filter = _discord.ContentFilter.all_members
+        self.mfa_level = _discord.MFALevel.require_2fa
 
     def get_channel(self, cid):
         return object() if cid else None
@@ -340,6 +341,26 @@ verifier("il constate les permissions reelles",
 verifier("il lit le niveau de verification de Discord",
          corps["faits"]["discord"]["verification_level"] == 3,
          str(corps["faits"]["discord"]["verification_level"]))
+verifier("il lit la double authentification",
+         corps["faits"]["discord"]["mfa_required"] is True)
+
+# Un serveur ou rien n'est active : c'est la que `bool()` sur une
+# enumeration mentait — MFALevel.disabled vaut zero mais reste vrai.
+GUILD.verification_level = _discord.VerificationLevel.none
+GUILD.explicit_content_filter = _discord.ContentFilter.disabled
+GUILD.mfa_level = _discord.MFALevel.disabled
+statut, nu = appeler(bot_mod.api_score_securite, match={"guild_id": GID})
+verifier("un serveur sans reglage Discord ne recoit pas ces points",
+         statut == 200
+         and nu["faits"]["discord"]["verification_level"] == 0
+         and nu["faits"]["discord"]["mfa_required"] is False,
+         str(nu.get("faits", {}).get("discord")))
+verifier("et son score est plus bas",
+         nu["score"]["score"] < corps["score"]["score"],
+         "%s < %s" % (nu["score"]["score"], corps["score"]["score"]))
+GUILD.verification_level = _discord.VerificationLevel.high
+GUILD.explicit_content_filter = _discord.ContentFilter.all_members
+GUILD.mfa_level = _discord.MFALevel.require_2fa
 
 
 # ══════════════════════════════════════════════════════════════════════

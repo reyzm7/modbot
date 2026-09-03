@@ -6641,6 +6641,23 @@ def serialize_security_config(guild):
 #  Ce fichier ne fait que CONSTATER. Il ne juge pas, il rapporte.
 # ══════════════════════════════════════════════════════════════════════
 
+def niveau_discord(valeur):
+    """
+    Le rang numerique d'un reglage Discord, quel que soit son emballage.
+
+    Les niveaux de discord.py sont des enumerations maison : `int()`
+    dessus leve une TypeError — ce qui rendait le score en erreur 500 —
+    et `bool()` vaut VRAI meme pour un niveau zero, ce qui aurait fait
+    croire la double authentification active alors qu'elle ne l'est pas.
+    Seul `.value` dit la verite.
+    """
+    brut = getattr(valeur, "value", valeur)
+    try:
+        return int(brut)
+    except (TypeError, ValueError):
+        return 0
+
+
 def collecter_faits_securite(guild):
     """
     Ce qu'on constate d'un serveur, pour le noter.
@@ -6683,10 +6700,10 @@ def collecter_faits_securite(guild):
             "view_audit_log": perms.view_audit_log,
         },
         "discord": {
-            "verification_level": int(getattr(guild.verification_level, "value", 0)),
-            "explicit_content_filter": int(
-                getattr(guild.explicit_content_filter, "value", 0)),
-            "mfa_required": int(getattr(guild, "mfa_level", 0) or 0) > 0,
+            "verification_level": niveau_discord(guild.verification_level),
+            "explicit_content_filter": niveau_discord(
+                guild.explicit_content_filter),
+            "mfa_required": niveau_discord(getattr(guild, "mfa_level", 0)) > 0,
         },
     }
 
