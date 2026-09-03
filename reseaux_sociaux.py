@@ -1,0 +1,471 @@
+# -*- coding: utf-8 -*-
+"""
+Reconnaitre une publication, plateforme par plateforme.
+
+Le relevé se faisait par les balises OpenGraph de la page du COMPTE.
+C'est le mauvais endroit : la page d'un profil decrit le profil, pas sa
+derniere publication. Sur X, TikTok et Instagram elle est de surcroit
+rendue en JavaScript, et un robot n'y trouve qu'une coquille. L'empreinte
+portait donc sur un titre de profil qui ne bouge jamais — le relais
+restait muet — ou sur du HTML qui bouge a chaque requete — et le relais
+annoncait dans le vide.
+
+Chaque plateforme a une adresse publique qui, elle, dit la verite :
+
+  X          syndication.twitter.com, le fil que Twitter sert aux sites
+             qui embarquent un tweet. Sans clef.
+  TikTok     le JSON `__UNIVERSAL_DATA_FOR_REHYDRATION__` de la page.
+  Instagram  l'API web du profil, avec l'identifiant d'application public
+             du site lui-meme.
+  Twitch     l'API GraphQL du lecteur web, avec son client-id public.
+  YouTube    le flux RSS de la chaine (deja en place dans bot.py).
+
+Ce module ne fait AUCUN appel reseau : il recoit le texte ou le JSON et
+en tire une publication. C'est ce qui le rend testable sans dependre de
+la disponibilite de cinq sites.
+
+L'empreinte d'une publication est desormais son IDENTIFIANT. C'est la
+seule chose qui garantisse « aucun doublon » : un titre peut etre
+reecrit, une vignette regeneree, une description traduite — un
+identifiant, non.
+"""
+import json
+import re
+
+# ══════════════════════════════════════════════════════════════════════
+#  Reconnaitre la plateforme et le compte
+# ══════════════════════════════════════════════════════════════════════
+PLATEFORMES = ("x", "tiktok", "instagram", "twitch", "youtube", "flux", "web")
+
+
+def est_flux(url):
+    """
+    Vrai si le lien designe un flux RSS ou Atom.
+
+    X, TikTok et Instagram refusent les appels venus d'un serveur : X
+    repond « Rate limit exceeded », Instagram « Please wait a few
+    minutes », TikTok sert une page de verification sans donnees. Aucun
+    code ne peut contourner cela — c'est deliberé de leur part.
+
+    Un flux, lui, marche toujours. Celui qu'un service tiers publie pour
+    un compte X, ou celui d'un RSSHub, se lit sans clef et sans etre
+    reconnu comme robot. C'est la seule voie qui tienne vraiment la
+    promesse des deux minutes sur ces trois reseaux.
+    """
+    lien = str(url or "").lower().split("?")[0]
+    return (lien.endswith((".rss", ".xml", ".atom"))
+            or "/feed" in lien or "/rss" in lien or "format=rss" in str(url or "").lower())
+
+
+def plateforme_du_lien(url):
+    """La plateforme, deduite du lien et non du libelle de la carte.
+
+    Le libelle vient du dashboard et peut etre renomme ; l'hote, non.
+    """
+    hote = str(url or "").lower()
+    hote = re.sub(r"^https?://", "", hote).split("/")[0]
+    hote = hote.split(":")[0]
+    # Un flux passe avant tout le reste : « x.com/…/rss.xml » est un
+    # flux, pas une page X.
+    if est_flux(url) and not hote.endswith(("youtube.com", "youtu.be")):
+        return "flux"
+    if hote.endswith("x.com") or hote.endswith("twitter.com"):
+        return "x"
+    if hote.endswith("tiktok.com"):
+        return "tiktok"
+    if hote.endswith("instagram.com"):
+        return "instagram"
+    if hote.endswith("twitch.tv"):
+        return "twitch"
+    if hote.endswith("youtube.com") or hote.endswith("youtu.be"):
+        return "youtube"
+    return "web"
+
+
+def compte_du_lien(url):
+    """
+    Le nom du compte : « zerator » pour twitch.tv/zerator/.
+
+    Les reseaux ne partagent aucune convention. On prend le premier
+    segment utile du chemin, sans l'arobase de TikTok, et sans les
+    segments techniques que certains ajoutent (« channel », « @ »).
+    """
+    texte = str(url or "").split("?")[0].split("#")[0].rstrip("/")
+    texte = re.sub(r"^https?://", "", texte)
+    morceaux = [m for m in texte.split("/")[1:] if m]
+    if not morceaux:
+        return ""
+    for morceau in morceaux:
+        if morceau.lower() in ("channel", "c", "user", "profile", "videos", "live"):
+            continue
+        return morceau.lstrip("@")[:60]
+    return morceaux[-1].lstrip("@")[:60]
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Les variables des messages d'annonce
+# ══════════════════════════════════════════════════════════════════════
+# Chaque variable existe en francais et en anglais : le dashboard est
+# traduit en cinq langues, imposer une seule ecriture serait arbitraire.
+VARIABLES = (
+    ("compte", "account"),
+    ("plateforme", "platform"),
+    ("titre", "title"),
+    ("lien", "link"),
+    ("description", "description"),
+    ("serveur", "server"),
+    ("jeu", "game"),
+    ("spectateurs", "viewers"),
+    ("date", "date"),
+    ("type", "kind"),
+)
+
+# Un message par plateforme. Le meme texte partout n'a aucun sens : un
+# live ne s'annonce pas comme une photo, et « est en live » sous une
+# video TikTok est simplement faux.
+MESSAGES_DEFAUT = {
+    "x": "{compte} vient de poster sur X 🐦\n{lien}",
+    "tiktok": "Nouvelle vidéo TikTok de {compte} 🎵\n{lien}",
+    "instagram": "{compte} a publié sur Instagram 📸\n{lien}",
+    "twitch": "🔴 {compte} est en live : {titre}\nOn joue à {jeu}\n{lien}",
+    "youtube": "Nouvelle vidéo de {compte} ▶️\n{titre}\n{lien}",
+    # Un flux : on ne sait pas de quel reseau il vient, mais on a son
+    # titre — c'est plus parlant que le seul lien.
+    "flux": "Du nouveau chez {compte} 📣\n{titre}\n{lien}",
+    "web": "Du nouveau chez {compte} 📣\n{lien}",
+}
+
+# Le mot qui decrit la publication, pour la variable {type} et le titre
+# de l'embed.
+NATURE = {
+    "x": "Nouveau post",
+    "tiktok": "Nouvelle vidéo",
+    "instagram": "Nouvelle publication",
+    "twitch": "En live",
+    "youtube": "Nouvelle vidéo",
+    "flux": "Nouvelle publication",
+    "web": "Nouvelle publication",
+}
+
+
+def message_par_defaut(lien_ou_plateforme):
+    """Le message d'annonce propose pour ce lien."""
+    clef = (lien_ou_plateforme if lien_ou_plateforme in MESSAGES_DEFAUT
+            else plateforme_du_lien(lien_ou_plateforme))
+    return MESSAGES_DEFAUT.get(clef, MESSAGES_DEFAUT["web"])
+
+
+def rendre_message(modele, valeurs, taille=400):
+    """
+    Remplace les variables d'un message d'annonce.
+
+    Une variable sans valeur disparait avec la ligne qui ne contient
+    qu'elle : « On joue à {jeu} » sur une chaine sans jeu declare
+    laissait « On joue à  » tout seul.
+    """
+    texte = str(modele or "")
+    if not texte:
+        return ""
+    connues = {}
+    for fr, en in VARIABLES:
+        valeur = str(valeurs.get(fr) or valeurs.get(en) or "")
+        connues["{%s}" % fr] = valeur
+        connues["{%s}" % en] = valeur
+
+    gardees = []
+    for ligne in texte.split("\n"):
+        # Seules les variables CONNUES entrent dans le calcul. Une ligne
+        # dont toutes les variables connues sont vides ne dit plus rien :
+        # « On joue à {jeu} » sur une chaine sans jeu declare laissait
+        # « On joue à » tout seul. Un nom inconnu — « {abonnes} », une
+        # faute de frappe — n'est pas une raison d'effacer la phrase que
+        # l'auteur a ecrite autour : on retire le jeton, on garde le
+        # texte.
+        presentes = [j for j in re.findall(r"\{[a-zA-Z_]{2,20}\}", ligne)
+                     if j in connues]
+        if presentes and not any(connues[j] for j in presentes):
+            continue
+        for jeton, valeur in connues.items():
+            ligne = ligne.replace(jeton, valeur)
+        # Toute variable restee inconnue est retiree plutot qu'affichee
+        # telle quelle : « {abonnes} » dans un salon public fait accident.
+        ligne = re.sub(r"\{[a-zA-Z_]{2,20}\}", "", ligne)
+        gardees.append(ligne.rstrip())
+    return "\n".join(gardees)[:taille]
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Lecture des reponses, plateforme par plateforme
+# ══════════════════════════════════════════════════════════════════════
+def _publication(identifiant, **reste):
+    """
+    Une publication. `id` est l'empreinte : c'est LUI qui dit si l'on a
+    deja annonce, et rien d'autre.
+    """
+    if not identifiant:
+        return None
+    publication = {
+        "id": str(identifiant),
+        "url": "", "title": "", "description": "", "image": "",
+        "game": "", "viewers": "", "date": "", "live": False,
+    }
+    publication.update({c: v for c, v in reste.items() if v is not None})
+    return publication
+
+
+def _charger(source):
+    if isinstance(source, (dict, list)):
+        return source
+    try:
+        return json.loads(source)
+    except (TypeError, ValueError):
+        return None
+
+
+# ── X ────────────────────────────────────────────────────────────────
+def lire_x(source, compte=""):
+    """
+    Dernier post d'un compte, depuis le fil de syndication.
+
+    Les retweets sont ecartes : annoncer le post de quelqu'un d'autre
+    comme une publication du compte suivi est trompeur.
+    """
+    donnees = _charger(source)
+    if not isinstance(donnees, dict):
+        return None
+    entrees = ((donnees.get("timeline") or {}).get("entries")
+               or donnees.get("entries") or [])
+    for entree in entrees:
+        if not isinstance(entree, dict):
+            continue
+        contenu = (entree.get("content") or {}).get("tweet") or entree.get("tweet")
+        if not isinstance(contenu, dict):
+            continue
+        if contenu.get("retweeted_status") or contenu.get("retweeted_status_id_str"):
+            continue
+        identifiant = str(contenu.get("id_str") or contenu.get("id") or "")
+        if not identifiant:
+            continue
+        texte = str(contenu.get("full_text") or contenu.get("text") or "")
+        auteur = ((contenu.get("user") or {}).get("screen_name")
+                  or compte or "")
+        medias = ((contenu.get("entities") or {}).get("media")
+                  or (contenu.get("extended_entities") or {}).get("media") or [])
+        image = ""
+        if medias and isinstance(medias[0], dict):
+            image = str(medias[0].get("media_url_https") or "")
+        return _publication(
+            identifiant,
+            url=f"https://x.com/{auteur}/status/{identifiant}" if auteur else "",
+            title=texte[:120],
+            description=texte,
+            image=image,
+            date=str(contenu.get("created_at") or ""),
+        )
+    return None
+
+
+# ── TikTok ───────────────────────────────────────────────────────────
+_TIKTOK_BLOC = re.compile(
+    r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+    re.S)
+
+
+def lire_tiktok(page, compte=""):
+    """Derniere video d'un profil, depuis le JSON embarque dans la page."""
+    trouve = _TIKTOK_BLOC.search(page or "")
+    donnees = _charger(trouve.group(1)) if trouve else _charger(page)
+    if not isinstance(donnees, dict):
+        return None
+    portee = donnees.get("__DEFAULT_SCOPE__") or donnees
+    module = (portee.get("webapp.user-detail") or portee.get("webapp.post-detail")
+              or portee)
+    videos = (module.get("itemList") or module.get("items")
+              or (module.get("itemInfo") or {}).get("itemStruct"))
+    if isinstance(videos, dict):
+        videos = [videos]
+    if not isinstance(videos, list) or not videos:
+        return None
+    video = videos[0]
+    if not isinstance(video, dict):
+        return None
+    identifiant = str(video.get("id") or "")
+    auteur = ((video.get("author") or {}).get("uniqueId") if isinstance(video.get("author"), dict)
+              else "") or compte
+    couverture = ((video.get("video") or {}).get("cover")
+                  if isinstance(video.get("video"), dict) else "")
+    return _publication(
+        identifiant,
+        url=f"https://www.tiktok.com/@{auteur}/video/{identifiant}" if auteur else "",
+        title=str(video.get("desc") or "")[:120],
+        description=str(video.get("desc") or ""),
+        image=str(couverture or ""),
+        date=str(video.get("createTime") or ""),
+    )
+
+
+# ── Instagram ────────────────────────────────────────────────────────
+def lire_instagram(source, compte=""):
+    """Derniere publication d'un profil, depuis l'API web publique."""
+    donnees = _charger(source)
+    if not isinstance(donnees, dict):
+        return None
+    utilisateur = ((donnees.get("data") or {}).get("user")
+                   or donnees.get("user") or {})
+    if not isinstance(utilisateur, dict):
+        return None
+    bord = ((utilisateur.get("edge_owner_to_timeline_media") or {}).get("edges")
+            or [])
+    if not bord:
+        return None
+    noeud = bord[0].get("node") if isinstance(bord[0], dict) else None
+    if not isinstance(noeud, dict):
+        return None
+    code = str(noeud.get("shortcode") or noeud.get("code") or "")
+    if not code:
+        return None
+    legendes = ((noeud.get("edge_media_to_caption") or {}).get("edges") or [])
+    legende = ""
+    if legendes and isinstance(legendes[0], dict):
+        legende = str((legendes[0].get("node") or {}).get("text") or "")
+    return _publication(
+        code,
+        url=f"https://www.instagram.com/p/{code}/",
+        title=legende[:120] or f"Publication de {compte or utilisateur.get('username') or ''}".strip(),
+        description=legende,
+        image=str(noeud.get("display_url") or noeud.get("thumbnail_src") or ""),
+        date=str(noeud.get("taken_at_timestamp") or ""),
+    )
+
+
+# ── Flux RSS et Atom ─────────────────────────────────────────────────
+def _balise(bloc, nom):
+    trouve = re.search(r"<%s[^>]*>(.*?)</%s>" % (nom, nom), bloc, re.S | re.I)
+    if not trouve:
+        return ""
+    texte = trouve.group(1)
+    texte = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", texte, flags=re.S)
+    texte = re.sub(r"<[^>]+>", "", texte)
+    return texte.strip()[:2000]
+
+
+def lire_flux(xml, compte=""):
+    """
+    Derniere entree d'un flux RSS 2.0 ou Atom.
+
+    L'identifiant vient du `guid` ou de l'`id` de l'entree, a defaut du
+    lien. C'est ce qui distingue une nouvelle publication d'un titre
+    corrige — un flux republie volontiers ses entrees.
+    """
+    texte = str(xml or "")
+    entree = re.search(r"<(item|entry)[^>]*>(.*?)</\1>", texte, re.S | re.I)
+    if not entree:
+        return None
+    bloc = entree.group(2)
+
+    lien = _balise(bloc, "link")
+    if not lien:
+        href = re.search(r'<link[^>]+href=["\']([^"\']+)["\']', bloc, re.I)
+        lien = href.group(1) if href else ""
+    identifiant = (_balise(bloc, "guid") or _balise(bloc, "id") or lien)
+    if not identifiant:
+        return None
+
+    image = ""
+    media = (re.search(r'<media:(?:content|thumbnail)[^>]+url=["\']([^"\']+)["\']', bloc, re.I)
+             or re.search(r'<enclosure[^>]+url=["\']([^"\']+)["\']', bloc, re.I))
+    if media:
+        image = media.group(1)
+
+    titre = _balise(bloc, "title")
+    resume = _balise(bloc, "description") or _balise(bloc, "summary") or _balise(bloc, "content")
+    return _publication(
+        identifiant, url=lien, title=titre[:120], description=resume,
+        image=image, date=_balise(bloc, "pubDate") or _balise(bloc, "updated"))
+
+
+# ── Twitch ───────────────────────────────────────────────────────────
+def lire_twitch(source, compte=""):
+    """
+    Le live en cours, ou None si la chaine est hors ligne.
+
+    L'empreinte est l'identifiant du STREAM : il change a chaque
+    demarrage. Une coupure de quelques secondes suivie d'une reprise
+    donne un nouvel identifiant — c'est bien un nouveau live, et il
+    merite son annonce. Un titre change en cours de route, non.
+    """
+    donnees = _charger(source)
+    if isinstance(donnees, list):
+        donnees = donnees[0] if donnees else None
+    if not isinstance(donnees, dict):
+        return None
+    utilisateur = (donnees.get("data") or {}).get("user") or donnees.get("user")
+    if not isinstance(utilisateur, dict):
+        return None
+    live = utilisateur.get("stream")
+    if not isinstance(live, dict):
+        return None                      # hors ligne : rien a annoncer
+    identifiant = str(live.get("id") or "")
+    if not identifiant:
+        return None
+    nom = str(utilisateur.get("login") or utilisateur.get("displayName") or compte or "")
+    jeu = ""
+    if isinstance(live.get("game"), dict):
+        jeu = str(live["game"].get("displayName") or live["game"].get("name") or "")
+    spectateurs = live.get("viewersCount")
+    return _publication(
+        identifiant,
+        url=f"https://www.twitch.tv/{nom}" if nom else "",
+        title=str(live.get("title") or utilisateur.get("broadcastSettings", {}).get("title") or ""),
+        description=str(live.get("title") or ""),
+        image=str(live.get("previewImageURL") or ""),
+        game=jeu,
+        viewers=str(spectateurs) if spectateurs not in (None, "") else "",
+        date=str(live.get("createdAt") or ""),
+        live=True,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Doublons
+# ══════════════════════════════════════════════════════════════════════
+# Combien d'identifiants on retient par relais. Assez pour qu'une
+# publication supprimee puis republiee ne soit pas reannoncee, et pour
+# qu'un profil qui reordonne son fil ne fasse pas ressortir un ancien
+# post.
+IDENTIFIANTS_RETENUS = 40
+
+
+def doit_annoncer(etat, publication):
+    """
+    Faut-il annoncer ? Retourne (oui, raison du refus).
+
+    La raison n'est pas decorative : elle part dans le journal quand un
+    administrateur se demande pourquoi son relais reste muet.
+    """
+    if not publication or not publication.get("id"):
+        return False, "aucune publication lisible"
+    if not etat:
+        # Premier relevé : on retient l'etat sans annoncer, sinon
+        # activer un relais republierait le dernier post d'il y a six
+        # mois.
+        return False, "premier relevé"
+    if publication["id"] == etat.get("id"):
+        return False, "rien de neuf"
+    if publication["id"] in (etat.get("vus") or []):
+        return False, "publication deja annoncee"
+    return True, ""
+
+
+def memoriser(etat, publication, horodatage, annonce):
+    """Nouvel etat d'un relais apres un relevé."""
+    vus = list((etat or {}).get("vus") or [])
+    if publication["id"] not in vus:
+        vus.append(publication["id"])
+    return {
+        "id": publication["id"],
+        "url": publication.get("url", ""),
+        "title": publication.get("title", ""),
+        "vus": vus[-IDENTIFIANTS_RETENUS:],
+        "annonce_le": horodatage if annonce else float((etat or {}).get("annonce_le") or 0),
+    }

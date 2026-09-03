@@ -143,8 +143,12 @@ verifier("les variables anglaises marchent aussi",
 
 verifier("un message vide reste vide",
          bot_mod.render_social_template("", relay, snapshot) == "")
-verifier("une variable inconnue est laissee telle quelle",
-         "{inconnue}" in bot_mod.render_social_template("{inconnue}", relay, snapshot))
+# Une variable inconnue est RETIREE, plus laissee telle quelle : voir
+# « {abonnes} » s'afficher dans un salon public fait accident, et
+# l'auteur du message n'a aucun moyen de comprendre son erreur.
+verifier("une variable inconnue est retiree",
+         bot_mod.render_social_template("{inconnue}", relay, snapshot) == "",
+         repr(bot_mod.render_social_template("{inconnue}", relay, snapshot)))
 verifier("sans snapshot, le lien du compte sert de repli",
          bot_mod.render_social_template("{lien}", relay, {}) == relay["link"])
 

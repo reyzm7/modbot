@@ -14,6 +14,7 @@ import hmac
 import security_core as sc
 import premium_core as pc
 import security_score as sc_score
+import reseaux_sociaux as rs
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -1226,10 +1227,24 @@ def clean_short_text(value, fallback, max_len):
     value = str(value or "").strip()
     return (value or fallback)[:max_len]
 
+# `<:nom:id>` ou `<a:nom:id>` pour un emoji anime.
+EMOJI_PERSONNALISE = re.compile(r"^<a?:[A-Za-z0-9_]{2,32}:\d{15,25}>$")
+
+
+def est_emoji_personnalise(valeur):
+    return bool(EMOJI_PERSONNALISE.match(str(valeur or "").strip()))
+
+
 def clean_emoji(value, fallback="🎫"):
     value = str(value or "").strip()
     if not value:
         return fallback
+    # Un emoji du serveur fait une trentaine de caracteres. La coupe a
+    # seize, prevue pour un emoji Unicode, le transformait en
+    # `<:modbot_tkt_0:1` — une chaine que Discord refuse. C'est ce qui
+    # empechait une image d'option de ticket de s'afficher.
+    if est_emoji_personnalise(value):
+        return value
     return value[:16]
 
 def normalize_priority(value, default=1):
@@ -1266,9 +1281,25 @@ def normalize_ticket_question(item, fallback=None):
     # Le libelle est facultatif, mais seulement s'il reste de quoi cliquer.
     label = clean_short_text(item.get("label"), "", 80)
     emoji = clean_emoji(item.get("emoji"), "")
-    image = clean_short_text(item.get("image"), "", 400)
+    image = clean_short_text(item.get("image"), "", 400000)
     if not image.startswith(("http://", "https://", "data:image/")):
         image = ""
+
+    # Une image et un emoji ne peuvent pas cohabiter : Discord n'affiche
+    # qu'un seul symbole par option. L'image l'emporte — c'est le choix
+    # le plus deliberent des deux, et le champ emoji du dashboard, limite
+    # a trois caracteres, ne peut de toute facon pas porter celui que le
+    # bot fabrique.
+    if image:
+        emoji = ""
+
+    # L'emoji fabrique a partir de l'image. Il vit dans son PROPRE champ :
+    # range dans `emoji`, il revenait du navigateur ampute et ecrasait le
+    # bon. Il n'a de sens qu'accompagne de l'image dont il est issu.
+    emoji_image = str(item.get("emoji_image") or "").strip()
+    if not image or not est_emoji_personnalise(emoji_image):
+        emoji_image = ""
+
     if not label and not emoji and not image:
         label = fallback.get("label") or "Ticket"
         emoji = fallback.get("emoji") or "🎫"
@@ -1276,9 +1307,17 @@ def normalize_ticket_question(item, fallback=None):
     return {
         "emoji": emoji,
         "image": image,
+        "emoji_image": emoji_image,
         "label": label,
         "desc": clean_short_text(item.get("desc"), fallback.get("desc") or "", 100),
     }
+
+
+def symbole_option(question):
+    """Le symbole a poser sur le composant : l'image si elle a pu devenir
+    un emoji du serveur, sinon l'emoji Unicode, sinon rien."""
+    question = question or {}
+    return question.get("emoji_image") or question.get("emoji") or ""
 
 def get_ticket_questions(gid):
     cfg = get_cfg(gid) if gid else {}
@@ -2590,7 +2629,12 @@ async def handle_ai_mention(message):
 #  GIVEAWAYS
 # ════════════════════════════════════════════════
 
+# Combien de giveaux VIVANTS un serveur peut mener de front.
 GIVEAWAY_MAX_PER_GUILD = 25
+# Combien on en garde en tout, archives compris. La coupe se faisait a
+# vingt-cinq pour l'ensemble : archiver un giveaway pour faire de la
+# place en effacait un autre par le bas, sans rien dire.
+GIVEAWAY_MAX_STOCKES = 120
 GIVEAWAY_EMOJI = "🎉"
 
 
@@ -2609,7 +2653,7 @@ def save_giveaways(gid, entries):
     data = jload(F_GIVEAWAYS)
     if not isinstance(data, dict):
         data = {}
-    data[str(gid)] = entries[-GIVEAWAY_MAX_PER_GUILD:]
+    data[str(gid)] = entries[-GIVEAWAY_MAX_STOCKES:]
     jsave(F_GIVEAWAYS, data)
 
 
@@ -2910,6 +2954,11 @@ def serialize_giveaway(guild, giveaway):
     restant = int((fin - now()).total_seconds()) if fin else 0
     return {
         **giveaway,
+        # Un giveaway termine reste dans la rubrique jusqu'a ce qu'on
+        # l'archive. Les anciens, enregistres avant ce champ, sont donc
+        # actifs : c'est le bon defaut, on ne fait pas disparaitre
+        # quelque chose au nom de quelqu'un.
+        "archived": bool(giveaway.get("archived")),
         "participants": len(giveaway.get("participants") or []),
         "winners_picked": giveaway.get("winners_picked") or [],
         "channel_name": channel.name if channel else "salon supprime",
@@ -4653,17 +4702,30 @@ async def image_en_emoji(guild, url, index):
     if not guild.me.guild_permissions.manage_emojis:
         return ""
 
-    nom = f"{EMOJI_TICKET_PREFIXE}{index}"
+    donnees = await _telecharger_image(url)
+    if not donnees:
+        return ""
 
-    # Deja cree lors d'une publication precedente : on le reutilise plutot
-    # que d'epuiser les emplacements d'emoji du serveur.
+    # Le nom porte l'empreinte de l'IMAGE. L'ancien nom ne portait que le
+    # rang de l'option : le premier emoji trouve a ce nom etait reutilise
+    # tel quel, et changer l'image ne changeait donc rien a l'ecran.
+    empreinte = hashlib.sha256(donnees).hexdigest()[:10]
+    nom = f"{EMOJI_TICKET_PREFIXE}{index}_{empreinte}"
+
+    prefixe_rang = f"{EMOJI_TICKET_PREFIXE}{index}_"
     for emoji in guild.emojis:
         if emoji.name == nom:
             return str(emoji)
 
-    donnees = await _telecharger_image(url)
-    if not donnees:
-        return ""
+    # Les emojis de la meme option issus d'une image precedente n'ont plus
+    # de raison d'occuper un emplacement.
+    for emoji in list(guild.emojis):
+        if emoji.name.startswith(prefixe_rang) or emoji.name == f"{EMOJI_TICKET_PREFIXE}{index}":
+            try:
+                await emoji.delete(reason="[ModBot] Image d'option remplacee")
+            except Exception:
+                pass
+
     try:
         emoji = await guild.create_custom_emoji(
             name=nom, image=donnees,
@@ -4692,10 +4754,10 @@ async def preparer_emojis_ticket(guild):
         return questions
     change = False
     for index, q in enumerate(questions):
-        if q.get("image") and not str(q.get("emoji", "")).startswith("<"):
+        if q.get("image") and not q.get("emoji_image"):
             emoji = await image_en_emoji(guild, q["image"], index)
             if emoji:
-                q["emoji"] = emoji
+                q["emoji_image"] = emoji
                 change = True
     if change:
         set_ticket_questions(guild.id, questions)
@@ -4720,7 +4782,7 @@ class BoutonCategorieTicket(discord.ui.Button):
     """Une option de ticket presentee en bouton : le libelle est facultatif."""
 
     def __init__(self, index, question):
-        emoji = question.get("emoji") or None
+        emoji = symbole_option(question) or None
         label = question.get("label") or None
         # Discord refuse un bouton sans libelle NI emoji : on garantit l'un.
         if not emoji and not label:
@@ -4758,7 +4820,7 @@ class TicketCategorySelect(discord.ui.Select):
                 label=label[:100],
                 description=(q.get("desc") or "")[:100] or None,
                 value=str(idx),
-                emoji=q.get("emoji") or None,
+                emoji=symbole_option(q) or None,
             ))
         if not options:
             options = [discord.SelectOption(label="Ticket", description="Ouvrir un ticket", value="0", emoji="🎫")]
@@ -6224,7 +6286,21 @@ async def apply_dashboard_config(guild, payload):
             cfg.pop("ticket_support_role", None)
         options = tickets.get("options")
         if isinstance(options, list) and options:
-            cfg["ticket_questions"] = [normalize_ticket_question(option) for option in options[:MAX_TICKET_OPTIONS]]
+            # Le navigateur ne connait pas `emoji_image` : l'emoji que le
+            # bot a fabrique a partir de l'image n'est pas dans ce qu'il
+            # renvoie. On le reprend de ce qui est deja enregistre, mais
+            # SEULEMENT si l'image n'a pas change — sinon on afficherait
+            # l'ancienne.
+            anciennes = get_ticket_questions(gid)
+            propres = []
+            for rang, option in enumerate(options[:MAX_TICKET_OPTIONS]):
+                option = dict(option) if isinstance(option, dict) else {}
+                ancienne = anciennes[rang] if rang < len(anciennes) else {}
+                if (option.get("image")
+                        and option.get("image") == ancienne.get("image")):
+                    option.setdefault("emoji_image", ancienne.get("emoji_image"))
+                propres.append(normalize_ticket_question(option))
+            cfg["ticket_questions"] = propres
 
     security = payload.get("security") or {}
     if "antilink" in security:
@@ -6622,43 +6698,76 @@ async def api_test_social(request):
     perms = channel.permissions_for(guild.me)
     if not perms.view_channel or not perms.send_messages:
         raise web.HTTPForbidden(text="ModBot ne peut pas ecrire dans ce salon.")
-    platform = clean_short_text(payload.get("platform"), "Reseau", 40)
+    # Un test qui n'a pas la meme forme que l'annonce reelle ne teste
+    # rien. On fait exactement ce que ferait la boucle : on releve la
+    # derniere publication, et on rend le message avec les variables de
+    # l'utilisateur.
     link = clean_short_text(payload.get("link"), "", 500)
-    emoji, color, headline = _social_platform_palette(platform)
-    account = link.rstrip("/").split("/")[-1].replace("@", "") if link else "Compte suivi"
-    if "twitch" in platform.lower():
-        title = f"{account} est en stream"
-        description = f"**{account}** est maintenant en live."
-        button_label = "Watch Stream"
-    elif "tiktok" in platform.lower():
-        title = f"Nouvelle vidéo TikTok détectée"
-        description = f"Une activité TikTok vient d'être détectée pour **{account}**."
-        button_label = "Voir TikTok"
-    else:
-        title = f"{headline} détectée"
-        description = f"Une nouvelle activité vient d'être détectée pour **{account}**."
-        button_label = "Ouvrir"
-    embed = EG(f"{emoji} {title}", description, color, guild.id)
+    plateforme = rs.plateforme_du_lien(link)
+    libelle = clean_short_text(payload.get("platform"), plateforme, 40)
+    emoji, couleur, _ = _social_platform_palette(libelle or plateforme)
+    compte = rs.compte_du_lien(link) or "compte"
+
+    publication = None
     if link:
-        embed.add_field(name="Compte suivi", value=link, inline=False)
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
-                snapshot = await fetch_social_snapshot(session, link)
-            if snapshot and snapshot.get("title"):
-                embed.add_field(name="Aperçu", value=snapshot["title"][:1024], inline=False)
-            if snapshot and snapshot.get("description"):
-                embed.add_field(name="Description", value=snapshot["description"][:1024], inline=False)
-            if snapshot and snapshot.get("image"):
-                embed.set_image(url=snapshot["image"])
+            async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=12)) as session:
+                publication = await relever_publication(session, link)
+        except Exception:
+            publication = None
+
+    trouve = bool(publication)
+    if not publication:
+        # Rien de lisible — chaine hors ligne, compte prive, plateforme
+        # qui refuse nos appels. Le test montre alors la mise en page
+        # avec un exemple, et le dit.
+        publication = {
+            "id": "test", "url": link,
+            "title": f"Exemple de publication de {compte}",
+            "description": "Ceci est un test : aucune publication réelle n'a pu être lue.",
+            "image": "", "game": "", "viewers": "", "date": "", "live": False,
+        }
+
+    relay = {"link": link, "platform": libelle,
+             "message": payload.get("message") or rs.message_par_defaut(link)}
+    valeurs = valeurs_annonce(guild, relay, publication)
+    nature = rs.NATURE.get(plateforme, rs.NATURE["web"])
+
+    embed = EG(f"{emoji} {nature} — {compte}",
+               publication.get("description", "")[:2000] or None,
+               couleur, guild.id)
+    embed.add_field(name="Compte suivi", value=link or "—", inline=False)
+    if publication.get("title"):
+        embed.add_field(name="Titre", value=publication["title"][:1024], inline=False)
+    if publication.get("game"):
+        embed.add_field(name="Jeu", value=publication["game"][:256], inline=True)
+    if publication.get("viewers"):
+        embed.add_field(name="Spectateurs", value=str(publication["viewers"])[:32], inline=True)
+    if publication.get("image"):
+        try:
+            embed.set_image(url=publication["image"])
         except Exception:
             pass
+    embed.set_footer(text="Test depuis le dashboard"
+                          + ("" if trouve else " — publication non lue"))
+
     view = None
     if link:
         view = discord.ui.View()
-        view.add_item(discord.ui.Button(label=button_label, url=link))
-    await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
-    dashboard_log("social_test", guild, identity.get("username"), f"{platform} -> #{channel.name}")
-    return api_json({"ok": True, "channel_id": str(channel.id)})
+        view.add_item(discord.ui.Button(
+            label="Regarder le live" if publication.get("live") else "Ouvrir",
+            url=publication.get("url") or link))
+
+    annonce = rs.rendre_message(relay["message"], valeurs)
+    # Aucune mention pendant un test : prevenir tout un serveur pour
+    # verifier une mise en page serait une mauvaise surprise.
+    await channel.send(content=annonce or None, embed=embed, view=view,
+                       allowed_mentions=discord.AllowedMentions.none())
+    dashboard_log("social_test", guild, identity.get("username"),
+                  f"{libelle} -> #{channel.name}")
+    return api_json({"ok": True, "channel_id": str(channel.id),
+                     "detecte": trouve})
 
 # ════════════════════════════════════════════════
 #  API — LOGS, SECURITE, SAUVEGARDES
@@ -7753,7 +7862,11 @@ async def api_create_giveaway(request):
     payload = await request.json() if request.can_read_body else {}
     if not isinstance(payload, dict):
         raise web.HTTPBadRequest(text="Corps de requete invalide.")
-    if len(load_giveaways(guild.id)) >= GIVEAWAY_MAX_PER_GUILD:
+    # Les archives ne comptent pas : sans cela, vingt-cinq giveaways
+    # termines interdisaient d'en creer un vingt-sixieme, alors que
+    # ranger la rubrique est precisement ce qu'on venait de faire.
+    vivants = [g for g in load_giveaways(guild.id) if not g.get("archived")]
+    if len(vivants) >= GIVEAWAY_MAX_PER_GUILD:
         raise web.HTTPBadRequest(
             text=f"Limite atteinte : {GIVEAWAY_MAX_PER_GUILD} giveaways par serveur.")
 
@@ -7825,6 +7938,20 @@ async def api_giveaway_action(request):
         if not nouveaux:
             raise web.HTTPBadRequest(text="Tous les participants ont deja gagne.")
         resultat = f"nouveau gagnant : <@{nouveaux[0]}>"
+    elif action == "archive":
+        # Archiver n'est pas supprimer : les gagnants, les participants
+        # et le lien du message restent consultables. C'est ce qui
+        # permet de ranger la rubrique sans perdre l'historique.
+        if not giveaway.get("ended"):
+            raise web.HTTPBadRequest(
+                text="Termine le giveaway avant de l'archiver.")
+        giveaway["archived"] = True
+        upsert_giveaway(guild.id, giveaway)
+        resultat = "giveaway archive"
+    elif action == "unarchive":
+        giveaway["archived"] = False
+        upsert_giveaway(guild.id, giveaway)
+        resultat = "giveaway sorti des archives"
     else:
         raise web.HTTPBadRequest(text=f"Action inconnue : {action}")
 
@@ -10183,48 +10310,28 @@ def sanitize_social_relays(brut, guild=None):
 
 
 def _compte_depuis_lien(lien):
-    """
-    Extrait le nom du compte d'un lien de reseau social.
-
-    « https://twitch.tv/zerator/ » donne « zerator ». Les reseaux ne
-    partagent aucune convention : on prend le dernier segment utile, en
-    retirant l'arobase de TikTok et les parametres de suivi.
-    """
-    texte = str(lien or "").split("?")[0].split("#")[0].rstrip("/")
-    if not texte:
-        return ""
-    segment = texte.rsplit("/", 1)[-1]
-    # YouTube place la chaine derriere /channel/ ou /c/ : le dernier
-    # segment reste le bon. Twitter et Instagram aussi.
-    return segment.lstrip("@")[:60]
+    """Le nom du compte d'un lien. Voir reseaux_sociaux.compte_du_lien."""
+    return rs.compte_du_lien(lien)
 
 
 def render_social_template(template, relay, snapshot):
     """
-    Remplace les variables du message d'annonce.
-
-    Chaque variable existe en francais et en anglais : le dashboard est
-    traduit en cinq langues, imposer une seule ecriture serait arbitraire.
+    Rend un message d'annonce. Conserve pour les appels existants ; la
+    logique vit dans reseaux_sociaux, avec le reste de ce qui concerne
+    les relais.
     """
-    texte = str(template or "")
-    if not texte:
-        return ""
-    lien = str(relay.get("link") or "")
-    compte = _compte_depuis_lien(lien)
-    plateforme = clean_short_text(relay.get("platform"), "Reseau", 40)
-    titre = str((snapshot or {}).get("title") or "")
-    url = str((snapshot or {}).get("url") or "") or lien
-    description = str((snapshot or {}).get("description") or "")
-    valeurs = {
-        "{compte}": compte, "{account}": compte,
-        "{plateforme}": plateforme, "{platform}": plateforme,
-        "{titre}": titre, "{title}": titre,
-        "{lien}": url, "{link}": url, "{url}": url,
-        "{description}": description,
-    }
-    for clef, valeur in valeurs.items():
-        texte = texte.replace(clef, valeur)
-    return texte[:400]
+    lien = str((relay or {}).get("link") or "")
+    snapshot = snapshot or {}
+    return rs.rendre_message(template, {
+        "compte": rs.compte_du_lien(lien),
+        "plateforme": clean_short_text((relay or {}).get("platform"), "Reseau", 40),
+        "titre": snapshot.get("title", ""),
+        "lien": snapshot.get("url") or lien,
+        "description": snapshot.get("description", ""),
+        "jeu": snapshot.get("game", ""),
+        "spectateurs": snapshot.get("viewers", ""),
+        "date": snapshot.get("date", ""),
+    })
 
 
 def mentions_relais(guild, relay):
@@ -10465,16 +10572,14 @@ async def dashboard_recurring_loop():
                 set_cfg(guild.id, cfg)
         await asyncio.sleep(60)
 
-# Combien d'empreintes on retient par relais. Une page qui alterne entre
-# deux variantes (test A/B) reviendrait sinon a son etat precedent et
-# serait annoncee une seconde fois, avec le meme vieux contenu.
-SOCIAL_EMPREINTES_RETENUES = 15
-
-# Deux annonces d'un meme relais ne peuvent pas se suivre de plus pres.
-# Filet de securite : meme si une page se met a changer legitimement en
-# boucle, elle ne peut plus inonder un salon.
-SOCIAL_DELAI_MINIMAL = 20 * 60
-
+# Un tour de veille par minute : une publication est vue en moins de
+# deux minutes, relevé et envoi compris. L'ancienne cadence etait de dix
+# minutes, doublee d'un delai minimal de vingt minutes entre deux
+# annonces — un post pouvait donc attendre une demi-heure, et deux
+# publications rapprochees n'en donnaient qu'une seule. Ce delai a
+# disparu : le doublon est ecarte par l'identifiant de la publication,
+# ce qu'aucun chronometre ne sait faire.
+SOCIAL_CADENCE = 60
 
 def cle_relais(relay):
     """
@@ -10489,49 +10594,210 @@ def cle_relais(relay):
     return hashlib.sha1(lien.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
-def relais_doit_annoncer(etat, snapshot, maintenant):
+# ══════════════════════════════════════════════════════════════════════
+#  RELAIS RESEAUX — aller chercher la publication, pas la page du profil
+# ══════════════════════════════════════════════════════════════════════
+#
+# Chaque plateforme a une adresse publique qui dit ce qui vient d'etre
+# publie. La page du profil, elle, decrit le profil : sur X, TikTok et
+# Instagram elle est rendue en JavaScript et un robot n'y trouve qu'une
+# coquille vide. C'est pour cela que ces trois relais ne detectaient
+# rien.
+#
+# Aucune de ces adresses n'exige de compte ni de clef. Les deux
+# identifiants ci-dessous sont ceux que les sites eux-memes exposent
+# dans leur page publique.
+IG_APP_ID = "936619743392459"
+TWITCH_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+
+X_SYNDICATION = ("https://syndication.twitter.com/srv/timeline-profile/"
+                 "screen-name/{}")
+IG_PROFIL = ("https://www.instagram.com/api/v1/users/web_profile_info/"
+             "?username={}")
+TWITCH_GQL = "https://gql.twitch.tv/gql"
+
+# Une plateforme qui refuse nos appels ne doit pas etre reinterrogee
+# toutes les minutes : on la met de cote un moment. Sans ce recul, une
+# adresse IP de serveur se fait bannir en quelques heures.
+_reseaux_recul = {}
+RECUL_DEPART = 5 * 60
+RECUL_MAXI = 60 * 60
+
+
+def _reseau_en_recul(cle):
+    fin = _reseaux_recul.get(cle, {}).get("jusqua", 0)
+    return time.monotonic() < fin
+
+
+def _reseau_echec(cle):
+    entree = _reseaux_recul.setdefault(cle, {"duree": RECUL_DEPART})
+    entree["duree"] = min(RECUL_MAXI, max(RECUL_DEPART, entree.get("duree", RECUL_DEPART)) * 2)
+    entree["jusqua"] = time.monotonic() + entree["duree"]
+
+
+def _reseau_succes(cle):
+    _reseaux_recul.pop(cle, None)
+
+
+async def _texte_public(session, url, entetes=None, methode="GET", charge=None):
+    """Le corps d'une reponse publique, ou "" si l'appel n'aboutit pas."""
+    tetes = {"User-Agent": SOCIAL_AGENT,
+             "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"}
+    tetes.update(entetes or {})
+    try:
+        if methode == "POST":
+            contexte = session.post(url, headers=tetes, json=charge)
+        else:
+            contexte = session.get(url, headers=tetes, allow_redirects=True)
+        async with contexte as reponse:
+            if reponse.status >= 400:
+                return ""
+            return await reponse.text(errors="ignore")
+    except Exception:
+        return ""
+
+
+async def relever_publication(session, lien):
     """
-    Faut-il annoncer ce relevé ? Retourne (oui, raison de refus).
+    La derniere publication d'un compte, quelle que soit la plateforme.
 
-    La raison n'est pas decorative : elle part dans le journal quand un
-    administrateur se demande pourquoi son relais reste muet.
+    Retourne un dictionnaire avec un `id` — l'identifiant de la
+    publication, qui sert d'empreinte — ou None. Pour Twitch, None
+    signifie « hors ligne » : c'est un etat normal, pas un echec.
     """
-    if snapshot.get("empty"):
-        return False, "page sans metadonnees lisibles"
-    if not etat:
-        return False, "premier relevé"          # on enregistre, sans annoncer
-    if snapshot["fingerprint"] == etat.get("fingerprint"):
-        return False, "rien de neuf"
-    if snapshot["fingerprint"] in (etat.get("vues") or []):
-        return False, "publication deja annoncee"
-    dernier = float(etat.get("annonce_le") or 0)
-    if maintenant - dernier < SOCIAL_DELAI_MINIMAL:
-        return False, "annonce trop recente"
-    return True, ""
+    plateforme = rs.plateforme_du_lien(lien)
+    compte = rs.compte_du_lien(lien)
+    cle = f"{plateforme}:{compte}".lower()
+    if _reseau_en_recul(cle):
+        return None
+
+    publication = None
+    if plateforme == "flux":
+        # La voie qui marche partout. X, TikTok et Instagram refusent les
+        # appels venus d'un serveur : « Rate limit exceeded » pour le
+        # premier, « Please wait a few minutes » pour le deuxieme, une
+        # page de verification sans donnees pour le troisieme. Aucun code
+        # ne contourne cela, c'est deliberé de leur part. Un flux, lui,
+        # se lit toujours.
+        corps = await _texte_public(session, lien)
+        publication = rs.lire_flux(corps, compte) if corps else None
+        if publication:
+            _reseau_succes(cle)
+        else:
+            _reseau_echec(cle)
+        return publication
+
+    if plateforme == "x" and compte:
+        corps = await _texte_public(
+            session, X_SYNDICATION.format(compte),
+            {"Accept": "application/json"})
+        publication = rs.lire_x(corps, compte) if corps else None
+
+    elif plateforme == "tiktok" and compte:
+        corps = await _texte_public(session, f"https://www.tiktok.com/@{compte}")
+        publication = rs.lire_tiktok(corps, compte) if corps else None
+
+    elif plateforme == "instagram" and compte:
+        corps = await _texte_public(
+            session, IG_PROFIL.format(compte),
+            {"x-ig-app-id": IG_APP_ID, "Accept": "application/json"})
+        publication = rs.lire_instagram(corps, compte) if corps else None
+
+    elif plateforme == "twitch" and compte:
+        requete = {
+            "operationName": "StreamMetadata",
+            "variables": {"channelLogin": compte},
+            "query": ("query StreamMetadata($channelLogin: String!) {"
+                      " user(login: $channelLogin) { login displayName"
+                      " stream { id title createdAt viewersCount previewImageURL"
+                      " game { name displayName } } } }"),
+        }
+        corps = await _texte_public(
+            session, TWITCH_GQL, {"Client-ID": TWITCH_CLIENT_ID},
+            methode="POST", charge=requete)
+        if not corps:
+            _reseau_echec(cle)
+            return None
+        _reseau_succes(cle)
+        # Hors ligne : pas un echec, on ne recule pas.
+        return rs.lire_twitch(corps, compte)
+
+    elif plateforme == "youtube":
+        ancien = await youtube_derniere_video(session, lien)
+        if ancien:
+            publication = {
+                "id": ancien.get("fingerprint") or ancien.get("url") or "",
+                "url": ancien.get("url", ""), "title": ancien.get("title", ""),
+                "description": ancien.get("description", ""),
+                "image": ancien.get("image", ""),
+                "game": "", "viewers": "", "date": "", "live": False,
+            }
+
+    if publication is None and plateforme in ("web", "x", "tiktok", "instagram"):
+        # Repli : les balises OpenGraph de la page. Elles ne disent pas
+        # grand-chose des trois grands reseaux, mais un site personnel ou
+        # un blog s'y decrit correctement.
+        try:
+            ancien = await fetch_social_snapshot(session, lien)
+        except Exception:
+            ancien = None
+        if ancien and not ancien.get("empty"):
+            publication = {
+                "id": ancien.get("fingerprint") or "",
+                "url": ancien.get("url", ""), "title": ancien.get("title", ""),
+                "description": ancien.get("description", ""),
+                "image": ancien.get("image", ""),
+                "game": "", "viewers": "", "date": "", "live": False,
+            }
+
+    if publication:
+        _reseau_succes(cle)
+    else:
+        _reseau_echec(cle)
+    return publication
 
 
-def memoriser_relais(etat, snapshot, maintenant, annonce):
-    """Nouvel etat d'un relais apres un relevé."""
-    vues = list((etat or {}).get("vues") or [])
-    if snapshot["fingerprint"] not in vues:
-        vues.append(snapshot["fingerprint"])
+def valeurs_annonce(guild, relay, publication):
+    """Ce que les variables du message d'annonce valent pour ce relevé."""
+    lien = str(relay.get("link") or "")
+    plateforme = rs.plateforme_du_lien(lien)
+    publication = publication or {}
     return {
-        "fingerprint": snapshot["fingerprint"],
-        "url": snapshot.get("url", ""),
-        "title": snapshot.get("title", ""),
-        "vues": vues[-SOCIAL_EMPREINTES_RETENUES:],
-        "annonce_le": maintenant if annonce else float((etat or {}).get("annonce_le") or 0),
+        "compte": rs.compte_du_lien(lien),
+        "plateforme": clean_short_text(relay.get("platform"), plateforme, 40),
+        "titre": publication.get("title", ""),
+        "lien": publication.get("url") or lien,
+        "description": publication.get("description", ""),
+        "serveur": getattr(guild, "name", ""),
+        "jeu": publication.get("game", ""),
+        "spectateurs": publication.get("viewers", ""),
+        "date": publication.get("date", ""),
+        "type": rs.NATURE.get(plateforme, rs.NATURE["web"]),
     }
 
-
 async def dashboard_social_loop():
+    """
+    Surveille les comptes suivis et annonce ce qui vient d'y paraitre.
+
+    Un tour par minute. L'ancienne cadence etait de dix minutes, avec en
+    plus un delai minimal de vingt minutes entre deux annonces : un post
+    pouvait attendre une demi-heure, et deux publications rapprochees ne
+    donnaient qu'une seule annonce. Le doublon est desormais ecarte par
+    l'IDENTIFIANT de la publication, pas par un chronometre — on peut
+    donc regarder souvent sans risque.
+
+    Un compte n'est interroge QU'UNE FOIS par tour, meme si dix serveurs
+    le suivent : c'est la meme page pour tout le monde, et interroger dix
+    fois ferait bannir l'adresse du bot.
+    """
     await bot.wait_until_ready()
     timeout = aiohttp.ClientTimeout(total=18)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while not bot.is_closed():
+            releves = {}          # lien -> publication, pour ce tour
             for guild in list(bot.guilds):
-                # Surveiller cinq plateformes toutes les dix minutes coute
-                # du temps machine : c'est du premium. Les reglages restent
+                # Regarder cinq plateformes chaque minute coute du temps
+                # machine : c'est du premium. Les reglages restent
                 # enregistres et repartent seuls au retour de l'abonnement.
                 if not est_premium(guild.id):
                     continue
@@ -10544,6 +10810,7 @@ async def dashboard_social_loop():
                     states = {}
                 changed = False
                 vus_ce_tour = set()
+
                 for relay in relays:
                     if not isinstance(relay, dict) or not relay.get("enabled"):
                         continue
@@ -10554,65 +10821,83 @@ async def dashboard_social_loop():
                     # Marquee des maintenant : la purge de fin de tour ne
                     # doit pas effacer l'etat d'un relais dont le salon est
                     # seulement momentanement indisponible.
-                    vus_ce_tour.add(cle_relais(relay))
-                    channel = guild.get_channel(channel_id)
-                    if not channel:
-                        continue
-                    perms = channel.permissions_for(guild.me)
-                    if not perms.send_messages:
-                        continue
-                    platform = clean_short_text(relay.get("platform"), "Réseau", 40)
                     key = cle_relais(relay)
-                    try:
-                        snapshot = await fetch_social_snapshot(session, link)
-                    except Exception:
+                    vus_ce_tour.add(key)
+                    channel = salon_du_serveur(guild, channel_id)
+                    if channel is None:
                         continue
-                    if not snapshot:
+                    if not channel.permissions_for(guild.me).send_messages:
+                        continue
+
+                    cle_lien = link.strip().lower().rstrip("/")
+                    if cle_lien not in releves:
+                        try:
+                            releves[cle_lien] = await relever_publication(session, link)
+                        except Exception as ex:
+                            print(f"relais {link}: {type(ex).__name__}: {ex}")
+                            releves[cle_lien] = None
+                    publication = releves[cle_lien]
+                    if not publication:
                         continue
 
                     maintenant = now().timestamp()
-                    annoncer, raison = relais_doit_annoncer(
-                        states.get(key), snapshot, maintenant)
+                    annoncer, raison = rs.doit_annoncer(states.get(key), publication)
                     if not annoncer:
-                        # On memorise quand meme : sans cela, une page vue
-                        # une fois puis revenue a son etat anterieur serait
-                        # annoncee comme neuve.
-                        nouvel_etat = memoriser_relais(
-                            states.get(key), snapshot, maintenant, False)
+                        # On memorise quand meme : sans cela, le premier
+                        # relevé recommencerait a chaque tour et rien ne
+                        # serait jamais annonce.
+                        nouvel_etat = rs.memoriser(
+                            states.get(key), publication, maintenant, False)
                         if nouvel_etat != states.get(key):
                             states[key] = nouvel_etat
                             changed = True
                         continue
-                    emoji, color, headline = _social_platform_palette(platform)
-                    embed = EG(f"{emoji} {headline} - {platform}", f"Une nouvelle activité a été détectée sur **{platform}**.", color, guild.id)
-                    embed.add_field(name="Compte suivi", value=link, inline=False)
-                    if snapshot.get("title"):
-                        embed.add_field(name="Titre", value=snapshot["title"][:1024], inline=False)
-                    if snapshot.get("description"):
-                        embed.add_field(name="Description", value=snapshot["description"][:1024], inline=False)
-                    if snapshot.get("image"):
+
+                    plateforme = rs.plateforme_du_lien(link)
+                    libelle = clean_short_text(relay.get("platform"), plateforme, 40)
+                    emoji, couleur, _ = _social_platform_palette(libelle or plateforme)
+                    nature = rs.NATURE.get(plateforme, rs.NATURE["web"])
+                    valeurs = valeurs_annonce(guild, relay, publication)
+
+                    embed = EG(f"{emoji} {nature} — {valeurs['compte'] or libelle}",
+                               publication.get("description", "")[:2000] or None,
+                               couleur, guild.id)
+                    if publication.get("title"):
+                        embed.add_field(name="Titre", value=publication["title"][:1024],
+                                        inline=False)
+                    if publication.get("game"):
+                        embed.add_field(name="Jeu", value=publication["game"][:256],
+                                        inline=True)
+                    if publication.get("viewers"):
+                        embed.add_field(name="Spectateurs",
+                                        value=str(publication["viewers"])[:32], inline=True)
+                    if publication.get("image"):
                         try:
-                            embed.set_image(url=snapshot["image"])
+                            embed.set_image(url=publication["image"])
                         except Exception:
                             pass
-                    view = discord.ui.View()
-                    view.add_item(discord.ui.Button(label="Ouvrir" if "twitch" not in platform.lower() else "Watch Stream", url=snapshot.get("url") or link))
-                    contenu, autorisees = mentions_relais(guild, relay)
 
+                    view = discord.ui.View()
+                    view.add_item(discord.ui.Button(
+                        label="Regarder le live" if publication.get("live") else "Ouvrir",
+                        url=publication.get("url") or link))
+
+                    contenu, autorisees = mentions_relais(guild, relay)
                     # Mentions et message d'annonce voyagent ensemble dans
                     # le CONTENU : une mention placee dans l'embed s'affiche
                     # en bleu mais ne previent personne.
-                    annonce = render_social_template(
-                        relay.get("message"), relay, snapshot)
+                    modele = relay.get("message") or rs.message_par_defaut(link)
+                    annonce = rs.rendre_message(modele, valeurs)
                     corps = "\n".join(x for x in (contenu, annonce) if x)
 
                     try:
-                        await channel.send(content=corps or None, embed=embed, view=view,
-                                           allowed_mentions=autorisees)
-                    except Exception:
+                        await channel.send(content=corps or None, embed=embed,
+                                           view=view, allowed_mentions=autorisees)
+                    except Exception as ex:
+                        print(f"relais {guild.id} {link}: envoi impossible : {ex}")
                         continue
-                    states[key] = memoriser_relais(
-                        states.get(key), snapshot, maintenant, True)
+                    states[key] = rs.memoriser(
+                        states.get(key), publication, maintenant, True)
                     changed = True
 
                 # Les relais supprimes laissaient leur etat derriere eux, et
@@ -10624,7 +10909,8 @@ async def dashboard_social_loop():
                 if changed:
                     cfg["social_relays_state"] = states
                     set_cfg(guild.id, cfg)
-            await asyncio.sleep(600)
+            await asyncio.sleep(SOCIAL_CADENCE)
+
 
 #  PANEL MODALS
 # ════════════════════════════════════════════════
@@ -15987,7 +16273,7 @@ async def on_integration_create(integration):
                     "a ete connectee au serveur.",
                     severity="warning")
 
-
+
 async def licences_maintenance_loop():
     """
     Une fois par heure : les licences font foi.
