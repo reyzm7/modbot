@@ -370,6 +370,61 @@ verifier("un serveur sans licence ne trouve rien",
 nettoyer_scenario()
 
 
+
+# ======================================================================
+print(chr(10) + "--- Le role premium sur le serveur ModBot ---")
+
+verifier("le serveur support est celui du lien donne",
+         "SERVEUR_SUPPORT     = 1510421934435729586" in source)
+
+bloc_role = source[source.index("async def synchroniser_role_acheteur"):][:2600]
+verifier("le role se pose sur le serveur support, pas chez le client",
+         "bot.get_guild(SERVEUR_SUPPORT)" in bloc_role)
+verifier("il suit les licences vivantes",
+         'any(pc.etat_licence(l)["active"] for l in licences_de(uid))' in bloc_role)
+verifier("il est retire quand il n'y en a plus",
+         "await membre.remove_roles(role" in bloc_role)
+verifier("un acheteur absent du serveur support n'est pas une erreur",
+         "if membre is None:" in bloc_role)
+verifier("un role place trop haut est signale, pas subi",
+         "if role >= guild.me.top_role:" in bloc_role)
+verifier("aucune de ces situations ne casse un paiement",
+         "except Exception as erreur:" in bloc_role)
+
+bloc_balayage = source[source.index("async def balayer_roles_acheteurs"):][:900]
+verifier("un balayage passe sur tous les acheteurs",
+         "for uid in list(licences_toutes().keys()):" in bloc_balayage)
+
+bloc_boucle = source[source.index("async def licences_maintenance_loop"):][:900]
+verifier("la maintenance tourne toutes les heures",
+         "asyncio.sleep(3600)" in bloc_boucle)
+verifier("elle reconcilie et balaie",
+         "reconcilier_licences()" in bloc_boucle
+         and "balayer_roles_acheteurs()" in bloc_boucle)
+
+for evenement, quoi in (("licence_creer(uid, plan, \"stripe\"", "un achat"),
+                        ("jours=pc.DUREES_CADEAU[duree]", "un cadeau")):
+    i = source.index(evenement)
+    verifier("%s pose le role tout de suite" % quoi,
+             "synchroniser_role_acheteur" in source[i:i + 400])
+
+
+# ======================================================================
+print(chr(10) + "--- Un retrait sort du registre ---")
+
+bloc_revoq = source[source.index("def premium_revoquer(gid"):][:900]
+verifier("le retrait supprime la ligne au lieu de la dater",
+         "donnees.pop(str(gid), None)" in bloc_revoq)
+verifier("le cache est oublie apres coup",
+         "premium_oublier_cache()" in bloc_revoq)
+
+bloc_litige = source[source.index("async def api_admin_premium_litige"):][:2600]
+verifier("le litige sort le serveur du registre lui aussi",
+         "premium_revoquer(gid" in bloc_litige)
+verifier("le litige rend la place sans toucher a l'echeance",
+         "licence_liberer_place(uid" in bloc_litige)
+
+
 rates = [n for n, ok, _ in resultats if not ok]
 print("\n" + "=" * 62)
 print(f"RESULTAT : {len(resultats) - len(rates)}/{len(resultats)} verifications passees")

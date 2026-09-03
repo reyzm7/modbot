@@ -87,6 +87,10 @@ DEFAULT_PATCHNOTES  = 1510440693070430324
 # Le salon ou tombent les paiements. Il n'est sur aucun serveur
 # client : c'est le salon de l'equipe, et lui seul.
 SALON_PAIEMENTS     = 1544885978907283567
+# Le serveur de ModBot lui-meme. C'est la que l'acheteur porte son
+# role premium — pas sur ses propres serveurs, ou il serait invisible
+# pour tout le monde sauf lui.
+SERVEUR_SUPPORT     = 1510421934435729586
 DEFAULT_TICKETS     = 1510600280016818357
 DEFAULT_BOT_NAME    = "ModBot"
 DEFAULT_EMBED_COLOR = 0x5865F2
@@ -5111,6 +5115,7 @@ async def refresh_ticket_panel_message(guild):
 
 _dashboard_api_runner = None
 _dashboard_recurring_task = None
+_licences_task = None
 _dashboard_social_task = None
 _oauth_states = {}
 _rate_buckets = {}
@@ -8279,7 +8284,20 @@ def premium_prolonger(gid, jours, source, plan="", auteur=""):
 
 
 def premium_revoquer(gid, auteur=""):
-    return premium_ecrire(str(gid), pc.revoquer(premium_fiche(gid), auteur))
+    """
+    Sort le serveur du registre, au lieu de le dater dans le passe.
+
+    `pc.revoquer` posait une date de fin a maintenant : la ligne restait
+    dans la liste, marquee « expire », comme si l'abonnement avait suivi
+    son cours. Ce n'est pas ce qui s'est passe — quelqu'un l'a retire —
+    et la liste finissait par se remplir de fantomes. Le journal, lui,
+    garde la trace : c'est sa place, pas celle du registre.
+    """
+    donnees = dict(premium_tout())
+    partie = donnees.pop(str(gid), None)
+    jsave(F_PREMIUM, donnees)
+    premium_oublier_cache()
+    return partie
 
 
 def premium_par_abonnement(abonnement_id):
@@ -8754,6 +8772,7 @@ async def api_stripe_webhook(request):
                                 abonnement=str(objet.get("subscription") or ""))
         print(f"premium: licence {licence['id']} pour {uid} "
               f"({plan}, {licence['places']} place(s))")
+        await synchroniser_role_acheteur(uid)
         profil = profil_discord(uid)
         offre = pc.OFFRES.get(plan) or {}
         await annoncer_paiement(
@@ -8793,6 +8812,7 @@ async def api_stripe_webhook(request):
                 await appliquer_licence_au_serveur(licence, serveur)
             print(f"premium: licence {licence.get('id')} renouvelee "
                   f"({jours} jours, {len(licence.get('servers') or [])} serveur(s))")
+            await synchroniser_role_acheteur(proprietaire)
             profil = profil_discord(proprietaire)
             offre = pc.OFFRES.get(plan) or {}
             await annoncer_paiement(
@@ -8885,6 +8905,80 @@ async def donner_role_premium(guild):
         except Exception:
             return None
     return role
+
+
+async def synchroniser_role_acheteur(uid):
+    """
+    Pose ou retire le role premium de l'acheteur sur le serveur ModBot.
+
+    Le role vit sur NOTRE serveur, pas sur celui du client : c'est la
+    qu'il se voit, et c'est la seule place ou il veut dire quelque
+    chose. Il suit les licences : au moins une vivante, il l'a ; plus
+    aucune, il ne l'a plus.
+
+    Discret par construction. L'acheteur peut ne pas etre sur le
+    serveur support, ModBot peut ne pas avoir le droit de gerer les
+    roles, le role peut avoir ete supprime a la main : aucun de ces cas
+    ne doit faire echouer un paiement qui, lui, a reussi.
+
+    Renvoie True si le membre porte le role a la sortie, False sinon,
+    None si on n'a rien pu faire.
+    """
+    guild = bot.get_guild(SERVEUR_SUPPORT)
+    if guild is None:
+        return None
+    membre = guild.get_member(int(uid)) if str(uid).isdigit() else None
+    if membre is None:
+        # Pas sur le serveur support : rien a poser, et ce n'est pas
+        # une erreur — on ne va pas l'y inviter de force.
+        return None
+    if not guild.me.guild_permissions.manage_roles:
+        return None
+
+    role = discord.utils.get(guild.roles, name=ROLE_PREMIUM_NOM)
+    doit_avoir = any(pc.etat_licence(l)["active"] for l in licences_de(uid))
+
+    if doit_avoir and role is None:
+        try:
+            role = await guild.create_role(
+                name=ROLE_PREMIUM_NOM, colour=discord.Colour(0xF1C40F),
+                hoist=True, reason="ModBot Premium")
+        except Exception:
+            return None
+    if role is None:
+        return False
+
+    # Un role place au-dessus du notre ne peut pas etre attribue : le
+    # dire dans la sortie plutot que d'echouer en silence.
+    if role >= guild.me.top_role:
+        print(f"role premium: « {role.name} » est au-dessus de ModBot")
+        return None
+
+    try:
+        if doit_avoir and role not in membre.roles:
+            await membre.add_roles(role, reason="ModBot Premium actif")
+        elif not doit_avoir and role in membre.roles:
+            await membre.remove_roles(role, reason="ModBot Premium termine")
+    except Exception as erreur:
+        print(f"role premium ({uid}) : {erreur}")
+        return None
+    return doit_avoir
+
+
+async def balayer_roles_acheteurs():
+    """
+    Retire le role a ceux dont toutes les licences ont expire.
+
+    Une echeance ne previent personne : sans ce passage, un role premium
+    resterait pose indefiniment apres la fin de l'abonnement. On le
+    passe au demarrage et une fois par jour.
+    """
+    retires = 0
+    for uid in list(licences_toutes().keys()):
+        etat = await synchroniser_role_acheteur(uid)
+        if etat is False:
+            retires += 1
+    return retires
 
 
 def profil_discord(uid):
@@ -9123,6 +9217,7 @@ async def api_admin_premium_grant(request):
                 "1an": "annuel"}.get(duree, "mensuel")
         licence = licence_creer(uid, plan, "admin",
                                 jours=pc.DUREES_CADEAU[duree], auteur=auteur)
+        await synchroniser_role_acheteur(uid)
         dashboard_log("premium_grant_user", None, auteur, f"{uid}: {duree}")
         profil = profil_discord(uid)
         await annoncer_paiement(
@@ -9171,14 +9266,28 @@ async def api_admin_premium_revoke(request):
         raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
 
     auteur = clean_short_text(identity.get("username"), "", 80) or "Dashboard"
-    premium_revoquer(gid, auteur)
     guild = bot.get_guild(int(gid))
-    dashboard_log("premium_revoke", guild, auteur, gid)
+    nom = guild.name if guild else gid
+
+    # Un retrait sec ne rend pas la place : si le serveur venait d'une
+    # licence, celle-ci la garde consommee. C'est voulu — pour la
+    # rendre, il y a « Litige ».
+    partie = premium_revoquer(gid, auteur)
+    if partie is None:
+        raise web.HTTPNotFound(text="Ce serveur n'est pas dans le registre premium.")
+
+    dashboard_log("premium_revoke", guild, auteur, f"{nom} sorti du registre")
     if guild:
         await log_event(guild, "admin", "Premium retire",
                         f"**{auteur}** a retire ModBot Premium de ce serveur.",
                         severity="warning")
-    return api_json({"ok": True, "guild_id": gid, "premium": premium_etat(gid)})
+    await annoncer_paiement(
+        "Premium retire",
+        f"**{auteur}** a retire le premium du serveur **{nom}**.",
+        [("Serveur", nom), ("Offre", str(partie.get("plan") or "")),
+         ("Retire par", auteur)],
+        couleur=0xED4245)
+    return api_json({"ok": True, "guild_id": gid, "removed": True})
 
 
 async def api_admin_premium_list(request):
@@ -15730,6 +15839,25 @@ async def on_integration_create(integration):
                     severity="warning")
 
 
+async def licences_maintenance_loop():
+    """
+    Une fois par heure : les licences font foi.
+
+    Deux choses qu'aucun evenement ne declenche. Une echeance ne
+    previent personne, donc le role premium d'un abonnement termine
+    resterait pose ; et un premium restaure depuis une sauvegarde
+    anterieure resterait manquant jusqu'au prochain redemarrage.
+    """
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await reconcilier_licences()
+            await balayer_roles_acheteurs()
+        except Exception as erreur:
+            print(f"maintenance des licences : {erreur}")
+        await asyncio.sleep(3600)
+
+
 async def security_maintenance_loop():
     """Leve les modes securite expires et purge les logs trop volumineux."""
     await bot.wait_until_ready()
@@ -16038,6 +16166,7 @@ async def presence_loop():
 async def on_ready():
     global _dashboard_recurring_task, _dashboard_social_task
     global _security_task, _autobackup_task, _giveaway_task, _sauvegarde_task
+    global _licences_task
     global _presence_task
     global _sauvegarde_a_faire
     BOT_STATUS.update({"state": "connecte", "detail": ""})
@@ -16077,10 +16206,18 @@ async def on_ready():
         await reconcilier_licences()
     except Exception as err:
         print(f"reconciliation des licences : {err}")
+    # Une echeance ne previent personne : sans ce passage, un role
+    # premium resterait pose apres la fin de l'abonnement.
+    try:
+        await balayer_roles_acheteurs()
+    except Exception as err:
+        print(f"balayage des roles premium : {err}")
     if not _dashboard_social_task or _dashboard_social_task.done():
         _dashboard_social_task = asyncio.create_task(dashboard_social_loop())
     if not _security_task or _security_task.done():
         _security_task = asyncio.create_task(security_maintenance_loop())
+    if not _licences_task or _licences_task.done():
+        _licences_task = asyncio.create_task(licences_maintenance_loop())
     if not _autobackup_task or _autobackup_task.done():
         _autobackup_task = asyncio.create_task(auto_backup_loop())
     if not _giveaway_task or _giveaway_task.done():

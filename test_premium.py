@@ -160,10 +160,27 @@ verifier("un cadeau d'un an ouvre bien un an", etat["days_left"] >= 360,
          str(etat["days_left"]))
 verifier("l'auteur du cadeau est retenu", etat["granted_by"] == "Chef", etat["granted_by"])
 
-bot_mod.premium_revoquer(SERVEUR, "Chef")
+partie = bot_mod.premium_revoquer(SERVEUR, "Chef")
 verifier("la revocation coupe immediatement", not bot_mod.est_premium(SERVEUR))
-verifier("l'historique n'est pas efface",
-         bot_mod.premium_fiche(SERVEUR).get("revoked_by") == "Chef")
+# Le registre ne garde pas de fantomes : un serveur retire en SORT.
+# Dater sa fin a maintenant le laissait dans la liste, marque « expire »,
+# comme si l'abonnement avait suivi son cours — ce n'est pas ce qui
+# s'est passe. La trace est au journal, c'est sa place.
+verifier("le serveur sort du registre",
+         SERVEUR not in bot_mod.premium_tout(),
+         str(list(bot_mod.premium_tout())[:3]))
+verifier("la fiche retiree est rendue a l'appelant",
+         isinstance(partie, dict) and partie.get("granted_by") == "Chef",
+         str(partie)[:60])
+verifier("retirer un serveur absent ne leve pas",
+         bot_mod.premium_revoquer("111111111111111111", "Chef") is None)
+
+bloc_retrait = open("bot.py", encoding="utf-8").read()
+bloc_retrait = bloc_retrait[bloc_retrait.index("async def api_admin_premium_revoke"):][:1800]
+verifier("le retrait est journalise", 'dashboard_log("premium_revoke"' in bloc_retrait)
+verifier("le retrait est annonce a l'equipe", "annoncer_paiement(" in bloc_retrait)
+verifier("retirer un serveur absent renvoie une erreur claire",
+         "n'est pas dans le registre premium" in bloc_retrait)
 
 
 # ══════════════════════════════════════════════════════════════════════
