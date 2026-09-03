@@ -177,8 +177,8 @@ for clef, offre in pc.OFFRES.items():
 # Les identifiants donnes par l'utilisateur, verbatim.
 verifier("mensuel = prod_VBacboQrHxAVvM",
          pc.OFFRES["mensuel"]["produit"] == "prod_VBacboQrHxAVvM")
-verifier("semestriel = prod_VBadXpcUuo4Dq3",
-         pc.OFFRES["semestriel"]["produit"] == "prod_VBadXpcUuo4Dq3")
+verifier("semestriel = prod_VBm6qZuMotI0dh",
+         pc.OFFRES["semestriel"]["produit"] == "prod_VBm6qZuMotI0dh")
 verifier("annuel = prod_VBaeJ5BcijYmHF",
          pc.OFFRES["annuel"]["produit"] == "prod_VBaeJ5BcijYmHF")
 
@@ -204,7 +204,7 @@ print(chr(10) + "--- Les tarifs ---")
 
 verifier("mensuel a 3,99 EUR", pc.OFFRES["mensuel"]["prix"] == "3,99 €",
          pc.OFFRES["mensuel"]["prix"])
-verifier("semestriel a 23,99 EUR", pc.OFFRES["semestriel"]["prix"] == "23,99 €",
+verifier("semestriel a 19,99 EUR", pc.OFFRES["semestriel"]["prix"] == "19,99 €",
          pc.OFFRES["semestriel"]["prix"])
 verifier("annuel a 45 EUR", pc.OFFRES["annuel"]["prix"] == "45 €",
          pc.OFFRES["annuel"]["prix"])

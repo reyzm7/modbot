@@ -39,15 +39,13 @@ OFFRES = {
         "economie": "",
     },
     "semestriel": {
-        "produit": "prod_VBadXpcUuo4Dq3",
+        "produit": "prod_VBm6qZuMotI0dh",
         "libelle": "6 mois",
-        "prix": "23,99 €",
+        "prix": "19,99 €",
         "periode": "tous les 6 mois",
         "jours": 183,
-        # 3,99 x 6 = 23,94, soit cinq centimes de MOINS que l'offre a
-        # six mois. Il n'y a donc aucune economie a annoncer : mieux
-        # vaut un bandeau vide qu'un pourcentage invente.
-        "economie": "",
+        # 3,99 x 6 = 23,94. L'economie est reelle et vaut d'etre dite.
+        "economie": "16 %",
     },
     "annuel": {
         "produit": "prod_VBaeJ5BcijYmHF",
