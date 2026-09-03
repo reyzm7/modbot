@@ -33,7 +33,7 @@ OFFRES = {
     "mensuel": {
         "produit": "prod_VBacboQrHxAVvM",
         "libelle": "Mensuel",
-        "prix": "2,99 €",
+        "prix": "3,99 €",
         "periode": "par mois",
         "jours": 31,
         "economie": "",
@@ -41,20 +41,22 @@ OFFRES = {
     "semestriel": {
         "produit": "prod_VBadXpcUuo4Dq3",
         "libelle": "6 mois",
-        "prix": "13,99 €",
+        "prix": "23,99 €",
         "periode": "tous les 6 mois",
         "jours": 183,
-        # 2,99 x 6 = 17,94. On annonce l'economie reelle, pas un chiffre rond.
-        "economie": "22 %",
+        # 3,99 x 6 = 23,94, soit cinq centimes de MOINS que l'offre a
+        # six mois. Il n'y a donc aucune economie a annoncer : mieux
+        # vaut un bandeau vide qu'un pourcentage invente.
+        "economie": "",
     },
     "annuel": {
         "produit": "prod_VBaeJ5BcijYmHF",
         "libelle": "Annuel",
-        "prix": "35 €",
+        "prix": "45 €",
         "periode": "par an",
         "jours": 366,
-        # 2,99 x 12 = 35,88. L'economie est mince, on ne la gonfle pas.
-        "economie": "2 %",
+        # 3,99 x 12 = 47,88. L'economie est reelle mais modeste.
+        "economie": "6 %",
     },
 }
 

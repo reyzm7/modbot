@@ -306,6 +306,7 @@ F_DASHBOARD_SESSIONS = chemin_donnees("dashboard_sessions.json")
 F_BLACKLIST = chemin_donnees("blacklist.json")
 F_ADMINS = chemin_donnees("admins.json")
 F_PREMIUM = chemin_donnees("premium.json")
+F_VISITES = chemin_donnees("visites.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -6553,6 +6554,11 @@ async def api_guild_logs(request):
                 "emoji": spec["emoji"],
                 "enabled": log_category_enabled(guild.id, key),
                 "channel_id": str(cfg.get(spec["key"]) or ""),
+                # Les categories qui ne sont pas actives d'origine font
+                # partie du « journal complet », donc du premium. Le
+                # dashboard doit le savoir pour poser le cadenas sur la
+                # bonne case, plutot que sur le panneau entier.
+                "premium": not bool(spec.get("defaut", True)),
             }
             for key, spec in LOG_CATEGORIES.items()
         ],
@@ -8285,6 +8291,91 @@ def stripe_signature_valide(corps, entete):
     return any(hmac.compare_digest(attendue, s) for s in signatures)
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  LES VISITES DU SITE
+#
+#  Un compteur, rien de plus : pas de cookie, pas d'identifiant, pas
+#  d'adresse IP conservee. On sait combien de pages ont ete ouvertes,
+#  jamais par qui. C'est la seule mesure qui ne demande le consentement
+#  de personne.
+#
+#  Le total demarre a VISITES_DEPART : le site tournait avant que ce
+#  compteur n'existe, repartir de zero aurait efface cette histoire.
+# ══════════════════════════════════════════════════════════════════════
+
+VISITES_DEPART = 25279
+VISITES_JOURS_GARDES = 30
+
+
+def visites_lire():
+    donnees = jload(F_VISITES)
+    if not isinstance(donnees, dict):
+        donnees = {}
+    total = donnees.get("total")
+    jours = donnees.get("jours")
+    return {
+        "total": int(total) if isinstance(total, (int, float)) else VISITES_DEPART,
+        "jours": jours if isinstance(jours, dict) else {},
+    }
+
+
+def visites_aujourdhui_clef():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def visites_ajouter(nombre=1):
+    """
+    Compte une visite de plus et renvoie l'etat courant.
+
+    Le detail par jour est borne a trente jours : un compteur qui grossit
+    sans fin finirait par peser plus lourd que ce qu'il mesure.
+    """
+    etat = visites_lire()
+    etat["total"] += nombre
+    jour = visites_aujourdhui_clef()
+    etat["jours"][jour] = int(etat["jours"].get(jour, 0)) + nombre
+    if len(etat["jours"]) > VISITES_JOURS_GARDES:
+        etat["jours"] = {
+            j: n for j, n in sorted(etat["jours"].items())[-VISITES_JOURS_GARDES:]
+        }
+    jsave(F_VISITES, etat)
+    return etat
+
+
+def visites_resume():
+    etat = visites_lire()
+    jour = visites_aujourdhui_clef()
+    derniers = sorted(etat["jours"].items())[-14:]
+    return {
+        "total": etat["total"],
+        "aujourdhui": int(etat["jours"].get(jour, 0)),
+        "historique": [{"jour": j, "visites": int(n)} for j, n in derniers],
+    }
+
+
+async def api_visite_ping(request):
+    """
+    Une page du site vient de s'ouvrir : on compte, puis on renvoie
+    l'etat pour que la page puisse l'afficher si elle le veut.
+
+    Public et sans authentification : le site est public, et rien
+    d'identifiant ne circule.
+    """
+    visites_ajouter(1)
+    return api_json({"ok": True, **visites_resume()}, request=request)
+
+
+async def api_visites_lecture(request):
+    """Le compteur, sans rien y ajouter — la console le relit souvent."""
+    return api_json({"ok": True, **visites_resume()}, request=request)
+
+
+async def api_admin_visites(request):
+    """Le detail, pour la console d'administration."""
+    await api_identity(request, admin_required=True)
+    return api_json({"ok": True, **visites_resume()}, request=request)
+
+
 async def api_premium_offres(request):
     """
     Les offres, pour la page publique.
@@ -9116,6 +9207,9 @@ async def start_dashboard_api():
     app.router.add_post("/api/guilds/{guild_id}/ai/reset", api_ai_reset)
     app.router.add_post("/api/guilds/{guild_id}/events/publish", api_evenements_publier)
     app.router.add_get("/api/premium/offers", api_premium_offres)
+    app.router.add_post("/api/public/visite", api_visite_ping)
+    app.router.add_get("/api/public/visites", api_visites_lecture)
+    app.router.add_get("/api/admin/visites", api_admin_visites)
     app.router.add_post("/api/stripe/webhook", api_stripe_webhook)
     app.router.add_get("/api/guilds/{guild_id}/premium", api_premium_etat)
     app.router.add_post("/api/guilds/{guild_id}/premium/checkout", api_premium_checkout)

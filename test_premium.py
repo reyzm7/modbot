@@ -198,6 +198,77 @@ verifier("le fichier premium est sauvegarde entre deux deploiements",
 
 
 nettoyer()
+
+# ======================================================================
+print(chr(10) + "--- Les tarifs ---")
+
+verifier("mensuel a 3,99 EUR", pc.OFFRES["mensuel"]["prix"] == "3,99 €",
+         pc.OFFRES["mensuel"]["prix"])
+verifier("semestriel a 23,99 EUR", pc.OFFRES["semestriel"]["prix"] == "23,99 €",
+         pc.OFFRES["semestriel"]["prix"])
+verifier("annuel a 45 EUR", pc.OFFRES["annuel"]["prix"] == "45 €",
+         pc.OFFRES["annuel"]["prix"])
+
+# Une economie annoncee doit exister. A 3,99 le mois, six mois a 23,99
+# coutent cinq centimes de PLUS que six mensualites : annoncer une
+# remise serait faux.
+def euros(texte):
+    return float(texte.replace("€", "").replace(",", ".").strip())
+
+mois = euros(pc.OFFRES["mensuel"]["prix"])
+for clef, multiplicateur in (("semestriel", 6), ("annuel", 12)):
+    offre = pc.OFFRES[clef]
+    plein = mois * multiplicateur
+    reel = round((1 - euros(offre["prix"]) / plein) * 100)
+    annonce = offre["economie"]
+    if not annonce:
+        verifier("%s : aucune economie annoncee, et il n'y en a pas" % clef,
+                 reel <= 0, "economie reelle %d %%" % reel)
+    else:
+        verifier("%s : l'economie annoncee est la vraie" % clef,
+                 abs(int(annonce.split()[0]) - reel) <= 1,
+                 "annonce %s, calcul %d %%" % (annonce, reel))
+
+
+# ======================================================================
+print(chr(10) + "--- Les visites du site ---")
+
+source_bot = open("bot.py", encoding="utf-8").read()
+verifier("le compteur demarre a 25 279", "VISITES_DEPART = 25279" in source_bot)
+
+bloc = source_bot[source_bot.index("def visites_ajouter"):][:900]
+verifier("chaque appel ajoute au total", 'etat["total"] += nombre' in bloc)
+verifier("le detail par jour est borne", "VISITES_JOURS_GARDES" in bloc)
+
+bloc_ping = source_bot[source_bot.index("async def api_visite_ping"):][:700]
+verifier("le POST compte la visite", "visites_ajouter(1)" in bloc_ping)
+
+bloc_lecture = source_bot[source_bot.index("async def api_visites_lecture"):][:400]
+verifier("la lecture ne compte rien", "visites_ajouter" not in bloc_lecture)
+
+bloc_admin = source_bot[source_bot.index("async def api_admin_visites"):][:400]
+verifier("le detail exige un administrateur",
+         "admin_required=True" in bloc_admin)
+
+verifier("la route publique existe",
+         'add_post("/api/public/visite", api_visite_ping)' in source_bot)
+verifier("le compteur est joignable sans authentification",
+         '"/api/public/" ' in source_bot or 'CORS_PUBLIC_PATHS = ("/api/public/"' in source_bot)
+
+# Aucune trace de qui visite : c'est la promesse faite dans la politique
+# de confidentialite, elle doit tenir dans le code.
+bloc_visites = source_bot[source_bot.index("#  LES VISITES DU SITE"):
+                          source_bot.index("async def api_premium_offres")]
+# Les commentaires promettent justement de ne pas toucher a tout ca :
+# c'est le code qu'on inspecte, pas la prose qui l'entoure.
+bloc_visites = chr(10).join(
+    ligne for ligne in bloc_visites.split(chr(10))
+    if not ligne.lstrip().startswith("#") and '"""' not in ligne)
+for interdit in ("remote", "X-Forwarded-For", "user_agent", "User-Agent", "cookie"):
+    verifier("le compteur ne touche pas a « %s »" % interdit,
+             interdit not in bloc_visites)
+
+
 rates = [n for n, ok, _ in resultats if not ok]
 print("\n" + "=" * 62)
 print(f"RESULTAT : {len(resultats) - len(rates)}/{len(resultats)} verifications passees")
