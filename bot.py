@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import json, os, re, sys, asyncio, io, aiohttp, random, string, html, unicodedata, base64, hashlib, sqlite3, time
 import binascii
+import traceback
 import copy
 import secrets
 import urllib.parse
@@ -849,6 +850,46 @@ def update_cfg(gid, key, val):
 def get_ch(gid, key, default):
     v = get_cfg(gid).get(key)
     return v if v else default
+
+def salon_du_serveur(guild, ident):
+    """
+    Le salon designe par `ident`, a la seule condition qu'il soit sur CE
+    serveur. Sinon None.
+
+    `bot.get_channel(id)` cherche dans TOUS les serveurs ou ModBot est
+    present. Employe pour delivrer le journal d'un serveur, il envoyait
+    les evenements de l'un dans le salon d'un autre — il suffisait que
+    l'identifiant soit celui d'ailleurs. Deux chemins y menaient : le
+    repli sur DEFAULT_LOGS, qui designe un salon du serveur support, et
+    un identifiant etranger enregistre depuis le dashboard.
+
+    Le serveur est la cloison. On ne la franchit jamais par accident.
+    """
+    if guild is None:
+        return None
+    try:
+        cid = int(str(ident).strip()) if ident not in (None, "") else 0
+    except (TypeError, ValueError):
+        cid = 0
+    if not cid:
+        return None
+    salon = guild.get_channel(cid)
+    if salon is None and hasattr(guild, "get_thread"):
+        salon = guild.get_thread(cid)
+    return salon
+
+
+def id_salon_du_serveur(guild, ident):
+    """
+    L'identifiant s'il designe un salon d'ici, None sinon.
+
+    Sert a filtrer ce qu'on ENREGISTRE. Refuser a l'ecriture vaut mieux
+    que refuser a l'envoi : un reglage accepte puis jamais applique se
+    lit comme une panne du bot.
+    """
+    salon = salon_du_serveur(guild, ident)
+    return int(salon.id) if salon is not None else None
+
 
 def get_lang(gid):
     cfg = get_cfg(gid) if gid else {}
@@ -3386,12 +3427,10 @@ async def fetch_message_for_translate(interaction, message_ref, salon=None):
         return None, "Reference de message invalide."
     channels = []
     if channel_id:
-        ch = interaction.guild.get_channel(channel_id)
-        if not ch:
-            try:
-                ch = await bot.fetch_channel(channel_id)
-            except Exception:
-                ch = None
+        # Un lien de message porte l'identifiant de son salon. Resolu
+        # globalement, il permettait de faire traduire un message d'un
+        # AUTRE serveur : il suffisait d'en coller le lien.
+        ch = salon_du_serveur(interaction.guild, channel_id)
         if ch:
             channels.append(ch)
     if salon and salon not in channels:
@@ -3515,9 +3554,16 @@ def channel_can_lockdown(channel):
     return hasattr(channel, "set_permissions") and hasattr(channel, "overwrites_for")
 
 async def send_log(guild, embed):
+    # DEFAULT_LOGS designe un salon du serveur support. Passe a
+    # `bot.get_channel`, il etait trouve depuis n'importe quel serveur :
+    # tout serveur sans salon de logs configure deversait son journal
+    # chez nous, melange a celui des autres. On le garde comme repli,
+    # mais resolu sur CE serveur — ou il n'existe pas, et ou l'on
+    # n'envoie donc rien.
+    ch = salon_du_serveur(guild, get_ch(guild.id, "salon_logs", DEFAULT_LOGS))
+    if ch is None:
+        return
     try:
-        ch_id = get_ch(guild.id, "salon_logs", DEFAULT_LOGS)
-        ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
         await ch.send(embed=embed)
     except Exception:
         pass
@@ -3525,10 +3571,9 @@ async def send_log(guild, embed):
 async def alert_staff(guild, action, mod, target=None, raison=""):
     cfg = get_cfg(guild.id)
     if not cfg.get("staff_alert_enabled"): return
-    ch_id = cfg.get("salon_staff_alert")
-    if not ch_id: return
+    ch = salon_du_serveur(guild, cfg.get("salon_staff_alert"))
+    if ch is None: return
     try:
-        ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
         e = E("🚨 Staff Action Alert", couleur=0xFFD700)
         e.add_field(name="👮 Staff", value=str(mod), inline=True)
         e.add_field(name="⚡ Action", value=action, inline=True)
@@ -4350,8 +4395,13 @@ class VueTicket(discord.ui.View):
         f = await make_transcript(interaction.channel, tdata)
         filename = f"transcript-{ticket_name}-{now().strftime('%Y%m%d-%H%M')}.txt"
         try:
-            ch_id = get_ch(gid, "salon_logs", DEFAULT_LOGS)
-            log_ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+            # Un transcript est une conversation privee. Envoye au repli
+            # global, il partait sur le serveur support : ce n'etait pas
+            # un melange d'affichage mais une fuite.
+            log_ch = salon_du_serveur(
+                interaction.guild, get_ch(gid, "salon_logs", DEFAULT_LOGS))
+            if log_ch is None:
+                raise LookupError("aucun salon de logs sur ce serveur")
             le = EG(tr(gid, "ticket_delete_log_title"), tr(gid, "ticket_deleted_desc", user=interaction.user.mention, ticket=f"#{ticket_name}"), 0xED4245, gid)
             le.add_field(name="Ticket", value=f"`#{ticket_name}`", inline=True)
             le.add_field(name=tr(gid, "creator"), value=tdata.get("pseudo", "?"), inline=True)
@@ -4868,7 +4918,7 @@ async def publish_or_update_system_message(guild, channel, key, suffix, embed, v
     old_ch_id = cfg.get(ch_key)
     if old_msg_id and old_ch_id and int(old_ch_id) != int(channel.id):
         try:
-            old_ch = guild.get_channel(int(old_ch_id)) or await bot.fetch_channel(int(old_ch_id))
+            old_ch = salon_du_serveur(guild, old_ch_id)
             old_msg = await old_ch.fetch_message(int(old_msg_id))
             await old_msg.delete()
         except Exception:
@@ -4895,7 +4945,7 @@ async def delete_system_message(guild, key, suffix):
     old_ch_id = cfg.get(ch_key)
     if old_msg_id and old_ch_id:
         try:
-            old_ch = guild.get_channel(int(old_ch_id)) or await bot.fetch_channel(int(old_ch_id))
+            old_ch = salon_du_serveur(guild, old_ch_id)
             old_msg = await old_ch.fetch_message(int(old_msg_id))
             await old_msg.delete()
         except Exception:
@@ -5037,9 +5087,8 @@ async def cleanup_configured_system_messages(guild):
         ch_id = cfg.get(key)
         if not ch_id:
             continue
-        try:
-            channel = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
-        except Exception:
+        channel = salon_du_serveur(guild, ch_id)
+        if channel is None:
             continue
         if key in ("salon_tickets", "salon_suggestions", "salon_reports"):
             await delete_system_message(guild, key, "status")
@@ -5059,7 +5108,7 @@ async def deploy_fresh_ticket_panel(guild, channel):
     old_ch_id = cfg.get("salon_tickets_panel_channel_id")
     if old_msg_id and old_ch_id and int(old_ch_id) != int(channel.id):
         try:
-            old_ch = guild.get_channel(int(old_ch_id)) or await bot.fetch_channel(int(old_ch_id))
+            old_ch = salon_du_serveur(guild, old_ch_id)
             old_msg = await old_ch.fetch_message(int(old_msg_id))
             await old_msg.delete()
         except Exception:
@@ -5101,10 +5150,10 @@ async def setup_configured_channel(guild, channel, key, label):
 
 async def refresh_ticket_panel_message(guild):
     gid = str(guild.id)
-    ch_id = get_ch(gid, "salon_tickets", DEFAULT_TICKETS)
-    try:
-        channel = guild.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
-    except Exception:
+    # Sans cloison, un serveur sans salon ticket configure allait
+    # deployer son panneau dans le salon ticket du serveur support.
+    channel = salon_du_serveur(guild, get_ch(gid, "salon_tickets", DEFAULT_TICKETS))
+    if channel is None:
         return None
     await deploy_fresh_ticket_panel(guild, channel)
     return channel
@@ -5177,8 +5226,17 @@ def apply_cors(response, request=None):
     chemin = getattr(request, "path", "") or ""
     if chemin.startswith(CORS_PUBLIC_PATHS):
         response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        # Ces routes n'ont pas besoin d'authentification, mais le site
+        # les appelle par le meme `modbotApiFetch` que les autres — et
+        # celui-ci joint le jeton de session des qu'il y en a un.
+        # `Authorization` n'etant pas un en-tete simple, le navigateur
+        # demandait un prevol, a qui l'on repondait « Content-Type
+        # seulement » : la reponse etait bloquee. Resultat, les offres
+        # premium ne se chargeaient QUE pour les visiteurs deconnectes,
+        # ce qui est exactement l'inverse de ce qu'on veut.
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, X-ModBot-Api-Token, Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Max-Age"] = "600"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
@@ -5257,7 +5315,11 @@ async def api_cors_middleware(request, handler):
     except asyncio.CancelledError:
         raise
     except Exception as ex:
+        # La trace, cote serveur seulement. Sans elle, un 500 se lisait
+        # « Erreur interne API ModBot » des deux cotes : le navigateur ne
+        # sait rien, et le journal du bot pas davantage.
         print(f"Erreur API dashboard [{request.method} {path}]: {type(ex).__name__}: {ex}")
+        traceback.print_exc()
         # Ne jamais renvoyer la trace interne au client
         response = api_json({"ok": False, "error": "Erreur interne API ModBot", "status": 500},
                             status=500, request=request)
@@ -5620,6 +5682,20 @@ def serialize_oauth_guild(item, installed=False):
 # l'API Discord a chaque clic tout en gardant des permissions fraiches.
 _guilds_cache = {}
 GUILDS_CACHE_SECONDS = 60
+# Un verrou par utilisateur. Ouvrir un serveur declenche six requetes
+# d'un coup — ressources, configuration, securite, journal, sauvegardes,
+# giveaways — et chacune verifiait les permissions aupres de Discord.
+# Le cache de 60 s ne servait a rien : les six partaient ensemble, avant
+# que la premiere ait pu le remplir. Discord limite cette route a une
+# poignee d'appels par seconde et repondait 429 aux suivantes ; on
+# retombait alors sur les permissions figees de la session, et le
+# changement de serveur trainait six poignees de main TLS.
+_guilds_verrous = {}
+# Un echec se retient aussi, brievement. Un jeton Discord expire faisait
+# payer un aller-retour de 10 s a CHAQUE requete de serveur, pour finir
+# a chaque fois sur le meme repli.
+_guilds_echecs = {}
+GUILDS_ECHEC_SECONDS = 20
 
 async def fetch_user_guilds_live(identity):
     """
@@ -5641,6 +5717,27 @@ async def fetch_user_guilds_live(identity):
     if entree and time.monotonic() - entree["ts"] < GUILDS_CACHE_SECONDS:
         return entree["guilds"]
 
+    verrou = _guilds_verrous.get(cle)
+    if verrou is None:
+        verrou = _guilds_verrous.setdefault(cle, asyncio.Lock())
+    async with verrou:
+        # Relu SOUS le verrou : les cinq requetes qui attendaient
+        # trouvent la reponse que la premiere vient de ranger, et
+        # n'appellent pas Discord a leur tour.
+        entree = _guilds_cache.get(cle)
+        if entree and time.monotonic() - entree["ts"] < GUILDS_CACHE_SECONDS:
+            return entree["guilds"]
+        echec = _guilds_echecs.get(cle)
+        if echec and time.monotonic() - echec < GUILDS_ECHEC_SECONDS:
+            return None
+        donnees = await _demander_guilds_a_discord(cle, token)
+        if donnees is None:
+            _guilds_echecs[cle] = time.monotonic()
+        else:
+            _guilds_echecs.pop(cle, None)
+        return donnees
+
+async def _demander_guilds_a_discord(cle, token):
     try:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -5664,6 +5761,8 @@ async def fetch_user_guilds_live(identity):
     if len(_guilds_cache) > 500:  # garde-fou memoire
         for vieille in sorted(_guilds_cache, key=lambda k: _guilds_cache[k]["ts"])[:250]:
             _guilds_cache.pop(vieille, None)
+            _guilds_verrous.pop(vieille, None)
+            _guilds_echecs.pop(vieille, None)
     return donnees
 
 def make_session(user, user_guilds, access_token=""):
@@ -6035,7 +6134,11 @@ def sanitize_recurring_messages(guild, brut, existants):
     for item in brut[:25]:
         if not isinstance(item, dict):
             continue
-        salon = parse_int(item.get("channel_id"))
+        # Un salon d'un autre serveur etait enregistre sans broncher.
+        # Le message n'y partait jamais — la boucle d'envoi, elle, est
+        # bien cloisonnee — et le reglage restait a l'ecran comme s'il
+        # marchait. Un refus visible vaut mieux qu'un silence.
+        salon = id_salon_du_serveur(guild, item.get("channel_id"))
         contenu = clean_short_text(item.get("content"), "", 1900)
         if not salon or not contenu:
             continue
@@ -6075,10 +6178,20 @@ async def apply_dashboard_config(guild, payload):
         "patchnotes": "salon_patchnotes",
     }
     for public_key, cfg_key in channel_map.items():
-        parsed = parse_int(channels.get(public_key))
+        if public_key not in channels:
+            continue
+        # `parse_int` ne verifiait que la forme. Un identifiant d'un
+        # AUTRE serveur — le navigateur garde les listes du serveur
+        # precedent le temps que les nouvelles arrivent — etait accepte
+        # tel quel, et le journal de celui-ci partait alors chez
+        # l'autre. On exige que le salon soit d'ici.
+        parsed = id_salon_du_serveur(guild, channels.get(public_key))
         if parsed:
             cfg[cfg_key] = parsed
-        elif public_key in channels and payload.get("clear_empty_channels"):
+        elif parse_int(channels.get(public_key)):
+            print(f"config {guild.id}: salon {public_key} "
+                  f"{channels.get(public_key)} refuse (autre serveur)")
+        elif payload.get("clear_empty_channels"):
             cfg.pop(cfg_key, None)
 
     tickets = payload.get("tickets") or {}
@@ -6154,7 +6267,8 @@ async def apply_dashboard_config(guild, payload):
             if normalized
         ]
     if "reaction_roles_channel_id" in payload:
-        parsed_channel = parse_int(payload.get("reaction_roles_channel_id"))
+        parsed_channel = id_salon_du_serveur(
+            guild, payload.get("reaction_roles_channel_id"))
         if parsed_channel:
             cfg["reaction_roles_channel_id"] = parsed_channel
         else:
@@ -6181,10 +6295,12 @@ async def apply_dashboard_config(guild, payload):
             guild, payload.get("events"), cfg.get("events"))
 
     if "welcome_system" in payload:
-        cfg["welcome_system"] = sanitize_welcome_system(payload.get("welcome_system"))
+        cfg["welcome_system"] = sanitize_welcome_system(
+            payload.get("welcome_system"), guild)
 
     if "social_relays" in payload:
-        cfg["social_relays"] = sanitize_social_relays(payload.get("social_relays"))
+        cfg["social_relays"] = sanitize_social_relays(
+            payload.get("social_relays"), guild)
 
     # `cfg[key] = payload[key]` ecrivait ces deux listes telles quelles :
     # aucune validation, et `last_sent` repris du navigateur alors que
@@ -6803,10 +6919,10 @@ async def api_save_guild_security(request):
         if "enabled" in captcha:
             cfg["captcha_enabled"] = bool(captcha.get("enabled"))
         if "role_id" in captcha:
-            role_id = parse_int(captcha.get("role_id"))
+            role_id = parse_role_reference(guild, captcha.get("role_id"))
             cfg["captcha_role"] = str(role_id) if role_id else ""
         if "channel_id" in captcha:
-            channel_id = parse_int(captcha.get("channel_id"))
+            channel_id = id_salon_du_serveur(guild, captcha.get("channel_id"))
             cfg["captcha_channel"] = str(channel_id) if channel_id else ""
 
     alerts = payload.get("alerts")
@@ -6824,7 +6940,11 @@ async def api_save_guild_security(request):
     if isinstance(log_channels, dict):
         for key, spec in LOG_CATEGORIES.items():
             if key in log_channels:
-                cfg[spec["key"]] = parse_int(log_channels[key]) or None
+                # Un salon d'un autre serveur ne recevrait rien et ferait
+                # retomber la categorie sur le journal general : la
+                # configuration a l'ecran ne correspondait plus a ce que
+                # le bot faisait.
+                cfg[spec["key"]] = id_salon_du_serveur(guild, log_channels[key])
 
     auto_backup = payload.get("auto_backup")
     if isinstance(auto_backup, dict):
@@ -10026,7 +10146,7 @@ def recurring_last_sent_ts(value):
     except Exception:
         return 0
 
-def sanitize_social_relays(brut):
+def sanitize_social_relays(brut, guild=None):
     """
     Valide les relais venus du dashboard.
 
@@ -10049,7 +10169,11 @@ def sanitize_social_relays(brut):
         relais.append({
             "platform": clean_short_text(item.get("platform"), "Reseau", 40),
             "link": clean_short_text(item.get("link"), "", 500),
-            "channel_id": str(parse_int(item.get("channel_id")) or ""),
+            # Meme regle que partout : un salon d'ailleurs n'est pas un
+            # salon. `guild=None` (appels internes) laisse passer.
+            "channel_id": str((id_salon_du_serveur(guild, item.get("channel_id"))
+                               if guild is not None
+                               else parse_int(item.get("channel_id"))) or ""),
             "enabled": bool(item.get("enabled")),
             "ping_roles": roles,
             "ping_everyone": bool(item.get("ping_everyone")),
@@ -11517,10 +11641,9 @@ class ModalSuggestion(discord.ui.Modal, title="💡 Nouvelle suggestion"):
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
         gid = str(i.guild.id)
-        ch_id = get_ch(gid, "salon_suggestions", DEFAULT_SUGGESTIONS)
-        try:
-            salon = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
-        except Exception:
+        salon = salon_du_serveur(
+            i.guild, get_ch(gid, "salon_suggestions", DEFAULT_SUGGESTIONS))
+        if salon is None:
             return await i.followup.send("❌ Salon Suggestions non trouvé. Configurez-le dans le dashboard → Salons.", ephemeral=True)
         e = EG(f"💡 {self.titre.value}", self.contenu.value, gid=gid)
         e.set_author(name=str(i.user), icon_url=i.user.display_avatar.url)
@@ -11553,10 +11676,9 @@ class ModalReport(discord.ui.Modal, title="📋 Nouveau report"):
     async def on_submit(self, i: discord.Interaction):
         await _safe_defer(i)
         gid = str(i.guild.id)
-        ch_id = get_ch(gid, "salon_reports", DEFAULT_REPORTS)
-        try:
-            salon = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
-        except Exception:
+        salon = salon_du_serveur(
+            i.guild, get_ch(gid, "salon_reports", DEFAULT_REPORTS))
+        if salon is None:
             return await i.followup.send("❌ Salon Reports non trouvé. Configurez-le dans le dashboard → Salons.", ephemeral=True)
         est_bug = self.type_r == "bug"
         c = 0xFF4500 if est_bug else 0xED4245
@@ -11853,7 +11975,7 @@ WELCOME_DEFAULTS = {
     "color": "#FFFFFF",
 }
 
-def sanitize_welcome_system(raw):
+def sanitize_welcome_system(raw, guild=None):
     """
     Valide les reglages d'arrivee/depart venus du dashboard.
 
@@ -11872,7 +11994,8 @@ def sanitize_welcome_system(raw):
 
     for clef in ("channel_id", "departure_channel_id"):
         if clef in raw:
-            valeur = parse_int(raw.get(clef))
+            valeur = (id_salon_du_serveur(guild, raw.get(clef))
+                      if guild is not None else parse_int(raw.get(clef)))
             data[clef] = str(valeur) if valeur else ""
 
     for clef, taille in (("title", 200), ("departure_title", 200),
@@ -12226,10 +12349,15 @@ def sanitize_auto_roles(guild, brut):
         if not rid or str(rid) in roles:
             continue
         role = guild.get_role(rid)
+        # Un role d'un AUTRE serveur etait enregistre tel quel : jamais
+        # attribue — la distribution, elle, est bien cloisonnee — mais
+        # toujours affiche dans la liste, comme s'il fonctionnait.
+        if role is None:
+            continue
         # Un role gere par une integration ne peut pas etre attribue a la
         # main : Discord le refuse. On l'ecarte des la sauvegarde plutot
         # que d'echouer en silence a chaque arrivee.
-        if role and role.managed:
+        if role.managed:
             continue
         roles.append(str(rid))
     return {

@@ -1674,6 +1674,29 @@ async def main():
             verifier("en-tete nosniff present",
                      r.headers.get("X-Content-Type-Options") == "nosniff")
 
+        # Le site appelle TOUTES ses routes par le meme `modbotApiFetch`,
+        # qui joint le jeton de session des qu'il en a un. Une route
+        # publique recoit donc un en-tete `Authorization` — pas un
+        # en-tete simple : le navigateur demande un prevol. Celui-ci
+        # repondait « Content-Type seulement », et la reponse etait
+        # bloquee. Les offres premium ne se chargeaient QUE pour les
+        # visiteurs deconnectes.
+        for route, methode in (("/api/premium/offers", "GET"),
+                               ("/api/public/visite", "POST"),
+                               ("/api/public/visites", "GET")):
+            async with s.options(f"{BASE}{route}", headers={
+                    "Origin": "https://modbot-website.vercel.app",
+                    "Access-Control-Request-Method": methode,
+                    "Access-Control-Request-Headers": "authorization, content-type"}) as r:
+                entetes = r.headers.get("Access-Control-Allow-Headers", "").lower()
+                methodes = r.headers.get("Access-Control-Allow-Methods", "")
+                verifier(f"prevol {route} accepte Authorization",
+                         "authorization" in entetes, entetes)
+                verifier(f"prevol {route} accepte {methode}",
+                         methode in methodes, methodes)
+                verifier(f"{route} reste ouverte a toute origine",
+                         r.headers.get("Access-Control-Allow-Origin") == "*")
+
         print("\n--- Limitation de debit sur /api/auth/ ---")
         codes = []
         for _ in range(14):
