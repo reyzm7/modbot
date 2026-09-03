@@ -36,6 +36,7 @@ OFFRES = {
         "prix": "3,99 €",
         "periode": "par mois",
         "jours": 31,
+        "places": 1,
         "economie": "",
     },
     "semestriel": {
@@ -44,6 +45,7 @@ OFFRES = {
         "prix": "19,99 €",
         "periode": "tous les 6 mois",
         "jours": 183,
+        "places": 3,
         # 3,99 x 6 = 23,94. L'economie est reelle et vaut d'etre dite.
         "economie": "16 %",
     },
@@ -53,6 +55,7 @@ OFFRES = {
         "prix": "45 €",
         "periode": "par an",
         "jours": 366,
+        "places": 5,
         # 3,99 x 12 = 47,88. L'economie est reelle mais modeste.
         "economie": "6 %",
     },
@@ -201,3 +204,145 @@ def revoquer(fiche, auteur=""):
 def fonctionnalites_ouvertes(actif):
     """Le detail par fonctionnalite, pour que le dashboard sache verrouiller."""
     return {clef: bool(actif) for clef in FONCTIONNALITES}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §5. Les licences
+#
+#  Ce qu'on achete n'est plus un serveur : c'est une LICENCE, qui
+#  appartient a l'acheteur et porte un nombre de places.
+#
+#      mensuel  -> 1 serveur      semestriel -> 3      annuel -> 5
+#
+#  L'acheteur choisit lui-meme ou poser ses places, depuis son
+#  dashboard. Une place posee ne se reprend pas : elle vaut jusqu'a
+#  l'echeance de la licence. C'est ce que « definitivement jusqu'a
+#  expiration » veut dire, et c'est ce qui evite qu'un serveur perde son
+#  premium parce que quelqu'un a change d'avis le lendemain.
+#
+#  Toutes les places d'une licence partagent la MEME date de fin. Un
+#  renouvellement la repousse pour tout le monde en meme temps : sinon
+#  trois serveurs achetes ensemble expireraient a trois dates
+#  differentes, sans que personne ne comprenne pourquoi.
+# ══════════════════════════════════════════════════════════════════════
+
+def places_de_l_offre(plan):
+    """Combien de serveurs une offre ouvre. Une par defaut : jamais zero."""
+    return int((OFFRES.get(plan) or {}).get("places", 1))
+
+
+def nouvelle_licence(plan, source, jours=None, auteur="", identifiant="",
+                     abonnement=""):
+    """
+    Une licence fraiche, sans aucun serveur active.
+
+    `jours` permet a un administrateur d'offrir une duree qui ne
+    correspond a aucune offre du catalogue ; sinon on prend celle de
+    l'offre.
+    """
+    offre = OFFRES.get(plan) or {}
+    duree = int(jours if jours is not None else offre.get("jours", 31))
+    return {
+        "id": identifiant or "",
+        "plan": plan,
+        "places": places_de_l_offre(plan),
+        "until": (maintenant() + timedelta(days=duree)).isoformat(),
+        "servers": [],
+        "source": source,
+        "subscription": abonnement,
+        "granted_by": auteur,
+        "created_at": maintenant().isoformat(),
+    }
+
+
+def etat_licence(licence, reference=None):
+    """
+    Ce qu'il faut savoir d'une licence : ses places, et si elle vaut
+    encore quelque chose.
+    """
+    reference = reference or maintenant()
+    licence = licence if isinstance(licence, dict) else {}
+    fin = lire_date(licence.get("until"))
+    actif = bool(fin and fin > reference)
+    places = max(1, int(licence.get("places") or 1))
+    serveurs = [str(g) for g in (licence.get("servers") or [])]
+    restant = int((fin - reference).total_seconds() // 86400) if actif else 0
+    return {
+        "id": str(licence.get("id") or ""),
+        "plan": str(licence.get("plan") or ""),
+        "active": actif,
+        "until": fin.isoformat() if fin else "",
+        "days_left": restant,
+        "places": places,
+        "servers": serveurs,
+        # Ce qui reste a poser. Jamais negatif : une licence dont on
+        # aurait reduit les places ne doit pas afficher « -1 libre ».
+        "free": max(0, places - len(serveurs)) if actif else 0,
+        "source": str(licence.get("source") or ""),
+        "granted_by": str(licence.get("granted_by") or ""),
+    }
+
+
+def licence_peut_activer(licence, gid, reference=None):
+    """
+    (possible, raison) — pourquoi une activation est refusee, en clair.
+
+    On repond par une raison plutot que par un simple faux : « il ne se
+    passe rien » est le pire message qu'une interface puisse donner.
+    """
+    etat = etat_licence(licence, reference)
+    if not etat["active"]:
+        return False, "expiree"
+    if str(gid) in etat["servers"]:
+        return False, "deja"
+    if etat["free"] <= 0:
+        return False, "complet"
+    return True, ""
+
+
+def activer_licence(licence, gid):
+    """
+    Pose une place sur un serveur.
+
+    L'appelant a deja verifie avec `licence_peut_activer` : on ne
+    dedouble pas la regle ici, on garantit seulement qu'un meme serveur
+    n'apparait pas deux fois.
+    """
+    licence = dict(licence) if isinstance(licence, dict) else {}
+    serveurs = [str(g) for g in (licence.get("servers") or [])]
+    if str(gid) not in serveurs:
+        serveurs.append(str(gid))
+    licence["servers"] = serveurs
+    licence["updated_at"] = maintenant().isoformat()
+    return licence
+
+
+def prolonger_licence(licence, jours):
+    """
+    Repousse l'echeance d'une licence, et donc celle de tous ses
+    serveurs. Comme pour un serveur, on part de la date existante quand
+    elle est encore devant.
+    """
+    licence = dict(licence) if isinstance(licence, dict) else {}
+    base = lire_date(licence.get("until"))
+    depart = base if (base and base > maintenant()) else maintenant()
+    licence["until"] = (depart + timedelta(days=int(jours))).isoformat()
+    licence["updated_at"] = maintenant().isoformat()
+    return licence
+
+
+def resume_licences(licences, reference=None):
+    """
+    Ce que le dashboard doit savoir : y a-t-il une place a poser ?
+
+    C'est cette reponse qui decide de l'affichage du gros bouton
+    « Activation premium ». Sans place libre, aucun bouton : on ne
+    propose pas ce qu'on ne peut pas faire.
+    """
+    etats = [etat_licence(l, reference) for l in (licences or [])]
+    vivantes = [e for e in etats if e["active"]]
+    return {
+        "licences": vivantes,
+        "places_libres": sum(e["free"] for e in vivantes),
+        "serveurs_actives": sorted({g for e in vivantes for g in e["servers"]}),
+    }

@@ -307,6 +307,7 @@ F_BLACKLIST = chemin_donnees("blacklist.json")
 F_ADMINS = chemin_donnees("admins.json")
 F_PREMIUM = chemin_donnees("premium.json")
 F_VISITES = chemin_donnees("visites.json")
+F_LICENCES = chemin_donnees("licences.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -8407,6 +8408,179 @@ async def api_premium_offres(request):
     return reponse
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  LES LICENCES PREMIUM
+#
+#  Un achat n'appartient plus a un serveur mais a la personne qui l'a
+#  fait. Elle recoit une licence — une echeance et un nombre de places —
+#  et choisit elle-meme ou les poser depuis son dashboard.
+#
+#  `premium.json` reste la seule source pour « ce serveur est-il
+#  premium ? » : activer une place y ecrit, et tout ce qui verifie le
+#  premium continue de lire la meme chose qu'avant. Les licences ne font
+#  que dire QUI a le droit d'ecrire, et combien de fois.
+# ══════════════════════════════════════════════════════════════════════
+
+def licences_toutes():
+    donnees = jload(F_LICENCES)
+    return donnees if isinstance(donnees, dict) else {}
+
+
+def licences_ecrire(donnees):
+    jsave(F_LICENCES, donnees)
+
+
+def licences_de(uid):
+    brutes = licences_toutes().get(str(uid))
+    return [l for l in brutes if isinstance(l, dict)] if isinstance(brutes, list) else []
+
+
+def licence_poser(uid, licence):
+    """Ajoute ou remplace une licence, reperee par son identifiant."""
+    donnees = licences_toutes()
+    liste = [l for l in (donnees.get(str(uid)) or []) if isinstance(l, dict)]
+    remplacee = False
+    for index, existante in enumerate(liste):
+        if existante.get("id") and existante.get("id") == licence.get("id"):
+            liste[index] = licence
+            remplacee = True
+            break
+    if not remplacee:
+        liste.append(licence)
+    donnees[str(uid)] = liste
+    licences_ecrire(donnees)
+    return licence
+
+
+def licence_par_abonnement(abonnement):
+    """(uid, licence) derriere un abonnement Stripe, ou (None, None)."""
+    if not abonnement:
+        return None, None
+    for uid, liste in licences_toutes().items():
+        for licence in (liste if isinstance(liste, list) else []):
+            if isinstance(licence, dict) and licence.get("subscription") == abonnement:
+                return uid, licence
+    return None, None
+
+
+def licence_creer(uid, plan, source, jours=None, auteur="", abonnement=""):
+    licence = pc.nouvelle_licence(
+        plan, source, jours=jours, auteur=auteur,
+        identifiant=secrets.token_hex(8), abonnement=abonnement)
+    return licence_poser(uid, licence)
+
+
+async def appliquer_licence_au_serveur(licence, gid):
+    """
+    Ecrit le premium du serveur a l'echeance de la licence.
+
+    On ne PROLONGE pas : on aligne. Une licence de six mois posee sur un
+    serveur qui en avait deja trois ne doit pas donner neuf mois — les
+    places d'une meme licence partagent une seule date de fin.
+    """
+    fiche = dict(premium_fiche(gid))
+    ancienne = pc.lire_date(fiche.get("until"))
+    nouvelle = pc.lire_date(licence.get("until"))
+    # Sauf si le serveur avait deja mieux : on ne retire jamais des jours
+    # deja acquis a quelqu'un.
+    if ancienne and nouvelle and ancienne > nouvelle:
+        return premium_etat(gid)
+    fiche["until"] = licence.get("until")
+    fiche["source"] = licence.get("source") or "stripe"
+    fiche["plan"] = licence.get("plan") or ""
+    fiche["licence"] = licence.get("id") or ""
+    fiche.setdefault("since", pc.maintenant().isoformat())
+    fiche["updated_at"] = pc.maintenant().isoformat()
+    premium_ecrire(str(gid), fiche)
+    guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
+    if guild:
+        await donner_role_premium(guild)
+    return premium_etat(gid)
+
+
+async def api_mes_licences(request):
+    """
+    Les licences de la personne connectee.
+
+    Le dashboard s'en sert pour decider s'il montre le bouton
+    d'activation : pas de place libre, pas de bouton.
+    """
+    identity = await api_identity(request)
+    uid = str(identity.get("user_id") or "")
+    if not uid:
+        raise web.HTTPUnauthorized(text="Session Discord invalide.")
+    resume = pc.resume_licences(licences_de(uid))
+    # Le nom des serveurs deja actives, pour que la liste soit lisible.
+    noms = {}
+    for gid in resume["serveurs_actives"]:
+        guild = bot.get_guild(int(gid)) if gid.isdigit() else None
+        noms[gid] = guild.name if guild else gid
+    return api_json({"ok": True, **resume, "noms": noms}, request=request)
+
+
+async def api_activer_licence(request):
+    """
+    Pose une place de licence sur un serveur.
+
+    Trois verrous, dans cet ordre : la licence appartient bien a la
+    personne connectee, celle-ci administre bien le serveur vise, et il
+    reste une place. Le troisieme seul ne suffirait pas.
+    """
+    identity = await api_identity(request)
+    uid = str(identity.get("user_id") or "")
+    if not uid:
+        raise web.HTTPUnauthorized(text="Session Discord invalide.")
+
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    licence_id = clean_short_text(payload.get("licence_id"), "", 40)
+    gid = str(payload.get("guild_id") or "").strip()
+    if not gid.isdigit():
+        raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
+
+    licences = licences_de(uid)
+    licence = next((l for l in licences if str(l.get("id")) == licence_id), None)
+    if licence is None:
+        raise web.HTTPNotFound(text="Cette licence n'existe pas.")
+
+    # Administrer le serveur est une condition, pas une politesse : sans
+    # elle, une licence permettrait d'ouvrir le premium chez autrui.
+    guild = bot.get_guild(int(gid))
+    if guild is None:
+        raise web.HTTPBadRequest(
+            text="ModBot n'est pas sur ce serveur. Invite-le d'abord.")
+    if not identity_can_manage_guild(identity, gid):
+        raise web.HTTPForbidden(
+            text="Il faut administrer ce serveur pour y activer le premium.")
+
+    possible, raison = pc.licence_peut_activer(licence, gid)
+    if not possible:
+        messages = {
+            "expiree": "Cette licence a expire.",
+            "deja": "Le premium est deja actif sur ce serveur.",
+            "complet": "Toutes les places de cette licence sont utilisees.",
+        }
+        raise web.HTTPBadRequest(text=messages.get(raison, "Activation impossible."))
+
+    licence = pc.activer_licence(licence, gid)
+    licence_poser(uid, licence)
+    etat = await appliquer_licence_au_serveur(licence, gid)
+
+    auteur = clean_short_text(identity.get("username"), "", 80) or uid
+    dashboard_log("premium_activate", guild, auteur,
+                  f"{guild.name}: {licence.get('plan')}")
+    await log_event(
+        guild, "admin", "Premium active",
+        f"**{auteur}** a active ModBot Premium sur ce serveur.",
+        fields=[("Offre", str(licence.get("plan") or "")),
+                ("Jusqu'au", str(etat["until"])[:10])],
+        severity="success")
+
+    return api_json({"ok": True, "premium": etat,
+                     "licence": pc.etat_licence(licence)}, request=request)
+
+
 async def api_premium_etat(request):
     """Etat premium d'un serveur, pour son dashboard."""
     identity = await api_identity(request)
@@ -8416,14 +8590,17 @@ async def api_premium_etat(request):
 
 async def api_premium_checkout(request):
     """
-    Ouvre une page de paiement Stripe pour ce serveur.
+    Ouvre une page de paiement Stripe au nom de la personne connectee.
 
-    L'identifiant du serveur voyage dans les metadonnees de la session :
-    c'est ce que le webhook relira pour savoir QUI crediter. Sans lui, un
-    paiement arriverait sans destinataire.
+    On n'achete plus POUR un serveur mais POUR SOI : c'est l'identifiant
+    de l'acheteur qui voyage dans les metadonnees, et le webhook lui
+    credite une licence. Il choisira ensuite ou poser ses places. Sans
+    cet identifiant, un paiement arriverait sans destinataire.
     """
     identity = await api_identity(request)
-    guild = await api_guild_from_request(request, identity)
+    uid = str(identity.get("user_id") or "")
+    if not uid:
+        raise web.HTTPUnauthorized(text="Connecte-toi avec Discord d'abord.")
     payload = await request.json() if request.can_read_body else {}
     if not isinstance(payload, dict):
         payload = {}
@@ -8444,16 +8621,18 @@ async def api_premium_checkout(request):
             "line_items[0][quantity]": "1",
             "success_url": f"{site}/premium.html?paiement=reussi",
             "cancel_url": f"{site}/premium.html?paiement=annule",
-            "client_reference_id": str(guild.id),
-            "metadata[guild_id]": str(guild.id),
+            "client_reference_id": uid,
+            "metadata[user_id]": uid,
             "metadata[plan]": clef,
-            "metadata[guild_name]": guild.name[:80],
-            "subscription_data[metadata][guild_id]": str(guild.id),
+            "metadata[user_name]": clean_short_text(
+                identity.get("username"), "", 80),
+            "subscription_data[metadata][user_id]": uid,
             "subscription_data[metadata][plan]": clef,
             "allow_promotion_codes": "true",
         })
 
-    dashboard_log("premium_checkout", guild, identity.get("username"), clef)
+    dashboard_log("premium_checkout", None, identity.get("username"),
+                  f"{clef} ({pc.places_de_l_offre(clef)} place(s))")
     return api_json({"ok": True, "url": corps.get("url", "")}, request=request)
 
 
@@ -8479,8 +8658,20 @@ async def api_stripe_webhook(request):
     meta = objet.get("metadata") or {}
     gid = str(meta.get("guild_id") or objet.get("client_reference_id") or "")
     plan = str(meta.get("plan") or "")
+    uid = str(meta.get("user_id") or "")
 
-    if type_evenement == "checkout.session.completed" and gid:
+    if type_evenement == "checkout.session.completed" and uid:
+        # L'acheteur recoit une licence, pas un serveur : c'est lui qui
+        # decidera ou la poser, depuis son dashboard.
+        licence = licence_creer(uid, plan, "stripe", auteur="Stripe",
+                                abonnement=str(objet.get("subscription") or ""))
+        print(f"premium: licence {licence['id']} pour {uid} "
+              f"({plan}, {licence['places']} place(s))")
+
+    elif type_evenement == "checkout.session.completed" and gid:
+        # Un paiement d'avant les licences : il visait un serveur. On
+        # continue de l'honorer plutot que de perdre l'argent de
+        # quelqu'un.
         jours = (pc.OFFRES.get(plan) or {}).get("jours", 31)
         fiche = pc.prolonger(premium_fiche(gid), jours, "stripe", plan, "Stripe")
         fiche["subscription"] = str(objet.get("subscription") or "")
@@ -8492,6 +8683,21 @@ async def api_stripe_webhook(request):
     elif type_evenement == "invoice.paid":
         # Renouvellement : on repousse depuis la date de fin en cours.
         abonnement = str(objet.get("subscription") or "")
+        proprietaire, licence = licence_par_abonnement(abonnement)
+        if licence is not None:
+            plan = plan or str(licence.get("plan") or "mensuel")
+            jours = (pc.OFFRES.get(plan) or {}).get("jours", 31)
+            licence = pc.prolonger_licence(licence, jours)
+            licence_poser(proprietaire, licence)
+            # Les places deja posees suivent l'echeance de leur licence :
+            # trois serveurs achetes ensemble n'ont aucune raison
+            # d'expirer a trois dates differentes.
+            for serveur in licence.get("servers") or []:
+                await appliquer_licence_au_serveur(licence, serveur)
+            print(f"premium: licence {licence.get('id')} renouvelee "
+                  f"({jours} jours, {len(licence.get('servers') or [])} serveur(s))")
+            return api_json({"ok": True, "received": type_evenement})
+
         cible = gid or premium_par_abonnement(abonnement)
         if cible:
             fiche_actuelle = premium_fiche(cible)
@@ -8569,15 +8775,32 @@ async def api_admin_premium_grant(request):
     if not isinstance(payload, dict):
         payload = {}
 
+    cible = str(payload.get("target") or "guild").strip()
     gid = str(payload.get("guild_id") or "").strip()
     duree = str(payload.get("duration") or "").strip()
-    if not gid.isdigit() or not (17 <= len(gid) <= 20):
-        raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
     if duree not in pc.DUREES_CADEAU:
         raise web.HTTPBadRequest(
             text="Duree inconnue. Choisis 1mois, 6mois ou 1an.")
 
     auteur = clean_short_text(identity.get("username"), "", 80) or "Dashboard"
+
+    # Offrir a une PERSONNE lui donne une licence, avec ses places : elle
+    # choisit ou la poser, exactement comme si elle l'avait achetee. Rien
+    # n'est impose a un serveur qui n'a rien demande.
+    if cible == "user":
+        uid = str(payload.get("user_id") or "").strip()
+        if not uid.isdigit() or not (17 <= len(uid) <= 20):
+            raise web.HTTPBadRequest(text="Identifiant d'utilisateur invalide.")
+        plan = {"1mois": "mensuel", "6mois": "semestriel",
+                "1an": "annuel"}.get(duree, "mensuel")
+        licence = licence_creer(uid, plan, "admin",
+                                jours=pc.DUREES_CADEAU[duree], auteur=auteur)
+        dashboard_log("premium_grant_user", None, auteur, f"{uid}: {duree}")
+        return api_json({"ok": True, "target": "user", "user_id": uid,
+                         "licence": pc.etat_licence(licence)})
+
+    if not gid.isdigit() or not (17 <= len(gid) <= 20):
+        raise web.HTTPBadRequest(text="Identifiant de serveur invalide.")
     jours = pc.DUREES_CADEAU[duree]
     premium_prolonger(gid, jours, "admin", duree, auteur)
     etat = premium_etat(gid)
@@ -9210,8 +9433,15 @@ async def start_dashboard_api():
     app.router.add_post("/api/public/visite", api_visite_ping)
     app.router.add_get("/api/public/visites", api_visites_lecture)
     app.router.add_get("/api/admin/visites", api_admin_visites)
+    app.router.add_get("/api/me/licences", api_mes_licences)
+    app.router.add_post("/api/me/licences/activer", api_activer_licence)
     app.router.add_post("/api/stripe/webhook", api_stripe_webhook)
     app.router.add_get("/api/guilds/{guild_id}/premium", api_premium_etat)
+    # L'achat n'appartient plus a un serveur : la bonne adresse est
+    # celle-ci. L'ancienne reste ouverte le temps que les pages en cache
+    # chez les visiteurs finissent de tourner — elle mene au meme
+    # endroit, le serveur de l'adresse etant simplement ignore.
+    app.router.add_post("/api/premium/checkout", api_premium_checkout)
     app.router.add_post("/api/guilds/{guild_id}/premium/checkout", api_premium_checkout)
     app.router.add_get("/api/admin/premium", api_admin_premium_list)
     app.router.add_post("/api/admin/premium", api_admin_premium_grant)

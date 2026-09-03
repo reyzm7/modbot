@@ -34,3 +34,4 @@ __pycache__/
 venv/
 rating_attente.json
 visites.json
+licences.json
