@@ -15,6 +15,7 @@ import security_core as sc
 import premium_core as pc
 import security_score as sc_score
 import reseaux_sociaux as rs
+import compteurs as cpt
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -5288,6 +5289,7 @@ async def refresh_ticket_panel_message(guild):
 
 _dashboard_api_runner = None
 _dashboard_recurring_task = None
+_compteurs_task = None
 _licences_task = None
 _dashboard_social_task = None
 _oauth_states = {}
@@ -6221,6 +6223,7 @@ def serialize_dashboard_config(guild):
         "reaction_roles_channel_id": str(cfg.get("reaction_roles_channel_id") or ""),
         "reaction_roles_mode": cfg.get("reaction_roles_mode") or "Plusieurs rôles possibles",
         "recurring_messages": cfg.get("recurring_messages", []),
+        "compteurs": cfg.get("compteurs", []),
         "social_relays": cfg.get("social_relays", []),
         "ratings": {
             "average": round(float(rating_stats.get("avg", 0)), 2),
@@ -6443,6 +6446,9 @@ async def apply_dashboard_config(guild, payload):
     # `cfg[key] = payload[key]` ecrivait ces deux listes telles quelles :
     # aucune validation, et `last_sent` repris du navigateur alors que
     # c'est la seule chose qui empeche un message de repartir en boucle.
+    if "compteurs" in payload:
+        cfg["compteurs"] = sanitize_compteurs(guild, payload.get("compteurs"))
+
     if "recurring_messages" in payload:
         cfg["recurring_messages"] = sanitize_recurring_messages(
             guild, payload.get("recurring_messages"), cfg.get("recurring_messages"))
@@ -10225,6 +10231,7 @@ async def start_dashboard_api():
     app.router.add_delete("/api/admin/admins/{user_id}", api_admin_admin_remove)
     app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
     app.router.add_post("/api/guilds/{guild_id}/socials/test", api_test_social)
+    app.router.add_post("/api/guilds/{guild_id}/compteurs", api_compteur_creer)
 
     # Administration
     app.router.add_get("/api/admin/stats", api_admin_stats)
@@ -11087,6 +11094,142 @@ def embed_annonce(guild, relay, publication, plateforme=None):
         # « aujourd'hui a 09:54 » chez lui, pas chez le serveur.
         embed.timestamp = quand
     return embed
+
+# ══════════════════════════════════════════════════════════════════════
+#  COMPTEURS DE SERVEUR — un chiffre dans un nom de salon
+# ══════════════════════════════════════════════════════════════════════
+#
+# Discord n'autorise que DEUX renommages par salon et par tranche de dix
+# minutes. Au-dela, la requete n'echoue pas franchement : elle part en
+# file d'attente et le bot reste bloque dessus. D'ou six minutes entre
+# deux passages, et aucun renommage quand le nom n'a pas bouge.
+COMPTEURS_CADENCE = 6 * 60
+
+
+def faits_du_serveur(guild):
+    """Les chiffres d'un serveur, tels que les compteurs les affichent."""
+    membres = list(getattr(guild, "members", []) or [])
+    humains = [m for m in membres if not m.bot]
+    # `member_count` est fiable meme quand le cache des membres est
+    # incomplet ; la liste, non. On prend le meilleur des deux.
+    total = int(getattr(guild, "member_count", 0) or len(membres))
+    en_ligne = sum(
+        1 for m in humains
+        if str(getattr(m, "status", "offline")) not in ("offline", "invisible"))
+    return {
+        "membres": total,
+        "humains": len(humains) or max(0, total - sum(1 for m in membres if m.bot)),
+        "bots": sum(1 for m in membres if m.bot),
+        # Sans l'intention « presences », tout le monde parait hors ligne.
+        # Mieux vaut ne rien afficher qu'un zero qui a l'air d'une panne.
+        "en_ligne": en_ligne if en_ligne else None,
+        "boosts": int(getattr(guild, "premium_subscription_count", 0) or 0),
+        "niveau_boost": int(getattr(guild, "premium_tier", 0) or 0),
+        "salons": len(getattr(guild, "channels", []) or []),
+        "roles": max(0, len(getattr(guild, "roles", []) or []) - 1),  # sans @everyone
+    }
+
+
+def porteurs_des_roles(guild, gabarits):
+    """Combien de membres portent chacun des roles cites par les gabarits."""
+    voulus = set()
+    for gabarit in gabarits:
+        voulus.update(cpt.roles_cites(gabarit))
+    porteurs = {}
+    for rid in voulus:
+        role = guild.get_role(int(rid)) if str(rid).isdigit() else None
+        porteurs[rid] = len(role.members) if role else 0
+    return porteurs
+
+
+def sanitize_compteurs(guild, brut):
+    """Valide les compteurs venus du dashboard."""
+    return cpt.nettoyer(
+        brut, salon_valide=lambda ident: id_salon_du_serveur(guild, ident))
+
+
+async def compteurs_loop():
+    """
+    Tient les noms de salons a jour.
+
+    Un compteur n'a pas besoin d'etre a la seconde ; il a besoin de ne
+    pas etre faux, et de ne pas paralyser le bot en depensant son quota
+    de renommages a reecrire le meme texte.
+    """
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        for guild in list(bot.guilds):
+            liste = get_cfg(guild.id).get("compteurs")
+            if not isinstance(liste, list) or not liste:
+                continue
+            faits = faits_du_serveur(guild)
+            porteurs = porteurs_des_roles(
+                guild, [c.get("template", "") for c in liste])
+            for compteur in liste:
+                if not isinstance(compteur, dict) or not compteur.get("enabled", True):
+                    continue
+                salon = salon_du_serveur(guild, compteur.get("channel_id"))
+                if salon is None:
+                    continue
+                voulu = cpt.rendre(compteur.get("template"), faits, porteurs)
+                if not cpt.doit_renommer(salon.name, voulu):
+                    continue
+                if not salon.permissions_for(guild.me).manage_channels:
+                    continue
+                try:
+                    await salon.edit(name=voulu, reason="[ModBot] Compteur de serveur")
+                except discord.HTTPException as ex:
+                    print(f"compteur {guild.id}/{salon.id}: {ex}")
+                except Exception as ex:
+                    print(f"compteur {guild.id}: {type(ex).__name__}: {ex}")
+        await asyncio.sleep(COMPTEURS_CADENCE)
+
+
+async def api_compteur_creer(request):
+    """
+    Cree le salon d'un compteur, deja nomme et deja verrouille.
+
+    Le faire a la main demande de creer un vocal, d'y interdire la
+    connexion, puis d'en recopier l'identifiant : trois occasions de se
+    tromper pour un salon que personne n'ouvrira jamais.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    if not guild.me.guild_permissions.manage_channels:
+        raise web.HTTPForbidden(
+            text="ModBot a besoin de « Gerer les salons » pour creer un compteur.")
+
+    charge = await request.json() if request.can_read_body else {}
+    gabarit = str((charge or {}).get("template") or "").strip()
+    if not gabarit:
+        raise web.HTTPBadRequest(text="Il faut un modele de nom.")
+
+    faits = faits_du_serveur(guild)
+    nom = cpt.rendre(gabarit, faits,
+                     porteurs_des_roles(guild, [gabarit])) or "Compteur"
+    try:
+        salon = await guild.create_voice_channel(
+            name=nom,
+            # Visible de tous, rejoignable par personne : c'est un
+            # panneau d'affichage, pas un salon.
+            overwrites={guild.default_role: discord.PermissionOverwrite(
+                connect=False, view_channel=True)},
+            reason="[ModBot] Compteur de serveur")
+    except discord.Forbidden:
+        raise web.HTTPForbidden(text="ModBot ne peut pas creer de salon ici.")
+    except discord.HTTPException as ex:
+        raise web.HTTPBadRequest(text=f"Discord a refuse : {ex}")
+
+    cfg = get_cfg(guild.id)
+    liste = cfg.get("compteurs")
+    liste = list(liste) if isinstance(liste, list) else []
+    liste.append({"channel_id": str(salon.id), "template": gabarit, "enabled": True})
+    cfg["compteurs"] = sanitize_compteurs(guild, liste)
+    set_cfg(guild.id, cfg)
+    dashboard_log("compteur_creer", guild, identity.get("username"), nom)
+    return api_json({"ok": True, "channel_id": str(salon.id),
+                     "name": salon.name, "compteurs": cfg["compteurs"]},
+                    request=request)
 
 async def dashboard_social_loop():
     """
@@ -16913,7 +17056,7 @@ async def presence_loop():
 
 @bot.event
 async def on_ready():
-    global _dashboard_recurring_task, _dashboard_social_task
+    global _dashboard_recurring_task, _dashboard_social_task, _compteurs_task
     global _security_task, _autobackup_task, _giveaway_task, _sauvegarde_task
     global _licences_task
     global _presence_task
@@ -16945,6 +17088,8 @@ async def on_ready():
         print(f"Erreur API dashboard : {err}")
     if not _dashboard_recurring_task or _dashboard_recurring_task.done():
         _dashboard_recurring_task = asyncio.create_task(dashboard_recurring_loop())
+    if not _compteurs_task or _compteurs_task.done():
+        _compteurs_task = asyncio.create_task(compteurs_loop())
     try:
         await nettoyer_vocaux_orphelins()
     except Exception as err:
