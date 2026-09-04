@@ -6794,32 +6794,13 @@ async def api_test_social(request):
     relay = {"link": link, "platform": libelle,
              "message": payload.get("message") or rs.message_par_defaut(link)}
     valeurs = valeurs_annonce(guild, relay, publication)
-    nature = rs.NATURE.get(plateforme, rs.NATURE["web"])
 
-    embed = EG(f"{emoji} {nature} — {compte}",
-               publication.get("description", "")[:2000] or None,
-               couleur, guild.id)
-    embed.add_field(name="Compte suivi", value=link or "—", inline=False)
-    if publication.get("title"):
-        embed.add_field(name="Titre", value=publication["title"][:1024], inline=False)
-    if publication.get("game"):
-        embed.add_field(name="Jeu", value=publication["game"][:256], inline=True)
-    if publication.get("viewers"):
-        embed.add_field(name="Spectateurs", value=str(publication["viewers"])[:32], inline=True)
-    if publication.get("image"):
-        try:
-            embed.set_image(url=publication["image"])
-        except Exception:
-            pass
-    embed.set_footer(text="Test depuis le dashboard"
+    # Exactement l'embed d'une vraie annonce : un test qui n'a pas la
+    # meme forme que ce qu'il annonce ne teste rien.
+    embed = embed_annonce(guild, relay, publication, plateforme)
+    embed.set_footer(text=(embed.footer.text or "") + " • test depuis le dashboard"
                           + ("" if trouve else " — publication non lue"))
-
-    view = None
-    if link:
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(
-            label="Regarder le live" if publication.get("live") else "Ouvrir",
-            url=publication.get("url") or link))
+    view = bouton_annonce(publication, link)
 
     annonce = rs.rendre_message(relay["message"], valeurs)
     # Aucune mention pendant un test : prevenir tout un serveur pour
@@ -10517,6 +10498,12 @@ async def youtube_derniere_video(session, url):
     if not entree:
         return None
     bloc = entree.group(1)
+    # Le nom de la chaine, pris AVANT la premiere entree : le lien d'une
+    # video mene a « /shorts/xxx » ou « /watch?v=xxx », et en tirer le
+    # compte donnait « shorts ».
+    tete = flux[:entree.start()]
+    chaine = re.search(r"<name>([^<]+)</name>", tete)
+    lien_chaine = re.search(r'<link[^>]+href="(https://www\.youtube\.com/channel/[^"]+)"', tete)
 
     def champ(motif):
         trouve = re.search(motif, bloc, re.S)
@@ -10540,6 +10527,9 @@ async def youtube_derniere_video(session, url):
         # lorsqu'une nouvelle video parait, jamais autrement.
         "fingerprint": hashlib.sha1(video.encode("utf-8")).hexdigest(),
         "empty": not titre,
+        "author_name": chaine.group(1) if chaine else "",
+        "author_url": lien_chaine.group(1) if lien_chaine else "",
+        "date": champ(r"<published>([^<]+)</published>"),
     }
 
 
@@ -10875,6 +10865,7 @@ async def relever_publication(session, lien):
             "variables": {"channelLogin": compte},
             "query": ("query StreamMetadata($channelLogin: String!) {"
                       " user(login: $channelLogin) { login displayName"
+                      " profileImageURL(width: 150)"
                       " stream { id title createdAt viewersCount previewImageURL"
                       " game { name displayName } } } }"),
         }
@@ -10896,7 +10887,11 @@ async def relever_publication(session, lien):
                 "url": ancien.get("url", ""), "title": ancien.get("title", ""),
                 "description": ancien.get("description", ""),
                 "image": ancien.get("image", ""),
-                "game": "", "viewers": "", "date": "", "live": False,
+                "game": "", "viewers": "", "live": False,
+                "date": ancien.get("date", ""),
+                "author_name": ancien.get("author_name", ""),
+                "author_icon": "",
+                "author_url": ancien.get("author_url", ""),
             }
 
     if publication is None and plateforme == "web":
@@ -10940,6 +10935,131 @@ def valeurs_annonce(guild, relay, publication):
         "date": publication.get("date", ""),
         "type": rs.NATURE.get(plateforme, rs.NATURE["web"]),
     }
+
+def date_publication(publication):
+    """
+    La date de la publication, en objet, pour l'horodatage de l'embed.
+
+    Chaque plateforme l'ecrit a sa facon : ISO 8601 pour Twitch, RFC 822
+    pour un flux RSS, un nombre de secondes pour TikTok, « Wed Mar 05
+    12:00:00 +0000 2026 » pour X. On essaie, et on renonce sans bruit :
+    un horodatage absent vaut mieux qu'une date fausse.
+    """
+    brut = str((publication or {}).get("date") or "").strip()
+    if not brut:
+        return None
+    if brut.isdigit() and len(brut) <= 11:
+        try:
+            return datetime.fromtimestamp(int(brut), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    date = sc.parse_iso(brut)
+    if date:
+        return date
+    for forme in ("%a %b %d %H:%M:%S %z %Y",      # X
+                  "%a, %d %b %Y %H:%M:%S %z",     # RSS
+                  "%a, %d %b %Y %H:%M:%S %Z"):
+        try:
+            return datetime.strptime(brut, forme)
+        except ValueError:
+            continue
+    return None
+
+
+def bouton_annonce(publication, repli=""):
+    """
+    Le bouton sous l'annonce. Les autres bots n'en mettent pas : c'est
+    un clic de moins pour aller voir.
+    """
+    lien = (publication or {}).get("url") or repli
+    if not lien or not str(lien).startswith(("http://", "https://")):
+        return None
+    vue = discord.ui.View()
+    vue.add_item(discord.ui.Button(
+        label="Regarder le live" if (publication or {}).get("live") else "Ouvrir",
+        url=lien))
+    return vue
+
+
+def embed_annonce(guild, relay, publication, plateforme=None):
+    """
+    L'embed d'une annonce de relais.
+
+    La forme suit ce que les lecteurs de Discord connaissent : une ligne
+    d'auteur avec son avatar, un titre cliquable qui EST celui de la
+    publication, son texte en dessous, sa grande image, et un pied qui
+    dit la plateforme et la date.
+
+    Le titre disait « Nouvelle vidéo — compte » : le message au-dessus
+    le dit deja, et ce titre ne menait nulle part. Il porte desormais le
+    titre reel de la publication et son lien.
+    """
+    publication = publication or {}
+    plateforme = plateforme or rs.plateforme_du_lien(
+        publication.get("url") or relay.get("link"))
+    libelle = clean_short_text(relay.get("platform"), plateforme, 40)
+    emoji, couleur, _ = _social_platform_palette(libelle or plateforme)
+    nature = rs.NATURE.get(plateforme, rs.NATURE["web"])
+    lien = publication.get("url") or str(relay.get("link") or "")
+
+    # Un titre vide n'est pas permis sur un embed cliquable : on retombe
+    # sur la nature de la publication, qui reste vraie.
+    titre = clean_short_text(publication.get("title"), "", 250) or nature
+    texte = clean_short_text(publication.get("description"), "", 2000)
+    # Le titre est deja la legende raccourcie : la repeter dessous ne dit
+    # rien de plus. On ne garde le texte que s'il en apprend davantage.
+    if texte and titre.rstrip("… .").startswith(texte.rstrip("… .")[:60]) \
+            and len(texte) <= len(titre) + 3:
+        texte = ""
+    embed = discord.Embed(
+        title=f"{emoji} {titre}"[:256],
+        url=lien or None,
+        description=texte or None,
+        colour=discord.Colour(couleur),
+    )
+
+    auteur = clean_short_text(publication.get("author_name"), "", 250) \
+        or rs.compte_du_lien(lien) or libelle
+    embed.set_author(
+        name=auteur[:256],
+        url=publication.get("author_url") or None,
+        icon_url=publication.get("author_icon") or None)
+
+    if publication.get("game"):
+        embed.add_field(name="🎮 Jeu", value=publication["game"][:256], inline=True)
+    if publication.get("viewers"):
+        embed.add_field(name="👁️ Spectateurs",
+                        value=str(publication["viewers"])[:32], inline=True)
+
+    grande = publication.get("image") or ""
+    avatar = publication.get("author_icon") or ""
+    if grande:
+        try:
+            embed.set_image(url=grande)
+        except Exception:
+            pass
+        # L'avatar en vignette a droite, mais seulement s'il n'est pas
+        # deja la grande image : sur un compteur Instagram, la seule
+        # image dont on dispose EST l'avatar, et l'afficher deux fois
+        # ferait une carte bancale.
+        if avatar and avatar != grande:
+            try:
+                embed.set_thumbnail(url=avatar)
+            except Exception:
+                pass
+    elif avatar:
+        try:
+            embed.set_image(url=avatar)
+        except Exception:
+            pass
+
+    embed.set_footer(text=f"{libelle or plateforme} • {nature}")
+    quand = date_publication(publication)
+    if quand:
+        # L'horodatage de l'embed s'affiche dans le fuseau du LECTEUR :
+        # « aujourd'hui a 09:54 » chez lui, pas chez le serveur.
+        embed.timestamp = quand
+    return embed
 
 async def dashboard_social_loop():
     """
@@ -11039,34 +11159,9 @@ async def dashboard_social_loop():
                             changed = True
                         continue
 
-                    plateforme = rs.plateforme_du_lien(link)
-                    libelle = clean_short_text(relay.get("platform"), plateforme, 40)
-                    emoji, couleur, _ = _social_platform_palette(libelle or plateforme)
-                    nature = rs.NATURE.get(plateforme, rs.NATURE["web"])
                     valeurs = valeurs_annonce(guild, relay, publication)
-
-                    embed = EG(f"{emoji} {nature} — {valeurs['compte'] or libelle}",
-                               publication.get("description", "")[:2000] or None,
-                               couleur, guild.id)
-                    if publication.get("title"):
-                        embed.add_field(name="Titre", value=publication["title"][:1024],
-                                        inline=False)
-                    if publication.get("game"):
-                        embed.add_field(name="Jeu", value=publication["game"][:256],
-                                        inline=True)
-                    if publication.get("viewers"):
-                        embed.add_field(name="Spectateurs",
-                                        value=str(publication["viewers"])[:32], inline=True)
-                    if publication.get("image"):
-                        try:
-                            embed.set_image(url=publication["image"])
-                        except Exception:
-                            pass
-
-                    view = discord.ui.View()
-                    view.add_item(discord.ui.Button(
-                        label="Regarder le live" if publication.get("live") else "Ouvrir",
-                        url=publication.get("url") or link))
+                    embed = embed_annonce(guild, relay, publication)
+                    view = bouton_annonce(publication, link)
 
                     contenu, autorisees = mentions_relais(guild, relay)
                     # Mentions et message d'annonce voyagent ensemble dans

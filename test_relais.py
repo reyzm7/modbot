@@ -513,6 +513,106 @@ verifier("un succes efface le recul", not bot_mod._reseau_en_recul("essai:compte
 bot_mod._reseaux_recul.clear()
 
 
+print(chr(10) + "--- La forme de l'annonce ---")
+
+# Ce que les autres bots font et que nous ne faisions pas : le titre de
+# l'embed est celui de la PUBLICATION et il est cliquable ; une ligne
+# d'auteur porte l'avatar du compte ; un pied dit la plateforme. Notre
+# titre disait « Nouvelle vidéo — compte », ce que le message au-dessus
+# dit deja, et ne menait nulle part.
+
+
+class FauxGuildE:
+    id = 111
+    name = "VPG Belgique"
+
+
+PUB_TWITCH = {
+    "id": "48000000000", "url": "https://www.twitch.tv/zerator",
+    "title": "ZEVENT2026 1er JOUR", "description": "",
+    "image": "https://static-cdn.jtvnw.net/preview.jpg",
+    "game": "ZEVENT", "viewers": "40896", "date": "2026-09-04T09:00:00Z",
+    "live": True, "author_name": "ZeratoR",
+    "author_icon": "https://static-cdn.jtvnw.net/avatar.png",
+    "author_url": "https://www.twitch.tv/zerator",
+}
+relay_twitch = {"link": "https://www.twitch.tv/zerator", "platform": "Twitch"}
+e = bot_mod.embed_annonce(FauxGuildE(), relay_twitch, PUB_TWITCH)
+
+verifier("le titre est celui de la publication",
+         "ZEVENT2026 1er JOUR" in e.title, e.title)
+verifier("et il est cliquable",
+         e.url == "https://www.twitch.tv/zerator", str(e.url))
+verifier("l'auteur porte le nom du compte", e.author.name == "ZeratoR", e.author.name)
+verifier("avec son avatar", bool(e.author.icon_url))
+verifier("et un lien vers son profil", bool(e.author.url))
+verifier("le jeu et les spectateurs sont des champs",
+         [c.name for c in e.fields] == ["🎮 Jeu", "👁️ Spectateurs"],
+         str([c.name for c in e.fields]))
+verifier("l'apercu du live est la grande image",
+         e.image.url == "https://static-cdn.jtvnw.net/preview.jpg")
+verifier("l'avatar passe en vignette a cote",
+         e.thumbnail.url == "https://static-cdn.jtvnw.net/avatar.png")
+verifier("le pied dit la plateforme", "Twitch" in (e.footer.text or ""), e.footer.text)
+verifier("la date de la publication est portee", e.timestamp is not None)
+verifier("la couleur est celle de la plateforme", e.colour.value == 0x9146FF,
+         hex(e.colour.value))
+
+vue = bot_mod.bouton_annonce(PUB_TWITCH)
+verifier("un live propose « Regarder le live »",
+         vue and vue.children[0].label == "Regarder le live")
+
+# L'avatar ne doit pas s'afficher DEUX fois : sur un compteur Instagram,
+# la seule image dont on dispose EST l'avatar.
+pub_ig = {"id": "ig:10", "url": "https://www.instagram.com/x/",
+          "title": "Nouvelle publication", "description": "",
+          "image": "https://cdn/avatar.jpg", "author_icon": "https://cdn/avatar.jpg",
+          "author_name": "Compte", "author_url": "https://www.instagram.com/x/",
+          "game": "", "viewers": "", "date": "", "live": False}
+e2 = bot_mod.embed_annonce(FauxGuildE(),
+                           {"link": "https://www.instagram.com/x/",
+                            "platform": "Instagram"}, pub_ig)
+verifier("l'avatar n'est pas affiche deux fois",
+         not e2.thumbnail.url, str(e2.thumbnail.url))
+
+# Un titre vide n'est pas permis sur un embed cliquable.
+e3 = bot_mod.embed_annonce(FauxGuildE(),
+                           {"link": "https://www.tiktok.com/@x", "platform": "TikTok"},
+                           {"id": "1", "url": "https://www.tiktok.com/@x/video/1",
+                            "title": "", "description": "", "image": "",
+                            "game": "", "viewers": "", "date": "", "live": False})
+verifier("un titre vide retombe sur la nature de la publication",
+         "Nouvelle vidéo" in e3.title, e3.title)
+
+# Repeter la legende sous le titre n'apprend rien.
+e4 = bot_mod.embed_annonce(FauxGuildE(),
+                           {"link": "https://www.tiktok.com/@x", "platform": "TikTok"},
+                           {"id": "1", "url": "https://www.tiktok.com/@x/video/1",
+                            "title": "Ma vidéo", "description": "Ma vidéo",
+                            "image": "", "game": "", "viewers": "", "date": "",
+                            "live": False})
+verifier("une legende identique au titre n'est pas repetee",
+         not e4.description, str(e4.description))
+
+# Les dates arrivent sous quatre formes selon la plateforme.
+for brut, quoi in (("2026-09-04T09:00:00Z", "ISO 8601"),
+                   ("Wed, 04 Sep 2026 09:00:00 +0000", "RFC 822"),
+                   ("1788000000", "secondes")):
+    verifier(f"une date en {quoi} est comprise",
+             bot_mod.date_publication({"date": brut}) is not None, brut)
+verifier("une date illisible ne fait pas echouer l'annonce",
+         bot_mod.date_publication({"date": "hier soir"}) is None)
+verifier("une date absente non plus",
+         bot_mod.date_publication({}) is None)
+
+# Le test du dashboard doit montrer EXACTEMENT la meme chose.
+bloc_test = source[source.index("async def api_test_social"):]
+bloc_test = bloc_test[:bloc_test.index(chr(10) + "async def ", 10)]
+verifier("le test du dashboard emploie le meme embed",
+         "embed_annonce(guild, relay, publication" in bloc_test)
+verifier("et le meme bouton", "bouton_annonce(publication" in bloc_test)
+
+
 print(chr(10) + "--- Les messages d'annonce different d'un reseau a l'autre ---")
 
 messages = {c: rs.MESSAGES_DEFAUT[c] for c in ("x", "tiktok", "instagram", "twitch")}

@@ -29,6 +29,7 @@ seule chose qui garantisse « aucun doublon » : un titre peut etre
 reecrit, une vignette regeneree, une description traduite — un
 identifiant, non.
 """
+import html
 import json
 import re
 
@@ -208,6 +209,10 @@ def _publication(identifiant, **reste):
         "id": str(identifiant),
         "url": "", "title": "", "description": "", "image": "",
         "game": "", "viewers": "", "date": "", "live": False,
+        # L'auteur : son nom d'affichage, son avatar, le lien vers son
+        # profil. C'est ce qui fait la difference entre une annonce qui
+        # ressemble a quelque chose et une carte anonyme.
+        "author_name": "", "author_icon": "", "author_url": "",
     }
     publication.update({c: v for c, v in reste.items() if v is not None})
     return publication
@@ -254,6 +259,7 @@ def lire_x(source, compte=""):
         image = ""
         if medias and isinstance(medias[0], dict):
             image = str(medias[0].get("media_url_https") or "")
+        profil = contenu.get("user") or {}
         return _publication(
             identifiant,
             url=f"https://x.com/{auteur}/status/{identifiant}" if auteur else "",
@@ -261,6 +267,10 @@ def lire_x(source, compte=""):
             description=texte,
             image=image,
             date=str(contenu.get("created_at") or ""),
+            author_name=(f"{profil.get('name')} (@{auteur})"
+                         if profil.get("name") else (f"@{auteur}" if auteur else "")),
+            author_icon=str(profil.get("profile_image_url_https") or ""),
+            author_url=f"https://x.com/{auteur}" if auteur else "",
         )
     return None
 
@@ -297,6 +307,10 @@ def lire_x_compteur(source, compte=""):
         url=f"https://x.com/{nom}" if nom else "",
         title=f"Nouveau post de @{nom}" if nom else "Nouveau post",
         description="",
+        author_name=(f"{utilisateur.get('name')} (@{nom})"
+                     if utilisateur.get("name") else (f"@{nom}" if nom else "")),
+        author_icon=str(utilisateur.get("avatar_url") or ""),
+        author_url=f"https://x.com/{nom}" if nom else "",
     )
     publication["compteur"] = nombre
     return publication
@@ -354,13 +368,42 @@ def lire_tiktok_embed(page, compte=""):
     identifiant = str(video.get("id") or "")
     auteur = str(video.get("authorUniqueId") or compte or "")
     description = str(video.get("desc") or "")
+
+    # La meme page porte la fiche du createur : nom affiche et avatar.
+    # C'est ce qui separe une annonce qui ressemble a quelque chose
+    # d'une carte anonyme.
+    profil = chercher_clef(donnees, "userInfo") or {}
+    affiche = str(profil.get("nickname") or "")
     return _publication(
         identifiant,
         url=f"https://www.tiktok.com/@{auteur}/video/{identifiant}" if auteur else "",
         title=description[:120],
         description=description,
         image=str(video.get("coverUrl") or video.get("originCoverUrl") or ""),
+        author_name=(f"{affiche} (@{auteur})" if affiche and auteur
+                     else (affiche or (f"@{auteur}" if auteur else ""))),
+        author_icon=str(profil.get("avatarThumbUrl") or ""),
+        author_url=f"https://www.tiktok.com/@{auteur}" if auteur else "",
     )
+
+
+def chercher_clef(noeud, cible, profondeur=0):
+    """La premiere valeur portant ce nom, ou qu'elle soit dans l'arbre."""
+    if profondeur > 8:
+        return None
+    if isinstance(noeud, dict):
+        if cible in noeud:
+            return noeud[cible]
+        for valeur in noeud.values():
+            trouvee = chercher_clef(valeur, cible, profondeur + 1)
+            if trouvee is not None:
+                return trouvee
+    elif isinstance(noeud, list):
+        for valeur in noeud[:20]:
+            trouvee = chercher_clef(valeur, cible, profondeur + 1)
+            if trouvee is not None:
+                return trouvee
+    return None
 
 
 # ── Instagram : le compteur de publications ──────────────────────────
@@ -392,11 +435,24 @@ def lire_instagram_compteur(page, compte=""):
     if not brut:
         return None
     nombre = int(brut)
+    avatar = re.search(r'og:image"\s+content="([^"]+)"', page or "")
+    titre_og = re.search(r'og:title"\s+content="([^"]+)"', page or "")
+    nom = ""
+    if titre_og:
+        # « Nom (@compte) • Instagram photos and videos ». Le titre
+        # arrive avec ses entites HTML : « &#064; » pour l'arobase,
+        # « &#x2022; » pour la puce. Sans les decoder, le nom d'auteur
+        # s'affichait tel quel dans l'annonce — et la puce n'etant pas
+        # reconnue, la queue de phrase restait collee au nom.
+        nom = html.unescape(titre_og.group(1)).split("•")[0].strip()
     publication = _publication(
         f"ig:{nombre}",
         url=f"https://www.instagram.com/{compte}/" if compte else "",
         title=f"Nouvelle publication de @{compte}" if compte else "Nouvelle publication",
         description="",
+        author_name=nom or (f"@{compte}" if compte else ""),
+        author_icon=avatar.group(1) if avatar else "",
+        author_url=f"https://www.instagram.com/{compte}/" if compte else "",
     )
     publication["compteur"] = nombre
     return publication
@@ -510,9 +566,12 @@ def lire_flux(xml, compte=""):
 
     titre = _balise(bloc, "title")
     resume = _balise(bloc, "description") or _balise(bloc, "summary") or _balise(bloc, "content")
+    auteur = (_balise(bloc, "author") or _balise(bloc, "dc:creator")
+              or _balise(texte, "title") or compte)
     return _publication(
         identifiant, url=lien, title=titre[:120], description=resume,
-        image=image, date=_balise(bloc, "pubDate") or _balise(bloc, "updated"))
+        image=image, date=_balise(bloc, "pubDate") or _balise(bloc, "updated"),
+        author_name=auteur[:80], author_url=lien)
 
 
 # ── Twitch ───────────────────────────────────────────────────────────
@@ -544,16 +603,20 @@ def lire_twitch(source, compte=""):
     if isinstance(live.get("game"), dict):
         jeu = str(live["game"].get("displayName") or live["game"].get("name") or "")
     spectateurs = live.get("viewersCount")
+    affiche = str(utilisateur.get("displayName") or nom)
     return _publication(
         identifiant,
         url=f"https://www.twitch.tv/{nom}" if nom else "",
         title=str(live.get("title") or utilisateur.get("broadcastSettings", {}).get("title") or ""),
-        description=str(live.get("title") or ""),
+        description="",
         image=str(live.get("previewImageURL") or ""),
         game=jeu,
         viewers=str(spectateurs) if spectateurs not in (None, "") else "",
         date=str(live.get("createdAt") or ""),
         live=True,
+        author_name=affiche,
+        author_icon=str(utilisateur.get("profileImageURL") or ""),
+        author_url=f"https://www.twitch.tv/{nom}" if nom else "",
     )
 
 
