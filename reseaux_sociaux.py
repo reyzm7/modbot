@@ -130,6 +130,10 @@ MESSAGES_DEFAUT = {
     "instagram": "{compte} a publié sur Instagram 📸\n{lien}",
     "twitch": "🔴 {compte} est en live : {titre}\nOn joue à {jeu}\n{lien}",
     "youtube": "Nouvelle vidéo de {compte} ▶️\n{titre}\n{lien}",
+    # Un direct n'est pas une mise en ligne : « nouvelle vidéo » sous un
+    # live qui commence est faux, et personne ne se presse pour une
+    # vidéo déjà en ligne.
+    "youtube_live": "🔴 {compte} est en direct : {titre}\n{lien}",
     # Un flux : on ne sait pas de quel reseau il vient, mais on a son
     # titre — c'est plus parlant que le seul lien.
     "flux": "Du nouveau chez {compte} 📣\n{titre}\n{lien}",
@@ -144,16 +148,32 @@ NATURE = {
     "instagram": "Nouvelle publication",
     "twitch": "En live",
     "youtube": "Nouvelle vidéo",
+    "youtube_live": "En direct",
     "flux": "Nouvelle publication",
     "web": "Nouvelle publication",
 }
 
 
-def message_par_defaut(lien_ou_plateforme):
-    """Le message d'annonce propose pour ce lien."""
+def message_par_defaut(lien_ou_plateforme, direct=False):
+    """
+    Le message d'annonce propose pour ce lien.
+
+    `direct` distingue le live de la mise en ligne : sur YouTube, les
+    deux passent par la meme carte du dashboard, et « nouvelle vidéo »
+    sous un direct qui commence est faux.
+    """
     clef = (lien_ou_plateforme if lien_ou_plateforme in MESSAGES_DEFAUT
             else plateforme_du_lien(lien_ou_plateforme))
+    if direct and f"{clef}_live" in MESSAGES_DEFAUT:
+        clef = f"{clef}_live"
     return MESSAGES_DEFAUT.get(clef, MESSAGES_DEFAUT["web"])
+
+
+def nature_de(plateforme, direct=False):
+    """Le mot qui decrit la publication : « En direct », « Nouvelle vidéo »…"""
+    if direct and f"{plateforme}_live" in NATURE:
+        return NATURE[f"{plateforme}_live"]
+    return NATURE.get(plateforme, NATURE["web"])
 
 
 def rendre_message(modele, valeurs, taille=400):
@@ -525,6 +545,56 @@ def lire_instagram(source, compte=""):
         description=legende,
         image=str(noeud.get("display_url") or noeud.get("thumbnail_src") or ""),
         date=str(noeud.get("taken_at_timestamp") or ""),
+    )
+
+
+# ── YouTube : le direct ──────────────────────────────────────────────
+def lire_youtube_live(page, compte=""):
+    """
+    Le direct en cours d'une chaine, ou None si elle n'est pas en ligne.
+
+    Le flux RSS ne dit rien d'un direct : il liste les mises en ligne, et
+    un direct n'y entre qu'une fois termine, sans jamais dire qu'il l'est.
+    La page « /live » d'une chaine, elle, tranche : quand la chaine
+    diffuse, elle porte `isLive` et son adresse canonique designe la
+    video du direct ; sinon, cette adresse renvoie a la chaine.
+
+    L'empreinte est l'identifiant de la video du direct : il change a
+    chaque nouveau direct, jamais pendant.
+    """
+    texte = page or ""
+    if '"isLive":true' not in texte.replace(" ", ""):
+        return None
+    canonique = re.search(
+        r'<link rel="canonical" href="https://www\.youtube\.com/watch\?v='
+        r'([A-Za-z0-9_-]{11})"', texte)
+    if not canonique:
+        return None
+    identifiant = canonique.group(1)
+
+    def champ(motif, defaut=""):
+        trouve = re.search(motif, texte)
+        return trouve.group(1) if trouve else defaut
+
+    titre = html.unescape(champ(r'<meta name="title" content="([^"]{0,200})"'))
+    chaine = champ(r'"ownerChannelName"\s*:\s*"([^"]{1,80})"') or compte
+    chaine_id = champ(r'"channelId"\s*:\s*"(UC[A-Za-z0-9_-]{20,})"')
+    # `viewCount` compte toutes les vues depuis le debut ; c'est
+    # `originalViewCount` qui donne les spectateurs presents maintenant.
+    presents = champ(r'"originalViewCount"\s*:\s*"(\d+)"')
+    return _publication(
+        identifiant,
+        url=f"https://www.youtube.com/watch?v={identifiant}",
+        title=titre,
+        description="",
+        image=champ(r'<meta property="og:image" content="([^"]+)"')
+        or f"https://i.ytimg.com/vi/{identifiant}/maxresdefault.jpg",
+        viewers=presents,
+        date=champ(r'"startTimestamp"\s*:\s*"([^"]{10,40})"'),
+        live=True,
+        author_name=chaine,
+        author_url=(f"https://www.youtube.com/channel/{chaine_id}"
+                    if chaine_id else ""),
     )
 
 

@@ -6792,7 +6792,8 @@ async def api_test_social(request):
         }
 
     relay = {"link": link, "platform": libelle,
-             "message": payload.get("message") or rs.message_par_defaut(link)}
+             "message": payload.get("message") or rs.message_par_defaut(
+                 link, bool(publication.get("live")))}
     valeurs = valeurs_annonce(guild, relay, publication)
 
     # Exactement l'embed d'une vraie annonce : un test qui n'a pas la
@@ -10681,6 +10682,9 @@ X_SYNDICATION = ("https://syndication.twitter.com/srv/timeline-profile/"
 # tiers. La page du profil, elle, repond 403 a tout ce qui n'est pas un
 # navigateur — Googlebot compris.
 TIKTOK_EMBED = "https://www.tiktok.com/embed/@{}"
+# La page « /live » d'une chaine : quand elle diffuse, son adresse
+# canonique designe la video du direct ; sinon elle renvoie a la chaine.
+YOUTUBE_LIVE = "https://www.youtube.com/@{}/live"
 # FxTwitter : le service public que beaucoup d'outils utilisent pour
 # afficher un post X ailleurs. C'est le seul endroit qui donne encore le
 # nombre de posts d'un compte — le fil de syndication de X repond « Rate
@@ -10880,6 +10884,24 @@ async def relever_publication(session, lien):
         return rs.lire_twitch(corps, compte)
 
     elif plateforme == "youtube":
+        # Le DIRECT d'abord. Le flux RSS ne dit rien d'un live : il liste
+        # les mises en ligne, et un direct n'y entre qu'une fois termine,
+        # sans jamais dire qu'il l'etait. Une chaine qui se met en ligne
+        # serait donc restee muette jusqu'a la fin de son direct.
+        # Une chaine se donne de deux facons : « /@pseudo » ou
+        # « /channel/UC… ». La seconde n'a pas de pseudo, et
+        # « /@UC…/live » n'existe pas.
+        chaine_directe = re.search(r"/channel/(UC[A-Za-z0-9_-]{20,})", lien)
+        adresse_live = (f"https://www.youtube.com/channel/{chaine_directe.group(1)}/live"
+                        if chaine_directe else
+                        (YOUTUBE_LIVE.format(compte) if compte else ""))
+        page = await _texte_public(session, adresse_live,
+                                   {"Cookie": "SOCS=CAI"}) if adresse_live else ""
+        direct = rs.lire_youtube_live(page, compte) if page else None
+        if direct:
+            _reseau_succes(cle)
+            return direct
+
         ancien = await youtube_derniere_video(session, lien)
         if ancien:
             publication = {
@@ -10999,7 +11021,12 @@ def embed_annonce(guild, relay, publication, plateforme=None):
         publication.get("url") or relay.get("link"))
     libelle = clean_short_text(relay.get("platform"), plateforme, 40)
     emoji, couleur, _ = _social_platform_palette(libelle or plateforme)
-    nature = rs.NATURE.get(plateforme, rs.NATURE["web"])
+    direct = bool(publication.get("live"))
+    # Le point rouge se lit d'un coup d'oeil et vaut sur toutes les
+    # plateformes ; la couleur de la carte, elle, reste celle du reseau.
+    if direct:
+        emoji = "🔴"
+    nature = rs.nature_de(plateforme, direct)
     lien = publication.get("url") or str(relay.get("link") or "")
 
     # Un titre vide n'est pas permis sur un embed cliquable : on retombe
@@ -11167,7 +11194,8 @@ async def dashboard_social_loop():
                     # Mentions et message d'annonce voyagent ensemble dans
                     # le CONTENU : une mention placee dans l'embed s'affiche
                     # en bleu mais ne previent personne.
-                    modele = relay.get("message") or rs.message_par_defaut(link)
+                    modele = relay.get("message") or rs.message_par_defaut(
+                        link, bool(publication.get("live")))
                     annonce = rs.rendre_message(modele, valeurs)
                     corps = "\n".join(x for x in (contenu, annonce) if x)
 

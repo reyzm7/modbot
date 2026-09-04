@@ -513,6 +513,74 @@ verifier("un succes efface le recul", not bot_mod._reseau_en_recul("essai:compte
 bot_mod._reseaux_recul.clear()
 
 
+print(chr(10) + "--- YouTube : le direct ET la mise en ligne ---")
+
+# Le flux RSS ne dit rien d'un direct : il liste les mises en ligne, et
+# un live n'y entre qu'une fois termine, sans jamais dire qu'il l'etait.
+# Une chaine qui se mettait en direct restait donc muette jusqu'a la fin
+# de son live. La page « /live » d'une chaine, elle, tranche.
+
+page_live = ('<link rel="canonical" href="https://www.youtube.com/watch?v=rFZHOHl-L8A">'
+             '<meta name="title" content="lofi hip hop radio">'
+             '<meta property="og:image" content="https://i.ytimg.com/vi/rFZHOHl-L8A/max.jpg">'
+             '"isLive":true,"ownerChannelName":"Lofi Girl",'
+             '"channelId":"UCSJ4gkVC6NrvII8umztf0Ow",'
+             '"viewCount":"3986281","originalViewCount":"17668",'
+             '"startTimestamp":"2026-08-19T07:43:43+00:00"')
+direct = rs.lire_youtube_live(page_live, "LofiGirl")
+verifier("le direct est reconnu", direct and direct["id"] == "rFZHOHl-L8A",
+         str(direct and direct["id"]))
+verifier("il est marque comme direct", direct["live"] is True)
+verifier("le lien mene a la video du direct",
+         direct["url"] == "https://www.youtube.com/watch?v=rFZHOHl-L8A", direct["url"])
+verifier("le nom de la chaine est repris", direct["author_name"] == "Lofi Girl")
+# `viewCount` compte toutes les vues depuis le debut du direct ; ce sont
+# les spectateurs PRESENTS qu'on annonce.
+verifier("ce sont les spectateurs presents, pas les vues totales",
+         direct["viewers"] == "17668", direct["viewers"])
+
+# Une chaine qui ne diffuse pas : la page renvoie a la chaine, sans isLive.
+page_hors = ('<link rel="canonical" href="https://www.youtube.com/channel/UCX6O">'
+             '"ownerChannelName":"MrBeast"')
+verifier("hors direct, rien n'est annonce",
+         rs.lire_youtube_live(page_hors, "MrBeast") is None)
+# Une page qui porte isLive mais dont l'adresse canonique n'est pas une
+# video : rien a annoncer non plus.
+verifier("sans video canonique, rien non plus",
+         rs.lire_youtube_live('"isLive":true<link rel="canonical" href="x">') is None)
+
+# Un direct ne s'annonce pas comme une mise en ligne.
+verifier("le message d'un direct differe de celui d'une video",
+         rs.message_par_defaut("https://www.youtube.com/@x", direct=True)
+         != rs.message_par_defaut("https://www.youtube.com/@x"))
+verifier("et il parle de direct",
+         "direct" in rs.message_par_defaut("https://www.youtube.com/@x", direct=True).lower())
+verifier("la nature suit", rs.nature_de("youtube", True) == "En direct")
+verifier("et reste « Nouvelle vidéo » sinon",
+         rs.nature_de("youtube", False) == "Nouvelle vidéo")
+
+# Le direct passe AVANT le flux : sinon la chaine reste muette pendant
+# tout son live.
+releveur = source[source.index("async def relever_publication"):]
+releveur = releveur[:releveur.index(chr(10) + "def valeurs_annonce")]
+bloc_yt = releveur[releveur.index('plateforme == "youtube"'):]
+verifier("le direct est cherche avant le flux",
+         bloc_yt.index("lire_youtube_live") < bloc_yt.index("youtube_derniere_video"))
+# Une chaine se donne de deux facons : « /@pseudo » ou « /channel/UC… ».
+verifier("un lien /channel/ trouve aussi sa page live",
+         "/channel/(UC[A-Za-z0-9_-]{20,})" in bloc_yt)
+
+# Le point rouge : le signe universel d'un direct, sur toutes les
+# plateformes.
+e_live = bot_mod.embed_annonce(
+    type("G", (), {"id": 1, "name": "T"})(),
+    {"link": "https://www.youtube.com/@x", "platform": "YouTube"},
+    dict(direct))
+verifier("un direct porte le point rouge", e_live.title.startswith("🔴"), e_live.title[:8])
+verifier("et son bouton invite a le regarder",
+         bot_mod.bouton_annonce(direct).children[0].label == "Regarder le live")
+
+
 print(chr(10) + "--- Les images des annonces s'affichent vraiment ---")
 
 # Deux defauts trouves en chargeant CHAQUE adresse d'image renvoyee, au
