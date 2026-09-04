@@ -435,6 +435,9 @@ def lire_instagram_compteur(page, compte=""):
     if not brut:
         return None
     nombre = int(brut)
+    # L'adresse de l'avatar porte une signature dans ses parametres. Les
+    # « &amp; » du HTML doivent redevenir des « & », sinon le CDN repond
+    # « Bad URL hash » et l'annonce montre un cadre vide.
     avatar = re.search(r'og:image"\s+content="([^"]+)"', page or "")
     titre_og = re.search(r'og:title"\s+content="([^"]+)"', page or "")
     nom = ""
@@ -451,7 +454,7 @@ def lire_instagram_compteur(page, compte=""):
         title=f"Nouvelle publication de @{compte}" if compte else "Nouvelle publication",
         description="",
         author_name=nom or (f"@{compte}" if compte else ""),
-        author_icon=avatar.group(1) if avatar else "",
+        author_icon=html.unescape(avatar.group(1)) if avatar else "",
         author_url=f"https://www.instagram.com/{compte}/" if compte else "",
     )
     publication["compteur"] = nombre
@@ -603,13 +606,20 @@ def lire_twitch(source, compte=""):
     if isinstance(live.get("game"), dict):
         jeu = str(live["game"].get("displayName") or live["game"].get("name") or "")
     spectateurs = live.get("viewersCount")
+    # L'apercu du live arrive avec des GABARITS :
+    # « live_user_zerator-{width}x{height}.jpg ». Tel quel, il repond 404
+    # et l'annonce affichait un cadre vide a la place de l'image.
+    apercu = str(live.get("previewImageURL") or "")
+    if apercu:
+        apercu = apercu.replace("{width}", "1280").replace("{height}", "720")
+
     affiche = str(utilisateur.get("displayName") or nom)
     return _publication(
         identifiant,
         url=f"https://www.twitch.tv/{nom}" if nom else "",
         title=str(live.get("title") or utilisateur.get("broadcastSettings", {}).get("title") or ""),
         description="",
-        image=str(live.get("previewImageURL") or ""),
+        image=apercu,
         game=jeu,
         viewers=str(spectateurs) if spectateurs not in (None, "") else "",
         date=str(live.get("createdAt") or ""),

@@ -513,6 +513,43 @@ verifier("un succes efface le recul", not bot_mod._reseau_en_recul("essai:compte
 bot_mod._reseaux_recul.clear()
 
 
+print(chr(10) + "--- Les images des annonces s'affichent vraiment ---")
+
+# Deux defauts trouves en chargeant CHAQUE adresse d'image renvoyee, au
+# lieu de se contenter de verifier qu'elle n'est pas vide.
+
+# 1. Twitch livre son apercu avec des GABARITS de dimensions. Tel quel,
+#    il repond 404 et l'annonce affichait un cadre vide.
+twitch = json.dumps({"data": {"user": {"login": "zerator", "displayName": "ZeratoR",
+    "profileImageURL": "https://static-cdn.jtvnw.net/avatar.png",
+    "stream": {"id": "48000000000", "title": "Le stream", "viewersCount": 12,
+               "game": {"displayName": "ZEVENT"},
+               "previewImageURL":
+                   "https://static-cdn.jtvnw.net/previews-ttv/"
+                   "live_user_zerator-{width}x{height}.jpg"}}}})
+live = rs.lire_twitch(twitch, "zerator")
+verifier("les gabarits de dimensions sont remplaces",
+         "{width}" not in live["image"] and "{height}" not in live["image"],
+         live["image"][-34:])
+verifier("l'apercu garde une taille utilisable",
+         "1280x720" in live["image"], live["image"][-24:])
+
+# 2. L'adresse de l'avatar Instagram porte une signature dans ses
+#    parametres. Les « &amp; » du HTML doivent redevenir des « & », sinon
+#    le CDN repond « Bad URL hash » et le cadre reste vide.
+page_ig = ('<meta property="og:description" content="1 Followers, 2 Following, '
+           '30 Posts - Instagram">'
+           '<meta property="og:image" content="https://scontent.cdninstagram.com/'
+           'v/t51/photo.jpg?stp=dst&amp;_nc_cat=1&amp;oh=abc&amp;oe=def">'
+           '<meta property="og:title" content="Nom (&#064;compte) &#x2022; Photos">')
+ig = rs.lire_instagram_compteur(page_ig, "compte")
+verifier("les entites de l'adresse sont decodees",
+         "&amp;" not in ig["author_icon"] and "&_nc_cat=1" in ig["author_icon"],
+         ig["author_icon"][-40:])
+verifier("le nom d'auteur est decode et coupe a la puce",
+         ig["author_name"] == "Nom (@compte)", ig["author_name"])
+
+
 print(chr(10) + "--- La forme de l'annonce ---")
 
 # Ce que les autres bots font et que nous ne faisions pas : le titre de
