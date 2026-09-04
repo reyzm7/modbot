@@ -4689,52 +4689,114 @@ async def _telecharger_image(url):
         return None
 
 
+# Les emojis de l'application, gardes en memoire entre deux
+# publications : les relire coute un appel a Discord.
+_emojis_application = {}
+
+
+def nom_emoji_image(gid, index, empreinte):
+    """
+    Le nom de l'emoji d'une option.
+
+    Il porte le serveur, le rang de l'option et l'empreinte de l'IMAGE.
+    Le serveur, parce qu'un emoji d'application est partage par tous les
+    serveurs ; l'empreinte, parce que sans elle le premier emoji du bon
+    nom etait reutilise tel quel, et changer l'image ne changeait rien a
+    l'ecran.
+
+    Discord limite un nom d'emoji a 32 caracteres. Ecrire l'identifiant
+    du serveur en clair — dix-neuf chiffres — ne laissait plus la place
+    a l'empreinte : la coupe l'emportait, tous les noms devenaient
+    identiques, et le bug qu'on vient de corriger revenait par la
+    fenetre. On resume donc serveur et rang en six caracteres.
+    """
+    lieu = hashlib.sha256(f"{gid}:{index}".encode("utf-8")).hexdigest()[:6]
+    nom = f"mbt_{lieu}_{empreinte}"
+    assert len(nom) <= 32, nom
+    return nom
+
+
+async def _emojis_du_bot(rafraichir=False):
+    """Les emojis de l'application, par nom."""
+    if _emojis_application and not rafraichir:
+        return _emojis_application
+    try:
+        emojis = await bot.fetch_application_emojis()
+    except Exception as ex:
+        print(f"emojis d'application illisibles : {ex}")
+        return _emojis_application
+    _emojis_application.clear()
+    for emoji in emojis:
+        _emojis_application[emoji.name] = emoji
+    return _emojis_application
+
+
 async def image_en_emoji(guild, url, index):
     """
-    Transforme une image en emoji personnalise du serveur.
+    Transforme une image en emoji utilisable sur un composant.
 
-    Retourne la forme `<:nom:id>` utilisable sur un composant, ou "" si
-    l'operation echoue. Chaque echec est silencieux du point de vue du
-    membre : l'option garde alors son emoji Unicode, ou son libelle.
+    L'emoji appartient a l'APPLICATION, pas au serveur. Un emoji de
+    serveur exigeait la permission « Gerer les expressions », que ModBot
+    n'a presque jamais : elle ne fait partie d'aucun preset d'invitation
+    et personne ne la coche a la main. La fabrication echouait donc en
+    silence et l'option se retrouvait sans symbole — c'est la raison pour
+    laquelle l'image ne s'affichait pas.
+
+    Un emoji d'application fonctionne dans tous les serveurs, sans
+    permission, et n'occupe aucun des cinquante emplacements du serveur.
+
+    Retourne la forme `<:nom:id>`, ou "" si rien n'a pu etre fabrique.
     """
     if not url or not guild:
-        return ""
-    if not guild.me.guild_permissions.manage_emojis:
         return ""
 
     donnees = await _telecharger_image(url)
     if not donnees:
         return ""
 
-    # Le nom porte l'empreinte de l'IMAGE. L'ancien nom ne portait que le
-    # rang de l'option : le premier emoji trouve a ce nom etait reutilise
-    # tel quel, et changer l'image ne changeait donc rien a l'ecran.
     empreinte = hashlib.sha256(donnees).hexdigest()[:10]
-    nom = f"{EMOJI_TICKET_PREFIXE}{index}_{empreinte}"
+    nom = nom_emoji_image(guild.id, index, empreinte)
 
-    prefixe_rang = f"{EMOJI_TICKET_PREFIXE}{index}_"
-    for emoji in guild.emojis:
-        if emoji.name == nom:
-            return str(emoji)
+    connus = await _emojis_du_bot()
+    if nom in connus:
+        return str(connus[nom])
 
-    # Les emojis de la meme option issus d'une image precedente n'ont plus
-    # de raison d'occuper un emplacement.
-    for emoji in list(guild.emojis):
-        if emoji.name.startswith(prefixe_rang) or emoji.name == f"{EMOJI_TICKET_PREFIXE}{index}":
+    # Une image precedente pour la meme option n'a plus de raison
+    # d'occuper une place. On relit d'abord : la liste en memoire peut
+    # dater d'avant un redemarrage.
+    connus = await _emojis_du_bot(rafraichir=True)
+    if nom in connus:
+        return str(connus[nom])
+
+    prefixe = nom_emoji_image(guild.id, index, "")
+    for ancien_nom, emoji in list(connus.items()):
+        if ancien_nom.startswith(prefixe):
             try:
-                await emoji.delete(reason="[ModBot] Image d'option remplacee")
+                await emoji.delete()
+                connus.pop(ancien_nom, None)
             except Exception:
                 pass
 
+    try:
+        emoji = await bot.create_application_emoji(name=nom, image=donnees)
+        connus[nom] = emoji
+        return str(emoji)
+    except Exception as ex:
+        print(f"emoji d'application {guild.id}/{index} : {type(ex).__name__}: {ex}")
+
+    # Dernier recours : l'emoji du serveur, si ModBot a la permission.
+    if not guild.me.guild_permissions.manage_emojis:
+        return ""
+    for emoji in guild.emojis:
+        if emoji.name == nom:
+            return str(emoji)
     try:
         emoji = await guild.create_custom_emoji(
             name=nom, image=donnees,
             reason="[ModBot] Image d'option de ticket")
         return str(emoji)
-    except discord.Forbidden:
-        return ""
-    except discord.HTTPException as ex:
-        print(f"image_en_emoji {guild.id}: {ex}")
+    except Exception as ex:
+        print(f"emoji de serveur {guild.id}: {ex}")
         return ""
 
 
@@ -4747,7 +4809,7 @@ async def preparer_emojis_ticket(guild):
     chemin de rendu.
     """
     questions = get_ticket_questions(guild.id)
-    # Une image d'option devient un emoji du serveur : c'est du premium.
+    # Une image d'option devient un emoji : c'est du premium.
     # Les options gardent leur image enregistree, elle redeviendra un
     # emoji au prochain « publier » une fois l'abonnement repris.
     if not est_premium(guild.id):
@@ -6772,6 +6834,214 @@ async def api_test_social(request):
 # ════════════════════════════════════════════════
 #  API — LOGS, SECURITE, SAUVEGARDES
 # ════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════
+#  RELAIS ENTRANT — l'automate previent ModBot, pas l'inverse
+# ══════════════════════════════════════════════════════════════════════
+#
+# Le jeton EST l'authentification : il n'y a pas de session derriere un
+# automate. Il ne donne qu'un seul pouvoir — publier dans le salon deja
+# choisi pour ce relais, avec les mentions deja autorisees. Il ne permet
+# ni de lire, ni de changer un reglage, ni de viser un autre salon.
+
+
+def jeton_relais(gid, creer=False):
+    """Le jeton entrant d'un serveur. `creer` en fabrique un s'il manque."""
+    cfg = get_cfg(gid)
+    jeton = str(cfg.get("social_hook_token") or "")
+    if not jeton and creer:
+        jeton = secrets.token_urlsafe(24)
+        cfg["social_hook_token"] = jeton
+        set_cfg(gid, cfg)
+    return jeton
+
+
+def serveur_du_jeton(jeton):
+    """Le serveur auquel appartient ce jeton, ou None."""
+    jeton = str(jeton or "").strip()
+    # Un jeton court serait devinable ; on refuse avant de chercher.
+    if len(jeton) < 20:
+        return None
+    for guild in list(bot.guilds):
+        connu = str(get_cfg(guild.id).get("social_hook_token") or "")
+        # Comparaison a temps constant : une comparaison ordinaire laisse
+        # deviner le jeton caractere par caractere.
+        if connu and hmac.compare_digest(connu, jeton):
+            return guild
+    return None
+
+
+def relais_vise(guild, plateforme, lien=""):
+    """
+    Le relais que cette poussee concerne.
+
+    On cherche d'abord par LIEN — deux comptes du meme reseau peuvent
+    etre suivis — puis par nom de plateforme.
+    """
+    relais = get_cfg(guild.id).get("social_relays")
+    if not isinstance(relais, list):
+        return None
+    lien = str(lien or "").strip().lower().rstrip("/")
+    if lien:
+        for relay in relais:
+            if not isinstance(relay, dict):
+                continue
+            if str(relay.get("link") or "").strip().lower().rstrip("/") == lien:
+                return relay
+    voulu = str(plateforme or "").strip().lower()
+    for relay in relais:
+        if not isinstance(relay, dict):
+            continue
+        nom = str(relay.get("platform") or "").strip().lower()
+        if voulu and (voulu in nom or nom in voulu):
+            return relay
+    return None
+
+
+async def api_socials_push(request):
+    """
+    Publie une annonce poussee par un automate exterieur.
+
+    Corps attendu :
+        {"token": "...", "platform": "TikTok", "id": "7300…",
+         "url": "https://…", "title": "…", "description": "…",
+         "image": "https://…"}
+
+    `id` est ce qui empeche les doublons. Sans lui, on retombe sur l'URL
+    — deux poussees de la meme publication n'en font qu'une.
+    """
+    charge = await request.json() if request.can_read_body else {}
+    if not isinstance(charge, dict):
+        raise web.HTTPBadRequest(text="Corps de requete invalide.")
+
+    guild = serveur_du_jeton(charge.get("token"))
+    if guild is None:
+        # Meme reponse pour un jeton inconnu et un jeton d'un serveur ou
+        # ModBot n'est plus : ne rien apprendre a qui essaie.
+        raise web.HTTPUnauthorized(text="Jeton de relais inconnu.")
+    if not est_premium(guild.id):
+        raise web.HTTPForbidden(text="Les relais reseaux sont une fonction premium.")
+
+    plateforme = clean_short_text(charge.get("platform"), "", 40)
+    lien_publication = clean_short_text(charge.get("url"), "", 500)
+    relay = relais_vise(guild, plateforme, charge.get("link") or "")
+    if relay is None:
+        raise web.HTTPNotFound(
+            text="Aucun relais ne correspond a cette plateforme sur ce serveur.")
+    if not relay.get("enabled"):
+        raise web.HTTPForbidden(text="Ce relais est desactive.")
+
+    channel = salon_du_serveur(guild, relay.get("channel_id"))
+    if channel is None:
+        raise web.HTTPBadRequest(text="Le salon de ce relais n'existe plus.")
+    if not channel.permissions_for(guild.me).send_messages:
+        raise web.HTTPForbidden(text="ModBot ne peut pas ecrire dans ce salon.")
+
+    identifiant = clean_short_text(charge.get("id"), "", 200) or lien_publication
+    if not identifiant:
+        raise web.HTTPBadRequest(
+            text="Il faut un « id » ou une « url » : sans quoi on ne peut pas "
+                 "distinguer deux poussees de la meme publication.")
+
+    publication = {
+        "id": identifiant,
+        "url": lien_publication or str(relay.get("link") or ""),
+        "title": clean_short_text(charge.get("title"), "", 200),
+        "description": clean_short_text(charge.get("description"), "", 2000),
+        # Une image doit etre une URL : un « data: » de plusieurs
+        # megaoctets pousse par un automate n'a rien a faire ici.
+        "image": (lambda u: u if u.startswith(("http://", "https://")) else "")(
+            clean_short_text(charge.get("image"), "", 500)),
+        "game": clean_short_text(charge.get("game"), "", 100),
+        "viewers": clean_short_text(charge.get("viewers"), "", 20),
+        "date": clean_short_text(charge.get("date"), "", 60),
+        "live": bool(charge.get("live")),
+    }
+
+    cfg = get_cfg(guild.id)
+    etats = cfg.get("social_relays_state")
+    if not isinstance(etats, dict):
+        etats = {}
+    cle = cle_relais(relay)
+    annoncer, raison = rs.doit_annoncer(etats.get(cle), publication)
+    # Une poussee est un evenement, pas un relevé : le premier appel doit
+    # etre annonce. C'est la difference avec la veille, ou le premier
+    # relevé ne fait qu'enregistrer l'existant.
+    if not annoncer and raison == "premier relevé":
+        annoncer, raison = True, ""
+    if not annoncer:
+        etats[cle] = rs.memoriser(etats.get(cle), publication,
+                                  now().timestamp(), False)
+        cfg["social_relays_state"] = etats
+        set_cfg(guild.id, cfg)
+        return api_json({"ok": True, "annonce": False, "raison": raison},
+                        request=request)
+
+    plateforme_lien = rs.plateforme_du_lien(publication["url"] or relay.get("link"))
+    emoji, couleur, _ = _social_platform_palette(plateforme or plateforme_lien)
+    nature = rs.NATURE.get(plateforme_lien, rs.NATURE["web"])
+    valeurs = valeurs_annonce(guild, relay, publication)
+
+    embed = EG(f"{emoji} {nature} — {valeurs['compte'] or plateforme}",
+               publication["description"][:2000] or None, couleur, guild.id)
+    if publication["title"]:
+        embed.add_field(name="Titre", value=publication["title"][:1024], inline=False)
+    if publication["image"]:
+        try:
+            embed.set_image(url=publication["image"])
+        except Exception:
+            pass
+
+    view = None
+    if publication["url"]:
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(
+            label="Regarder le live" if publication["live"] else "Ouvrir",
+            url=publication["url"]))
+
+    contenu, autorisees = mentions_relais(guild, relay)
+    modele = relay.get("message") or rs.message_par_defaut(
+        publication["url"] or str(relay.get("link") or ""))
+    annonce = rs.rendre_message(modele, valeurs)
+    corps = "\n".join(x for x in (contenu, annonce) if x)
+
+    await channel.send(content=corps or None, embed=embed, view=view,
+                       allowed_mentions=autorisees)
+    etats[cle] = rs.memoriser(etats.get(cle), publication, now().timestamp(), True)
+    cfg["social_relays_state"] = etats
+    set_cfg(guild.id, cfg)
+    dashboard_log("social_push", guild, "relais entrant",
+                  f"{plateforme or plateforme_lien} -> #{channel.name}")
+    return api_json({"ok": True, "annonce": True,
+                     "channel_id": str(channel.id)}, request=request)
+
+
+async def api_socials_hook(request):
+    """Le jeton entrant du serveur, et de quoi le renouveler."""
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    if request.method == "POST":
+        # Renouveler : l'ancien jeton cesse de fonctionner sur-le-champ.
+        cfg = get_cfg(guild.id)
+        cfg["social_hook_token"] = secrets.token_urlsafe(24)
+        set_cfg(guild.id, cfg)
+        dashboard_log("social_hook_reset", guild, identity.get("username"),
+                      "Jeton de relais entrant renouvele")
+    jeton = jeton_relais(guild.id, creer=True)
+    return api_json({"ok": True, "token": jeton,
+                     "url": f"{public_base_url(request)}/api/socials/push"},
+                    request=request)
+
+
+def public_base_url(request):
+    """L'adresse publique du bot, telle qu'un automate doit l'appeler."""
+    publique = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if publique:
+        return publique
+    scheme = request.headers.get("X-Forwarded-Proto") or request.scheme
+    hote = request.headers.get("X-Forwarded-Host") or request.host
+    return f"{scheme}://{hote}" if hote else ""
+
 
 async def api_guild_logs(request):
     identity = await api_identity(request)
@@ -10181,6 +10451,8 @@ async def start_dashboard_api():
     app.router.add_delete("/api/admin/admins/{user_id}", api_admin_admin_remove)
     app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
     app.router.add_post("/api/guilds/{guild_id}/socials/test", api_test_social)
+    app.router.add_route("*", "/api/guilds/{guild_id}/socials/hook", api_socials_hook)
+    app.router.add_post("/api/socials/push", api_socials_push)
 
     # Administration
     app.router.add_get("/api/admin/stats", api_admin_stats)
