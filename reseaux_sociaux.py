@@ -270,6 +270,100 @@ _TIKTOK_BLOC = re.compile(
     r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
     re.S)
 
+# La page d'INTEGRATION, celle que TikTok sert aux sites qui affichent un
+# createur. Elle n'est pas protegee — c'est tout son interet : elle est
+# faite pour etre chargee par des tiers. La page du profil, elle, repond
+# 403 a tout ce qui n'est pas un navigateur, y compris a Googlebot.
+_TIKTOK_EMBED = re.compile(
+    r'<script[^>]+id="__FRONTITY_CONNECT_STATE__"[^>]*>(.*?)</script>', re.S)
+
+
+def lire_tiktok_embed(page, compte=""):
+    """
+    Derniere video d'un createur, depuis sa page d'integration.
+
+    Le JSON s'y trouve sous `source.data["/embed/@compte"].videoList`.
+    On ne suppose pas le chemin : on descend chercher la premiere
+    `videoList` rencontree, parce qu'il porte le nom du compte et que
+    TikTok le reecrit de temps a autre.
+    """
+    trouve = _TIKTOK_EMBED.search(page or "")
+    donnees = _charger(trouve.group(1)) if trouve else None
+    if donnees is None:
+        return None
+
+    def chercher(noeud, profondeur=0):
+        if profondeur > 8:
+            return None
+        if isinstance(noeud, dict):
+            liste = noeud.get("videoList")
+            if isinstance(liste, list) and liste:
+                return liste
+            for valeur in noeud.values():
+                trouvee = chercher(valeur, profondeur + 1)
+                if trouvee:
+                    return trouvee
+        elif isinstance(noeud, list):
+            for valeur in noeud[:20]:
+                trouvee = chercher(valeur, profondeur + 1)
+                if trouvee:
+                    return trouvee
+        return None
+
+    videos = chercher(donnees)
+    if not videos or not isinstance(videos[0], dict):
+        return None
+    video = videos[0]
+    identifiant = str(video.get("id") or "")
+    auteur = str(video.get("authorUniqueId") or compte or "")
+    description = str(video.get("desc") or "")
+    return _publication(
+        identifiant,
+        url=f"https://www.tiktok.com/@{auteur}/video/{identifiant}" if auteur else "",
+        title=description[:120],
+        description=description,
+        image=str(video.get("coverUrl") or video.get("originCoverUrl") or ""),
+    )
+
+
+# ── Instagram : le compteur de publications ──────────────────────────
+_IG_COMPTE = re.compile(
+    r'og:description"\s+content="[^"]*?([\d\s,\. ]+)\s*(?:Posts|posts|publications)',
+    re.I)
+
+
+def lire_instagram_compteur(page, compte=""):
+    """
+    Le NOMBRE de publications d'un profil, lu dans sa description.
+
+    Instagram ne laisse plus rien passer : ni son API web (401), ni sa
+    page rendue (aucun identifiant dedans), ni ses miroirs (403). Il
+    reste une chose que la page donne a tout le monde, parce que les
+    moteurs de recherche en ont besoin : « 8 579 Posts ».
+
+    Ce n'est pas l'identifiant d'une publication — on ne peut donc pas
+    lier la publication elle-meme, seulement le profil. Mais le compteur
+    monte quand une publication parait, et c'est tout ce qu'il faut pour
+    prevenir. Le champ `compteur` dit a `doit_annoncer` de comparer des
+    nombres plutot que des identifiants : une publication supprimee fait
+    BAISSER le compteur, et une baisse n'est pas une nouveaute.
+    """
+    trouve = _IG_COMPTE.search(page or "")
+    if not trouve:
+        return None
+    brut = re.sub(r"[^\d]", "", trouve.group(1))
+    if not brut:
+        return None
+    nombre = int(brut)
+    publication = _publication(
+        f"ig:{nombre}",
+        url=f"https://www.instagram.com/{compte}/" if compte else "",
+        title=f"Nouvelle publication de @{compte}" if compte else "Nouvelle publication",
+        description="",
+    )
+    publication["compteur"] = nombre
+    return publication
+
 
 def lire_tiktok(page, compte=""):
     """Derniere video d'un profil, depuis le JSON embarque dans la page."""
@@ -450,6 +544,22 @@ def doit_annoncer(etat, publication):
         # activer un relais republierait le dernier post d'il y a six
         # mois.
         return False, "premier relevé"
+
+    # Certaines plateformes ne donnent pas d'identifiant, seulement un
+    # NOMBRE de publications — Instagram n'expose plus que cela. On
+    # compare alors des nombres : seule une hausse est une nouveaute.
+    # Comparer des identifiants ferait taire le relais apres une
+    # suppression suivie d'une publication, puisque le compteur
+    # repasserait par une valeur deja vue.
+    if publication.get("compteur") is not None:
+        ancien = etat.get("compteur")
+        if ancien is None:
+            return False, "premier relevé"
+        if publication["compteur"] > ancien:
+            return True, ""
+        if publication["compteur"] < ancien:
+            return False, "publication supprimee"
+        return False, "rien de neuf"
     if publication["id"] == etat.get("id"):
         return False, "rien de neuf"
     if publication["id"] in (etat.get("vus") or []):
@@ -462,10 +572,13 @@ def memoriser(etat, publication, horodatage, annonce):
     vus = list((etat or {}).get("vus") or [])
     if publication["id"] not in vus:
         vus.append(publication["id"])
-    return {
+    nouvel_etat = {
         "id": publication["id"],
         "url": publication.get("url", ""),
         "title": publication.get("title", ""),
         "vus": vus[-IDENTIFIANTS_RETENUS:],
         "annonce_le": horodatage if annonce else float((etat or {}).get("annonce_le") or 0),
     }
+    if publication.get("compteur") is not None:
+        nouvel_etat["compteur"] = publication["compteur"]
+    return nouvel_etat

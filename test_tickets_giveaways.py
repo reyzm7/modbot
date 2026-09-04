@@ -23,7 +23,6 @@ Lancement, depuis le dossier du bot :
     python test_tickets_giveaways.py
 """
 import asyncio
-import json
 import importlib.util
 import os
 import sys
@@ -38,8 +37,6 @@ spec = importlib.util.spec_from_file_location("botmod", "bot.py")
 bot_mod = importlib.util.module_from_spec(spec)
 sys.modules["botmod"] = bot_mod
 spec.loader.exec_module(bot_mod)
-
-from aiohttp import web
 
 resultats = []
 
@@ -206,151 +203,18 @@ for chemin in chemins:
         site = open(chemin, encoding="utf-8").read()
         break
 if site and "data-giveaway-archive" in site:
-    verifier("le bouton Archiver existe", "data-giveaway-archive>" in site)
+    verifier("le bouton Archiver existe", "data-giveaway-archive" in site)
+    # Il ne s'affichait que sur un tirage deja termine — donc jamais,
+    # tant qu'aucun ne l'etait. Un bouton qu'on ne voit pas n'existe pas.
+    verifier("il est visible meme sur un tirage en cours",
+             "${!g.archived ? `<button" in site)
+    verifier("mais desactive, avec la raison en infobulle",
+             'g.ended ? "" : `disabled title=' in site)
     verifier("et le bouton inverse", "data-giveaway-unarchive>" in site)
     verifier("les archives sortent de la liste par defaut",
              "archivesVisibles ? giveawayList" in site)
 else:
     print("  (script.js a jour introuvable : section site ignoree)")
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  5. Le relais entrant : l'automate previent, ModBot annonce
-#
-#  Aucune route publique ne donne les publications d'un compte TikTok ou
-#  Instagram depuis un serveur — mesure faite : page de verification,
-#  401, 403 selon la porte essayee. On renverse donc le sens.
-# ══════════════════════════════════════════════════════════════════════
-print(chr(10) + "--- Le relais entrant ---")
-
-envoyes = []
-
-
-class FauxSalonH:
-    id = 4242
-    name = "annonces"
-
-    def permissions_for(self, membre):
-        return type("P", (), {"send_messages": True})()
-
-    async def send(self, **kwargs):
-        envoyes.append(kwargs)
-
-
-class FauxMoi:
-    guild_permissions = type("P", (), {"send_messages": True})()
-
-
-class FauxGuildH:
-    id = int(GID)
-    name = "Serveur Test"
-    me = FauxMoi()
-
-    def get_channel(self, cid):
-        return FauxSalonH() if int(cid) == 4242 else None
-
-    def get_thread(self, cid):
-        return None
-
-    def get_role(self, rid):
-        return None
-
-
-GUILD_H = FauxGuildH()
-bot_mod.bot = type("B", (), {"guilds": [GUILD_H]})()
-bot_mod.est_premium = lambda gid: True
-
-configs[GID] = {
-    "social_relays": [{
-        "platform": "TikTok", "link": "https://www.tiktok.com/@moncompte",
-        "channel_id": "4242", "enabled": True,
-        "message": "Nouvelle vidéo de {account} 🎵" + chr(10) + "{link}",
-        "ping_roles": [], "ping_everyone": False,
-    }],
-}
-
-jeton = bot_mod.jeton_relais(GID, creer=True)
-verifier("un jeton est fabrique", len(jeton) >= 20, str(len(jeton)))
-verifier("il retrouve son serveur", bot_mod.serveur_du_jeton(jeton) is GUILD_H)
-verifier("un jeton inconnu ne retrouve rien",
-         bot_mod.serveur_du_jeton("x" * 30) is None)
-verifier("un jeton trop court est refuse avant toute recherche",
-         bot_mod.serveur_du_jeton("court") is None)
-
-
-class FauxRequeteH:
-    def __init__(self, corps):
-        self._corps = corps
-        self.match_info = {}
-        self.headers = {}
-        self.query = {}
-        self.method = "POST"
-        self.path = "/api/socials/push"
-
-    @property
-    def can_read_body(self):
-        return True
-
-    async def json(self):
-        return self._corps
-
-
-def pousser(corps):
-    async def executer():
-        try:
-            reponse = await bot_mod.api_socials_push(FauxRequeteH(corps))
-        except web.HTTPException as err:
-            return err.status, err.text
-        return reponse.status, json.loads(reponse.body.decode("utf-8"))
-    return asyncio.run(executer())
-
-
-statut, corps = pousser({"token": jeton, "platform": "TikTok",
-                         "id": "7300000000000000000",
-                         "url": "https://www.tiktok.com/@moncompte/video/7300000000000000000",
-                         "title": "Ma vidéo"})
-verifier("une poussee valide annonce", statut == 200 and corps.get("annonce"),
-         str(corps))
-verifier("le message de l'utilisateur est employe",
-         envoyes and "Nouvelle vidéo de moncompte" in (envoyes[-1].get("content") or ""),
-         repr(envoyes[-1].get("content") if envoyes else None))
-
-# La meme poussee deux fois : une seule annonce.
-avant = len(envoyes)
-statut, corps = pousser({"token": jeton, "platform": "TikTok",
-                         "id": "7300000000000000000",
-                         "url": "https://www.tiktok.com/@moncompte/video/7300000000000000000"})
-verifier("la meme publication poussee deux fois n'annonce qu'une fois",
-         statut == 200 and not corps.get("annonce") and len(envoyes) == avant,
-         str(corps))
-
-statut, corps = pousser({"token": jeton, "platform": "TikTok",
-                         "id": "7300000000000000001", "url": "https://x/2"})
-verifier("une publication suivante est annoncee", corps.get("annonce") is True)
-
-statut, _ = pousser({"token": "faux" * 10, "platform": "TikTok", "id": "1"})
-verifier("un jeton invalide est refuse", statut == 401, str(statut))
-statut, _ = pousser({"token": jeton, "platform": "Reseau inconnu", "id": "1"})
-verifier("une plateforme sans relais est refusee", statut == 404, str(statut))
-statut, _ = pousser({"token": jeton, "platform": "TikTok"})
-verifier("sans id ni url, on refuse plutot que d'annoncer en double",
-         statut == 400, str(statut))
-
-# Une image doit etre une URL : un « data: » de plusieurs megaoctets
-# pousse par un automate n'a rien a faire dans un embed.
-envoyes.clear()
-pousser({"token": jeton, "platform": "TikTok", "id": "7300000000000000002",
-         "url": "https://x/3", "image": "data:image/png;base64,AAAA"})
-embed = envoyes[-1].get("embed") if envoyes else None
-verifier("une image « data: » est ecartee",
-         embed is not None and not getattr(embed, "image", None).url,
-         str(getattr(getattr(embed, "image", None), "url", None)))
-
-# Renouveler coupe l'ancien jeton.
-ancien = jeton
-configs[GID]["social_hook_token"] = "autre-jeton-tres-long-et-different"
-verifier("l'ancien jeton ne marche plus apres renouvellement",
-         bot_mod.serveur_du_jeton(ancien) is None)
 
 
 # ══════════════════════════════════════════════════════════════════════

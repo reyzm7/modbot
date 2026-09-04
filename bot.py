@@ -6835,214 +6835,6 @@ async def api_test_social(request):
 #  API — LOGS, SECURITE, SAUVEGARDES
 # ════════════════════════════════════════════════
 
-# ══════════════════════════════════════════════════════════════════════
-#  RELAIS ENTRANT — l'automate previent ModBot, pas l'inverse
-# ══════════════════════════════════════════════════════════════════════
-#
-# Le jeton EST l'authentification : il n'y a pas de session derriere un
-# automate. Il ne donne qu'un seul pouvoir — publier dans le salon deja
-# choisi pour ce relais, avec les mentions deja autorisees. Il ne permet
-# ni de lire, ni de changer un reglage, ni de viser un autre salon.
-
-
-def jeton_relais(gid, creer=False):
-    """Le jeton entrant d'un serveur. `creer` en fabrique un s'il manque."""
-    cfg = get_cfg(gid)
-    jeton = str(cfg.get("social_hook_token") or "")
-    if not jeton and creer:
-        jeton = secrets.token_urlsafe(24)
-        cfg["social_hook_token"] = jeton
-        set_cfg(gid, cfg)
-    return jeton
-
-
-def serveur_du_jeton(jeton):
-    """Le serveur auquel appartient ce jeton, ou None."""
-    jeton = str(jeton or "").strip()
-    # Un jeton court serait devinable ; on refuse avant de chercher.
-    if len(jeton) < 20:
-        return None
-    for guild in list(bot.guilds):
-        connu = str(get_cfg(guild.id).get("social_hook_token") or "")
-        # Comparaison a temps constant : une comparaison ordinaire laisse
-        # deviner le jeton caractere par caractere.
-        if connu and hmac.compare_digest(connu, jeton):
-            return guild
-    return None
-
-
-def relais_vise(guild, plateforme, lien=""):
-    """
-    Le relais que cette poussee concerne.
-
-    On cherche d'abord par LIEN — deux comptes du meme reseau peuvent
-    etre suivis — puis par nom de plateforme.
-    """
-    relais = get_cfg(guild.id).get("social_relays")
-    if not isinstance(relais, list):
-        return None
-    lien = str(lien or "").strip().lower().rstrip("/")
-    if lien:
-        for relay in relais:
-            if not isinstance(relay, dict):
-                continue
-            if str(relay.get("link") or "").strip().lower().rstrip("/") == lien:
-                return relay
-    voulu = str(plateforme or "").strip().lower()
-    for relay in relais:
-        if not isinstance(relay, dict):
-            continue
-        nom = str(relay.get("platform") or "").strip().lower()
-        if voulu and (voulu in nom or nom in voulu):
-            return relay
-    return None
-
-
-async def api_socials_push(request):
-    """
-    Publie une annonce poussee par un automate exterieur.
-
-    Corps attendu :
-        {"token": "...", "platform": "TikTok", "id": "7300…",
-         "url": "https://…", "title": "…", "description": "…",
-         "image": "https://…"}
-
-    `id` est ce qui empeche les doublons. Sans lui, on retombe sur l'URL
-    — deux poussees de la meme publication n'en font qu'une.
-    """
-    charge = await request.json() if request.can_read_body else {}
-    if not isinstance(charge, dict):
-        raise web.HTTPBadRequest(text="Corps de requete invalide.")
-
-    guild = serveur_du_jeton(charge.get("token"))
-    if guild is None:
-        # Meme reponse pour un jeton inconnu et un jeton d'un serveur ou
-        # ModBot n'est plus : ne rien apprendre a qui essaie.
-        raise web.HTTPUnauthorized(text="Jeton de relais inconnu.")
-    if not est_premium(guild.id):
-        raise web.HTTPForbidden(text="Les relais reseaux sont une fonction premium.")
-
-    plateforme = clean_short_text(charge.get("platform"), "", 40)
-    lien_publication = clean_short_text(charge.get("url"), "", 500)
-    relay = relais_vise(guild, plateforme, charge.get("link") or "")
-    if relay is None:
-        raise web.HTTPNotFound(
-            text="Aucun relais ne correspond a cette plateforme sur ce serveur.")
-    if not relay.get("enabled"):
-        raise web.HTTPForbidden(text="Ce relais est desactive.")
-
-    channel = salon_du_serveur(guild, relay.get("channel_id"))
-    if channel is None:
-        raise web.HTTPBadRequest(text="Le salon de ce relais n'existe plus.")
-    if not channel.permissions_for(guild.me).send_messages:
-        raise web.HTTPForbidden(text="ModBot ne peut pas ecrire dans ce salon.")
-
-    identifiant = clean_short_text(charge.get("id"), "", 200) or lien_publication
-    if not identifiant:
-        raise web.HTTPBadRequest(
-            text="Il faut un « id » ou une « url » : sans quoi on ne peut pas "
-                 "distinguer deux poussees de la meme publication.")
-
-    publication = {
-        "id": identifiant,
-        "url": lien_publication or str(relay.get("link") or ""),
-        "title": clean_short_text(charge.get("title"), "", 200),
-        "description": clean_short_text(charge.get("description"), "", 2000),
-        # Une image doit etre une URL : un « data: » de plusieurs
-        # megaoctets pousse par un automate n'a rien a faire ici.
-        "image": (lambda u: u if u.startswith(("http://", "https://")) else "")(
-            clean_short_text(charge.get("image"), "", 500)),
-        "game": clean_short_text(charge.get("game"), "", 100),
-        "viewers": clean_short_text(charge.get("viewers"), "", 20),
-        "date": clean_short_text(charge.get("date"), "", 60),
-        "live": bool(charge.get("live")),
-    }
-
-    cfg = get_cfg(guild.id)
-    etats = cfg.get("social_relays_state")
-    if not isinstance(etats, dict):
-        etats = {}
-    cle = cle_relais(relay)
-    annoncer, raison = rs.doit_annoncer(etats.get(cle), publication)
-    # Une poussee est un evenement, pas un relevé : le premier appel doit
-    # etre annonce. C'est la difference avec la veille, ou le premier
-    # relevé ne fait qu'enregistrer l'existant.
-    if not annoncer and raison == "premier relevé":
-        annoncer, raison = True, ""
-    if not annoncer:
-        etats[cle] = rs.memoriser(etats.get(cle), publication,
-                                  now().timestamp(), False)
-        cfg["social_relays_state"] = etats
-        set_cfg(guild.id, cfg)
-        return api_json({"ok": True, "annonce": False, "raison": raison},
-                        request=request)
-
-    plateforme_lien = rs.plateforme_du_lien(publication["url"] or relay.get("link"))
-    emoji, couleur, _ = _social_platform_palette(plateforme or plateforme_lien)
-    nature = rs.NATURE.get(plateforme_lien, rs.NATURE["web"])
-    valeurs = valeurs_annonce(guild, relay, publication)
-
-    embed = EG(f"{emoji} {nature} — {valeurs['compte'] or plateforme}",
-               publication["description"][:2000] or None, couleur, guild.id)
-    if publication["title"]:
-        embed.add_field(name="Titre", value=publication["title"][:1024], inline=False)
-    if publication["image"]:
-        try:
-            embed.set_image(url=publication["image"])
-        except Exception:
-            pass
-
-    view = None
-    if publication["url"]:
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(
-            label="Regarder le live" if publication["live"] else "Ouvrir",
-            url=publication["url"]))
-
-    contenu, autorisees = mentions_relais(guild, relay)
-    modele = relay.get("message") or rs.message_par_defaut(
-        publication["url"] or str(relay.get("link") or ""))
-    annonce = rs.rendre_message(modele, valeurs)
-    corps = "\n".join(x for x in (contenu, annonce) if x)
-
-    await channel.send(content=corps or None, embed=embed, view=view,
-                       allowed_mentions=autorisees)
-    etats[cle] = rs.memoriser(etats.get(cle), publication, now().timestamp(), True)
-    cfg["social_relays_state"] = etats
-    set_cfg(guild.id, cfg)
-    dashboard_log("social_push", guild, "relais entrant",
-                  f"{plateforme or plateforme_lien} -> #{channel.name}")
-    return api_json({"ok": True, "annonce": True,
-                     "channel_id": str(channel.id)}, request=request)
-
-
-async def api_socials_hook(request):
-    """Le jeton entrant du serveur, et de quoi le renouveler."""
-    identity = await api_identity(request)
-    guild = await api_guild_from_request(request, identity)
-    if request.method == "POST":
-        # Renouveler : l'ancien jeton cesse de fonctionner sur-le-champ.
-        cfg = get_cfg(guild.id)
-        cfg["social_hook_token"] = secrets.token_urlsafe(24)
-        set_cfg(guild.id, cfg)
-        dashboard_log("social_hook_reset", guild, identity.get("username"),
-                      "Jeton de relais entrant renouvele")
-    jeton = jeton_relais(guild.id, creer=True)
-    return api_json({"ok": True, "token": jeton,
-                     "url": f"{public_base_url(request)}/api/socials/push"},
-                    request=request)
-
-
-def public_base_url(request):
-    """L'adresse publique du bot, telle qu'un automate doit l'appeler."""
-    publique = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
-    if publique:
-        return publique
-    scheme = request.headers.get("X-Forwarded-Proto") or request.scheme
-    hote = request.headers.get("X-Forwarded-Host") or request.host
-    return f"{scheme}://{hote}" if hote else ""
-
-
 async def api_guild_logs(request):
     identity = await api_identity(request)
     guild = await api_guild_from_request(request, identity)
@@ -10451,8 +10243,6 @@ async def start_dashboard_api():
     app.router.add_delete("/api/admin/admins/{user_id}", api_admin_admin_remove)
     app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
     app.router.add_post("/api/guilds/{guild_id}/socials/test", api_test_social)
-    app.router.add_route("*", "/api/guilds/{guild_id}/socials/hook", api_socials_hook)
-    app.router.add_post("/api/socials/push", api_socials_push)
 
     # Administration
     app.router.add_get("/api/admin/stats", api_admin_stats)
@@ -10882,8 +10672,19 @@ def cle_relais(relay):
 IG_APP_ID = "936619743392459"
 TWITCH_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 
+# Instagram ne rend sa page complete qu'aux moteurs de recherche : ils
+# en ont besoin pour indexer, et c'est la seule facon d'obtenir le
+# nombre de publications d'un profil.
+AGENT_MOTEUR = ("Mozilla/5.0 (compatible; Googlebot/2.1; "
+                "+http://www.google.com/bot.html)")
+
 X_SYNDICATION = ("https://syndication.twitter.com/srv/timeline-profile/"
                  "screen-name/{}")
+# La page d'integration d'un createur, celle que TikTok sert aux sites
+# tiers. La page du profil, elle, repond 403 a tout ce qui n'est pas un
+# navigateur — Googlebot compris.
+TIKTOK_EMBED = "https://www.tiktok.com/embed/@{}"
+IG_PAGE = "https://www.instagram.com/{}/"
 IG_PROFIL = ("https://www.instagram.com/api/v1/users/web_profile_info/"
              "?username={}")
 TWITCH_GQL = "https://gql.twitch.tv/gql"
@@ -10966,14 +10767,28 @@ async def relever_publication(session, lien):
         publication = rs.lire_x(corps, compte) if corps else None
 
     elif plateforme == "tiktok" and compte:
-        corps = await _texte_public(session, f"https://www.tiktok.com/@{compte}")
-        publication = rs.lire_tiktok(corps, compte) if corps else None
+        corps = await _texte_public(session, TIKTOK_EMBED.format(compte))
+        publication = rs.lire_tiktok_embed(corps, compte) if corps else None
+        if publication is None:
+            # La page du profil, au cas ou TikTok changerait d'avis sur
+            # qui a le droit de la lire.
+            corps = await _texte_public(session, f"https://www.tiktok.com/@{compte}")
+            publication = rs.lire_tiktok(corps, compte) if corps else None
 
     elif plateforme == "instagram" and compte:
+        # L'API web d'abord : quand elle repond, elle donne la
+        # publication elle-meme, avec son lien et son image.
         corps = await _texte_public(
             session, IG_PROFIL.format(compte),
             {"x-ig-app-id": IG_APP_ID, "Accept": "application/json"})
         publication = rs.lire_instagram(corps, compte) if corps else None
+        if publication is None:
+            # Elle repond 401 depuis un serveur. Reste le compteur de
+            # publications, visible de tous : il ne dit pas QUELLE
+            # publication, mais il dit qu'il y en a une de plus.
+            corps = await _texte_public(
+                session, IG_PAGE.format(compte), {"User-Agent": AGENT_MOTEUR})
+            publication = rs.lire_instagram_compteur(corps, compte) if corps else None
 
     elif plateforme == "twitch" and compte:
         requete = {
@@ -11005,7 +10820,7 @@ async def relever_publication(session, lien):
                 "game": "", "viewers": "", "date": "", "live": False,
             }
 
-    if publication is None and plateforme in ("web", "x", "tiktok", "instagram"):
+    if publication is None and plateforme in ("web", "x"):
         # Repli : les balises OpenGraph de la page. Elles ne disent pas
         # grand-chose des trois grands reseaux, mais un site personnel ou
         # un blog s'y decrit correctement.

@@ -282,6 +282,81 @@ verifier("un profil vide ne casse rien",
          rs.lire_instagram('{"data": {"user": {}}}') is None)
 
 
+print(chr(10) + "--- TikTok : la page d'integration, pas celle du profil ---")
+
+# La page du PROFIL repond 403 a tout ce qui n'est pas un vrai
+# navigateur — Googlebot compris. Sa page d'INTEGRATION est faite pour
+# etre chargee par des sites tiers : elle repond a tout le monde.
+embed = ('<html><script id="__FRONTITY_CONNECT_STATE__" type="application/json">'
+         + json.dumps({"source": {"data": {"/embed/@moncompte": {"videoList": [
+             {"id": "7680721699171601694", "desc": "Ma derniere vidéo",
+              "authorUniqueId": "moncompte",
+              "coverUrl": "https://p16.tiktok.com/cover.jpg",
+              "playCount": 4213},
+             {"id": "7600000000000000000", "desc": "Ancienne"}]}}}})
+         + "</script></html>")
+video = rs.lire_tiktok_embed(embed, "moncompte")
+verifier("la derniere video est lue",
+         video and video["id"] == "7680721699171601694", str(video and video["id"]))
+verifier("le lien pointe la video",
+         video["url"] == "https://www.tiktok.com/@moncompte/video/7680721699171601694",
+         video["url"])
+verifier("la legende sert de titre", video["title"] == "Ma derniere vidéo")
+verifier("la vignette est reprise",
+         video["image"] == "https://p16.tiktok.com/cover.jpg")
+
+# Le chemin porte le nom du compte, et TikTok le reecrit de temps a
+# autre : on ne doit pas le supposer.
+autre = embed.replace("/embed/@moncompte", "/autre/chemin/inattendu")
+verifier("le chemin du JSON n'est pas suppose",
+         rs.lire_tiktok_embed(autre, "moncompte")["id"] == "7680721699171601694")
+verifier("une page sans le bloc ne casse rien",
+         rs.lire_tiktok_embed("<html>rien</html>") is None)
+
+
+print(chr(10) + "--- Instagram : le compteur de publications ---")
+
+# Instagram ne laisse plus rien passer : ni son API web (401), ni sa
+# page rendue (aucun identifiant dedans), ni ses miroirs (403). Il reste
+# ce que la page donne aux moteurs de recherche.
+page_ig = ('<meta property="og:description" content="686M Followers, 286 Following, '
+           '8,579 Posts - See Instagram photos and videos from Instagram">')
+ig = rs.lire_instagram_compteur(page_ig, "instagram")
+verifier("le nombre de publications est lu",
+         ig and ig["compteur"] == 8579, str(ig and ig.get("compteur")))
+verifier("le lien pointe le profil, faute de mieux",
+         ig["url"] == "https://www.instagram.com/instagram/", ig["url"])
+verifier("une page sans compteur ne casse rien",
+         rs.lire_instagram_compteur("<html></html>") is None)
+
+# Le compteur se compare en NOMBRES : une publication supprimee le fait
+# baisser, et une baisse n'est pas une nouveaute. Comparer des
+# identifiants ferait taire le relais apres une suppression suivie
+# d'une publication, puisque le compteur repasserait par une valeur
+# deja vue.
+etat_ig = rs.memoriser(None, ig, MAINTENANT, False)
+verifier("le compteur est retenu dans l'etat", etat_ig.get("compteur") == 8579)
+
+meme = rs.lire_instagram_compteur(page_ig, "instagram")
+ok, raison = rs.doit_annoncer(etat_ig, meme)
+verifier("un compteur inchange n'annonce rien", not ok, raison)
+
+plus = rs.lire_instagram_compteur(page_ig.replace("8,579", "8,580"), "instagram")
+ok, raison = rs.doit_annoncer(etat_ig, plus)
+verifier("un compteur qui monte annonce", ok, raison)
+
+moins = rs.lire_instagram_compteur(page_ig.replace("8,579", "8,578"), "instagram")
+ok, raison = rs.doit_annoncer(etat_ig, moins)
+verifier("un compteur qui baisse est une suppression, pas une nouveaute",
+         not ok and raison == "publication supprimee", raison)
+
+# Suppression puis publication : le compteur repasse par 8 579, deja vu.
+# Avec une comparaison d'identifiants, le relais serait reste muet.
+etat_apres_suppression = rs.memoriser(etat_ig, moins, MAINTENANT + 60, False)
+ok, raison = rs.doit_annoncer(etat_apres_suppression, meme)
+verifier("apres une suppression, la publication suivante est bien annoncee",
+         ok, raison)
+
 print(chr(10) + "--- Twitch : le live, et lui seul ---")
 
 hors_ligne = json.dumps({"data": {"user": {"login": "zerator", "stream": None}}})
