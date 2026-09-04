@@ -265,6 +265,43 @@ def lire_x(source, compte=""):
     return None
 
 
+def lire_x_compteur(source, compte=""):
+    """
+    Le NOMBRE de posts d'un compte X, quand le fil refuse de s'ouvrir.
+
+    Le fil de syndication de X repond « Rate limit exceeded » a toute
+    adresse de serveur, systematiquement — verifie sur trois comptes. La
+    page de x.com, elle, ne porte que la biographie : aucun compteur.
+
+    Reste FxTwitter, le service public que beaucoup d'outils utilisent
+    pour afficher un post X ailleurs. Il donne le nombre de posts d'un
+    compte. Comme pour Instagram, ce n'est pas l'identifiant d'un post :
+    l'annonce renvoie vers le profil. Mais le compteur monte quand un
+    post parait, et c'est tout ce qu'il faut pour prevenir.
+
+    A la difference des autres, ce service n'est pas celui de la
+    plateforme : s'il s'arrete, le relais X redevient muet.
+    """
+    donnees = _charger(source)
+    if not isinstance(donnees, dict):
+        return None
+    utilisateur = donnees.get("user")
+    if not isinstance(utilisateur, dict):
+        return None
+    nombre = utilisateur.get("tweets")
+    if not isinstance(nombre, int):
+        return None
+    nom = str(utilisateur.get("screen_name") or compte or "")
+    publication = _publication(
+        f"x:{nombre}",
+        url=f"https://x.com/{nom}" if nom else "",
+        title=f"Nouveau post de @{nom}" if nom else "Nouveau post",
+        description="",
+    )
+    publication["compteur"] = nombre
+    return publication
+
+
 # ── TikTok ───────────────────────────────────────────────────────────
 _TIKTOK_BLOC = re.compile(
     r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',

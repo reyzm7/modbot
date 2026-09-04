@@ -445,6 +445,74 @@ etat_flux = rs.memoriser(None, rs.lire_flux(rss), MAINTENANT, False)
 ok, raison = rs.doit_annoncer(etat_flux, rs.lire_flux(rss))
 verifier("un flux inchange n'annonce rien", not ok, raison)
 
+print(chr(10) + "--- X : le compteur, quand le fil refuse ---")
+
+# Le fil de syndication repond « Rate limit exceeded » a toute adresse
+# de serveur, systematiquement — verifie sur trois comptes. La page de
+# x.com ne porte que la biographie. Reste FxTwitter, qui donne le nombre
+# de posts. Comme pour Instagram : le lien renvoie au profil.
+fx = json.dumps({"code": 200, "user": {"screen_name": "elonmusk",
+                                       "tweets": 108113, "media_count": 4712}})
+px = rs.lire_x_compteur(fx, "elonmusk")
+verifier("le nombre de posts est lu", px and px["compteur"] == 108113,
+         str(px and px.get("compteur")))
+verifier("le lien renvoie au profil", px["url"] == "https://x.com/elonmusk", px["url"])
+verifier("une reponse sans compteur ne casse rien",
+         rs.lire_x_compteur('{"code":401}') is None
+         and rs.lire_x_compteur("pas du json") is None)
+
+etat_x = rs.memoriser(None, px, MAINTENANT, False)
+ok, _ = rs.doit_annoncer(etat_x, rs.lire_x_compteur(fx, "elonmusk"))
+verifier("un compteur X inchange n'annonce rien", not ok)
+ok, _ = rs.doit_annoncer(etat_x, rs.lire_x_compteur(
+    fx.replace("108113", "108114"), "elonmusk"))
+verifier("un compteur X qui monte annonce", ok)
+
+
+print(chr(10) + "--- Le tour tient dans les deux minutes ---")
+
+# Trois choses faisaient deraper la promesse : les relevés partaient
+# les uns APRES les autres, on dormait soixante secondes EN PLUS du
+# travail, et un refus passager mettait la plateforme de cote pour cinq
+# minutes puis dix, puis vingt.
+boucle = source[source.index("async def dashboard_social_loop"):]
+boucle = boucle[:boucle.index(chr(10) + "async def ", 10)]
+
+verifier("les relevés partent ensemble", "await relever_plusieurs(" in boucle)
+verifier("aucun relevé ne part depuis la boucle des serveurs",
+         "await relever_publication(" not in boucle)
+verifier("on dort ce qui RESTE de la minute",
+         "SOCIAL_CADENCE - (time.monotonic() - depart)" in boucle)
+verifier("un tour qui deborde garde un repos minimal",
+         "max(5, reste)" in boucle)
+
+verifier("un tour vise la minute", bot_mod.SOCIAL_CADENCE <= 60,
+         str(bot_mod.SOCIAL_CADENCE))
+verifier("un appel qui traine est abandonne",
+         bot_mod.SOCIAL_DELAI_APPEL <= 12, str(bot_mod.SOCIAL_DELAI_APPEL))
+pire = bot_mod.SOCIAL_CADENCE + bot_mod.SOCIAL_DELAI_APPEL
+verifier("le pire cas reste sous deux minutes", pire <= 120, f"{pire} s")
+verifier("les appels simultanes sont bornes",
+         1 < bot_mod.SOCIAL_SIMULTANES <= 12, str(bot_mod.SOCIAL_SIMULTANES))
+
+bot_mod._reseaux_recul.clear()
+bot_mod._reseau_echec("essai:compte")
+verifier("un premier refus ne met rien de cote",
+         not bot_mod._reseau_en_recul("essai:compte"))
+bot_mod._reseau_echec("essai:compte")
+verifier("un deuxieme non plus", not bot_mod._reseau_en_recul("essai:compte"))
+bot_mod._reseau_echec("essai:compte")
+verifier("le troisieme, oui", bot_mod._reseau_en_recul("essai:compte"))
+for _ in range(12):
+    bot_mod._reseau_echec("essai:compte")
+verifier("et le recul plafonne a cinq minutes",
+         bot_mod._reseaux_recul["essai:compte"]["duree"] <= 300,
+         str(bot_mod._reseaux_recul["essai:compte"]["duree"]))
+bot_mod._reseau_succes("essai:compte")
+verifier("un succes efface le recul", not bot_mod._reseau_en_recul("essai:compte"))
+bot_mod._reseaux_recul.clear()
+
+
 print(chr(10) + "--- Les messages d'annonce different d'un reseau a l'autre ---")
 
 messages = {c: rs.MESSAGES_DEFAUT[c] for c in ("x", "tiktok", "instagram", "twitch")}

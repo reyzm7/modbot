@@ -10642,6 +10642,13 @@ async def dashboard_recurring_loop():
 # disparu : le doublon est ecarte par l'identifiant de la publication,
 # ce qu'aucun chronometre ne sait faire.
 SOCIAL_CADENCE = 60
+# Combien de comptes on interroge en meme temps. Assez pour qu'un tour
+# dure celui du plus lent, pas trop pour ne pas frapper le meme site de
+# dix connexions simultanees.
+SOCIAL_SIMULTANES = 8
+# Un appel qui n'a pas abouti en dix secondes ne le fera pas dans les
+# deux minutes qu'on s'est promises.
+SOCIAL_DELAI_APPEL = 10
 
 def cle_relais(relay):
     """
@@ -10684,6 +10691,12 @@ X_SYNDICATION = ("https://syndication.twitter.com/srv/timeline-profile/"
 # tiers. La page du profil, elle, repond 403 a tout ce qui n'est pas un
 # navigateur — Googlebot compris.
 TIKTOK_EMBED = "https://www.tiktok.com/embed/@{}"
+# FxTwitter : le service public que beaucoup d'outils utilisent pour
+# afficher un post X ailleurs. C'est le seul endroit qui donne encore le
+# nombre de posts d'un compte — le fil de syndication de X repond « Rate
+# limit exceeded » a toute adresse de serveur. A la difference des
+# autres, ce service n'est pas celui de la plateforme.
+X_COMPTEUR = "https://api.fxtwitter.com/{}"
 IG_PAGE = "https://www.instagram.com/{}/"
 IG_PROFIL = ("https://www.instagram.com/api/v1/users/web_profile_info/"
              "?username={}")
@@ -10692,9 +10705,17 @@ TWITCH_GQL = "https://gql.twitch.tv/gql"
 # Une plateforme qui refuse nos appels ne doit pas etre reinterrogee
 # toutes les minutes : on la met de cote un moment. Sans ce recul, une
 # adresse IP de serveur se fait bannir en quelques heures.
+#
+# Mais le recul ne doit pas manger la promesse des deux minutes. Un
+# refus PASSAGER — un delai d'attente, un 500 — ne prouve rien : on
+# reessaie au tour suivant. Ce n'est qu'apres trois refus d'affilee
+# qu'on admet que la plateforme nous ferme la porte, et le recul
+# plafonne alors a cinq minutes. Pendant un refus il n'y a de toute
+# facon rien a detecter : le recul ne coute que le temps de reprise.
 _reseaux_recul = {}
-RECUL_DEPART = 5 * 60
-RECUL_MAXI = 60 * 60
+ECHECS_AVANT_RECUL = 3
+RECUL_DEPART = 60
+RECUL_MAXI = 5 * 60
 
 
 def _reseau_en_recul(cle):
@@ -10703,13 +10724,45 @@ def _reseau_en_recul(cle):
 
 
 def _reseau_echec(cle):
-    entree = _reseaux_recul.setdefault(cle, {"duree": RECUL_DEPART})
-    entree["duree"] = min(RECUL_MAXI, max(RECUL_DEPART, entree.get("duree", RECUL_DEPART)) * 2)
+    entree = _reseaux_recul.setdefault(cle, {"duree": RECUL_DEPART, "echecs": 0})
+    entree["echecs"] = entree.get("echecs", 0) + 1
+    if entree["echecs"] < ECHECS_AVANT_RECUL:
+        return
+    entree["duree"] = min(RECUL_MAXI,
+                          max(RECUL_DEPART, entree.get("duree", RECUL_DEPART)) * 2)
     entree["jusqua"] = time.monotonic() + entree["duree"]
 
 
 def _reseau_succes(cle):
     _reseaux_recul.pop(cle, None)
+
+
+async def relever_plusieurs(session, liens):
+    """
+    Releve plusieurs comptes EN MEME TEMPS.
+
+    Un a un, la duree d'un tour etait la somme des appels ; ensemble,
+    c'est celle du plus lent. Le nombre d'appels simultanes est borne :
+    ouvrir cinquante connexions d'un coup vers le meme site est le
+    meilleur moyen de se faire fermer la porte.
+    """
+    portillon = asyncio.Semaphore(SOCIAL_SIMULTANES)
+
+    async def un(lien):
+        async with portillon:
+            try:
+                return await relever_publication(session, lien)
+            except Exception as ex:
+                print(f"relais {lien}: {type(ex).__name__}: {ex}")
+                return None
+
+    # `liens` associe une clef en minuscules a l'adresse saisie. On
+    # releve l'adresse, on range sous la clef.
+    if not isinstance(liens, dict):
+        liens = {str(l).strip().lower().rstrip("/"): l for l in liens}
+    clefs = list(liens)
+    resultats = await asyncio.gather(*(un(liens[c]) for c in clefs))
+    return dict(zip(clefs, resultats))
 
 
 async def _texte_public(session, url, entetes=None, methode="GET", charge=None):
@@ -10761,10 +10814,26 @@ async def relever_publication(session, lien):
         return publication
 
     if plateforme == "x" and compte:
-        corps = await _texte_public(
-            session, X_SYNDICATION.format(compte),
-            {"Accept": "application/json"})
-        publication = rs.lire_x(corps, compte) if corps else None
+        # Le fil d'abord : quand il repond, il donne le post lui-meme,
+        # avec son texte et son image.
+        publication = None
+        if not _reseau_en_recul(f"x-fil:{compte}"):
+            corps = await _texte_public(
+                session, X_SYNDICATION.format(compte),
+                {"Accept": "application/json"})
+            publication = rs.lire_x(corps, compte) if corps else None
+            if publication is None:
+                # Il refuse les serveurs. On le reessaie une fois par
+                # heure : le redemander chaque minute pour recevoir
+                # chaque minute le meme refus ne sert qu'a se faire
+                # remarquer.
+                _reseaux_recul[f"x-fil:{compte}"] = {
+                    "duree": 3600, "echecs": ECHECS_AVANT_RECUL,
+                    "jusqua": time.monotonic() + 3600}
+        if publication is None:
+            corps = await _texte_public(session, X_COMPTEUR.format(compte),
+                                        {"Accept": "application/json"})
+            publication = rs.lire_x_compteur(corps, compte) if corps else None
 
     elif plateforme == "tiktok" and compte:
         corps = await _texte_public(session, TIKTOK_EMBED.format(compte))
@@ -10777,11 +10846,21 @@ async def relever_publication(session, lien):
 
     elif plateforme == "instagram" and compte:
         # L'API web d'abord : quand elle repond, elle donne la
-        # publication elle-meme, avec son lien et son image.
-        corps = await _texte_public(
-            session, IG_PROFIL.format(compte),
-            {"x-ig-app-id": IG_APP_ID, "Accept": "application/json"})
-        publication = rs.lire_instagram(corps, compte) if corps else None
+        # publication elle-meme, avec son lien et son image. Elle refuse
+        # les serveurs (401), mais on ne renonce pas pour toujours — on
+        # la reessaie une fois par heure. La redemander chaque minute
+        # pour recevoir chaque minute le meme refus ne sert qu'a se
+        # faire remarquer.
+        publication = None
+        if not _reseau_en_recul(f"ig-api:{compte}"):
+            corps = await _texte_public(
+                session, IG_PROFIL.format(compte),
+                {"x-ig-app-id": IG_APP_ID, "Accept": "application/json"})
+            publication = rs.lire_instagram(corps, compte) if corps else None
+            if publication is None:
+                _reseaux_recul[f"ig-api:{compte}"] = {
+                    "duree": 3600, "echecs": ECHECS_AVANT_RECUL,
+                    "jusqua": time.monotonic() + 3600}
         if publication is None:
             # Elle repond 401 depuis un serveur. Reste le compteur de
             # publications, visible de tous : il ne dit pas QUELLE
@@ -10820,7 +10899,7 @@ async def relever_publication(session, lien):
                 "game": "", "viewers": "", "date": "", "live": False,
             }
 
-    if publication is None and plateforme in ("web", "x"):
+    if publication is None and plateforme == "web":
         # Repli : les balises OpenGraph de la page. Elles ne disent pas
         # grand-chose des trois grands reseaux, mais un site personnel ou
         # un blog s'y decrit correctement.
@@ -10878,10 +10957,37 @@ async def dashboard_social_loop():
     fois ferait bannir l'adresse du bot.
     """
     await bot.wait_until_ready()
-    timeout = aiohttp.ClientTimeout(total=18)
+    timeout = aiohttp.ClientTimeout(total=SOCIAL_DELAI_APPEL)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while not bot.is_closed():
-            releves = {}          # lien -> publication, pour ce tour
+            depart = time.monotonic()
+
+            # Premier temps : QUI faut-il relever ? Aucun appel reseau
+            # ici, on ne fait que lire les configurations.
+            # La clef est en minuscules — deux serveurs qui ecrivent le
+            # meme compte differemment ne doivent pas provoquer deux
+            # appels — mais on RELEVE l'adresse telle qu'elle a ete
+            # saisie : le chemin d'un flux peut etre sensible a la casse,
+            # et « /Flux.XML » demande en « /flux.xml » repond 404.
+            a_relever = {}
+            for guild in list(bot.guilds):
+                if not est_premium(guild.id):
+                    continue
+                for relay in (get_cfg(guild.id).get("social_relays") or []):
+                    if not isinstance(relay, dict) or not relay.get("enabled"):
+                        continue
+                    lien = clean_short_text(relay.get("link"), "", 500)
+                    if lien and parse_int(relay.get("channel_id")):
+                        a_relever.setdefault(lien.strip().lower().rstrip("/"),
+                                             lien.strip())
+
+            # Deuxieme temps : tous les relevés partent ensemble. Un
+            # compte n'est interroge QU'UNE FOIS, meme si dix serveurs le
+            # suivent : c'est la meme page pour tout le monde.
+            releves = await relever_plusieurs(session, a_relever)
+
+            # Troisieme temps : on annonce. Plus aucun appel vers
+            # l'exterieur, seulement des envois Discord.
             for guild in list(bot.guilds):
                 # Regarder cinq plateformes chaque minute coute du temps
                 # machine : c'est du premium. Les reglages restent
@@ -10916,14 +11022,7 @@ async def dashboard_social_loop():
                     if not channel.permissions_for(guild.me).send_messages:
                         continue
 
-                    cle_lien = link.strip().lower().rstrip("/")
-                    if cle_lien not in releves:
-                        try:
-                            releves[cle_lien] = await relever_publication(session, link)
-                        except Exception as ex:
-                            print(f"relais {link}: {type(ex).__name__}: {ex}")
-                            releves[cle_lien] = None
-                    publication = releves[cle_lien]
+                    publication = releves.get(link.strip().lower().rstrip("/"))
                     if not publication:
                         continue
 
@@ -10996,7 +11095,12 @@ async def dashboard_social_loop():
                 if changed:
                     cfg["social_relays_state"] = states
                     set_cfg(guild.id, cfg)
-            await asyncio.sleep(SOCIAL_CADENCE)
+            # Dormir soixante secondes EN PLUS du travail donnait une
+            # periode de « travail + 60 s ». On dort ce qui reste de la
+            # minute, et jamais moins de cinq secondes : un tour qui
+            # deborde ne doit pas se transformer en boucle sans repos.
+            reste = SOCIAL_CADENCE - (time.monotonic() - depart)
+            await asyncio.sleep(max(5, reste))
 
 
 #  PANEL MODALS
