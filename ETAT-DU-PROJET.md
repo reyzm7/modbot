@@ -3778,5 +3778,5 @@ location.reload();
 
 | Fichier | Ce qui change |
 |---|---|
-| `modbot-site/script.js` | `normalizeApiBase` réduite à l'origine, `getMetaApiBase` ajoutée, meta toujours candidate, `rememberApiBase` oublie l'adresse morte, `sonderBaseApi` / `trouverBaseApiJoignable` ajoutées, accueil et administration branchés dessus, champ d'adresse qui refuse une saisie invalide |
+| `modbot-site/script.js` | `normalizeApiBase` réduite à l'origine, `getMetaApiBase` ajoutée, meta toujours candidate, `rememberApiBase` oublie l'adresse morte, `sonderBaseApi` / `trouverBaseApiJoignable` ajoutées, accueil et administration branchés dessus, champ d'adresse qui refuse une saisie invalide et affiche celle reellement utilisee |
 | `modbot-site/REPRISE.md` | piège 3 mis à jour : le `localStorage` passe avant la balise, mais ne la masque plus |
