@@ -11113,6 +11113,7 @@ def faits_du_serveur(guild):
     # `member_count` est fiable meme quand le cache des membres est
     # incomplet ; la liste, non. On prend le meilleur des deux.
     total = int(getattr(guild, "member_count", 0) or len(membres))
+    vocaux = list(getattr(guild, "voice_channels", []) or [])
     en_ligne = sum(
         1 for m in humains
         if str(getattr(m, "status", "offline")) not in ("offline", "invisible"))
@@ -11123,10 +11124,19 @@ def faits_du_serveur(guild):
         # Sans l'intention « presences », tout le monde parait hors ligne.
         # Mieux vaut ne rien afficher qu'un zero qui a l'air d'une panne.
         "en_ligne": en_ligne if en_ligne else None,
+        # Les occupants des vocaux. L'intention « voice_states » est
+        # active : ce chiffre est juste. Et un zero y est une reponse,
+        # pas une panne — personne n'est en vocal, et c'est dit.
+        "en_vocal": sum(len(getattr(salon, "members", []) or []) for salon in vocaux),
         "boosts": int(getattr(guild, "premium_subscription_count", 0) or 0),
         "niveau_boost": int(getattr(guild, "premium_tier", 0) or 0),
         "salons": len(getattr(guild, "channels", []) or []),
+        "salons_textuels": len(getattr(guild, "text_channels", []) or []),
+        "salons_vocaux": len(vocaux),
+        "categories": len(getattr(guild, "categories", []) or []),
         "roles": max(0, len(getattr(guild, "roles", []) or []) - 1),  # sans @everyone
+        "emojis": len(getattr(guild, "emojis", []) or []),
+        "stickers": len(getattr(guild, "stickers", []) or []),
     }
 
 

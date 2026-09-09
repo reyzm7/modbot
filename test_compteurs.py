@@ -171,6 +171,11 @@ class FauxRole:
         self.members = membres
 
 
+class FauxVocal:
+    def __init__(self, occupants):
+        self.members = [1] * occupants
+
+
 class GuildComplet:
     id = 111
     member_count = 4167
@@ -180,7 +185,12 @@ class GuildComplet:
                + [FauxMembre(statut="offline") for _ in range(2)]
                + [FauxMembre(bot=True)])
     channels = list(range(62))
+    text_channels = list(range(48))
+    voice_channels = [FauxVocal(3), FauxVocal(0), FauxVocal(5)]
+    categories = list(range(7))
     roles = list(range(42))       # @everyone comprise
+    emojis = list(range(120))
+    stickers = list(range(4))
 
     def get_role(self, rid):
         return FauxRole([1] * 1250) if rid == 123456789012345678 else None
@@ -196,6 +206,18 @@ verifier("@everyone n'est pas un role de plus", faits["roles"] == 41,
          str(faits["roles"]))
 verifier("les boosts et leur niveau sont lus",
          faits["boosts"] == 14 and faits["niveau_boost"] == 3)
+verifier("les salons se comptent aussi par nature",
+         faits["salons_textuels"] == 48 and faits["salons_vocaux"] == 3
+         and faits["categories"] == 7,
+         "%s / %s / %s" % (faits["salons_textuels"], faits["salons_vocaux"],
+                           faits["categories"]))
+# Un vocal vide compte pour zero, pas pour rien : on somme les occupants,
+# on ne compte pas les salons occupes.
+verifier("les membres en vocal sont comptes", faits["en_vocal"] == 8,
+         str(faits["en_vocal"]))
+verifier("emojis et stickers sont lus",
+         faits["emojis"] == 120 and faits["stickers"] == 4,
+         "%s / %s" % (faits["emojis"], faits["stickers"]))
 
 porteurs = bot_mod.porteurs_des_roles(
     GuildComplet(), ["{role:123456789012345678} et {role:999999999999999999}"])

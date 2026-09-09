@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **9 septembre 2026** (voir §53 pour le dernier lot livré).
+> Dernière mise à jour : **9 septembre 2026** (voir §54 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -3780,3 +3780,87 @@ location.reload();
 |---|---|
 | `modbot-site/script.js` | `normalizeApiBase` réduite à l'origine, `getMetaApiBase` ajoutée, meta toujours candidate, `rememberApiBase` oublie l'adresse morte, `sonderBaseApi` / `trouverBaseApiJoignable` ajoutées, accueil et administration branchés dessus, champ d'adresse qui refuse une saisie invalide et affiche celle reellement utilisee |
 | `modbot-site/REPRISE.md` | piège 3 mis à jour : le `localStorage` passe avant la balise, mais ne la masque plus |
+
+## 54. Livré le 9 septembre 2026 — un partenaire de plus, et des compteurs qui comptent plus de choses
+
+### PFL France
+
+Huitième partenaire, `discord.gg/z4qx96QEcd` — serveur communautaire
+français, 656 membres au moment de l'ajout. La carte est dans
+`partenaires.html`, entre VPG Belgique et xWS Tournament, et le texte
+dans les cinq langues.
+
+Le descriptif ne dit que ce que l'invitation Discord permet de constater :
+liste d'attente, onboarding, vérification à l'entrée. Rien sur ce que le
+serveur aurait apporté à ModBot — les autres cartes le racontent parce que
+c'est vrai, et l'inventer ici aurait été un mensonge de plus dans une page
+qui vend la confiance.
+
+Le nombre de membres affiché sur la carte vient de l'API publique de
+Discord au chargement : il se met à jour tout seul, la valeur écrite dans
+le HTML n'est qu'un repli.
+
+### Six variables de compteur de plus
+
+De huit à quatorze, et de quatre à huit modèles proposés.
+
+| Variable | Ce qu'elle compte |
+|---|---|
+| `{en_vocal}` | les membres connectés en vocal, tous salons confondus |
+| `{salons_textuels}` | les salons écrits |
+| `{salons_vocaux}` | les salons vocaux |
+| `{categories}` | les catégories |
+| `{emojis}` | les émojis du serveur |
+| `{stickers}` | les stickers du serveur |
+
+Toutes se lisent sur l'objet `guild` sans intention supplémentaire.
+`{en_vocal}` en particulier repose sur `voice_states`, déjà activée : le
+chiffre est juste, et un zéro y est une réponse — personne n'est en
+vocal — là où `{en_ligne}` rend `None` faute de l'intention `presences`,
+ce qui laisse le nom du salon inchangé plutôt que d'afficher un zéro qui
+aurait l'air d'une panne.
+
+**Pas de collision entre `{salons}` et `{salons_textuels}` :** le marqueur
+remplacé porte son accolade fermante, et `{salons}` n'est donc pas un
+préfixe de `{salons_textuels}`. Vérifié dans un navigateur sur les huit
+cas.
+
+**L'aperçu du dashboard sait enfin lire `{role:…}`.** C'était la seule
+variable qui restait écrite en clair sous le champ, au lieu de montrer un
+chiffre d'exemple.
+
+### Un point de duplication à connaître
+
+`MODELES`, dans `compteurs.py`, **n'est lu par personne** : le site porte
+sa propre liste, `COMPTEUR_MODELES` dans `script.js`, parce qu'il lui faut
+des libellés traduits. Les deux ont été étendues ensemble ici. Même nature
+que `PREMIUM_FONCTIONS` face à `FONCTIONNALITES` (§52) : une copie à la
+main qui dérive si on n'y pense pas.
+
+### Ce qui n'a pas été fait, et pourquoi
+
+Un réglage rendant modifiables à la main les chiffres de visites du
+panneau d'administration, dans le but affiché de « donner bonne
+impression » à de futurs partenaires. Demandé trois fois, refusé trois
+fois : ce sont des chiffres présentés à des tiers qui décident sur eux.
+
+Le projet tient déjà cette ligne ailleurs, et c'est écrit dans son propre
+code — `initPublicStats` retire les tirets « plutôt que de mentir avec des
+chiffres inventés » quand le bot ne répond pas.
+
+Ce qui reste possible, et honnête : le compteur de visites est fiable et
+survit aux redéploiements (`visites.json` est dans `FICHIERS_SAUVEGARDES`),
+et les chiffres publics — 7 588 membres protégés sur 13 serveurs — sont
+réels. Une page « kit partenaire » qui les présente correctement a été
+proposée.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot/compteurs.py` | `VARIABLES` passe de 8 à 14, `MODELES` de 4 à 8 |
+| `modbot/bot.py` | `faits_du_serveur()` rend six chiffres de plus |
+| `modbot/test_compteurs.py` | `FauxVocal`, le faux serveur porte les nouveaux attributs, trois vérifications |
+| `modbot-site/script.js` | `COMPTEUR_VARIABLES`, `COMPTEUR_MODELES`, l'aperçu gère les nouveaux jetons et `{role:…}` |
+| `modbot-site/partenaires.html` | la carte PFL France |
+| `modbot-site/translations.js` | 8 clefs × 5 langues (6 variables, 2 pour le partenaire) |

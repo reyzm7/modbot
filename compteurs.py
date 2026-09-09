@@ -31,22 +31,33 @@ VARIABLES = (
     ("humains", "humans"),
     ("bots", "bots"),
     ("en_ligne", "online"),
+    ("en_vocal", "in_voice"),
     ("boosts", "boosts"),
     ("niveau_boost", "boost_level"),
     ("salons", "channels"),
+    ("salons_textuels", "text_channels"),
+    ("salons_vocaux", "voice_channels"),
+    ("categories", "categories"),
     ("roles", "roles"),
+    ("emojis", "emojis"),
+    ("stickers", "stickers"),
 )
 
 # Un nom de salon Discord ne depasse pas cent caracteres.
 NOM_MAXI = 100
 
-# Ce qu'on propose quand on cree un compteur : les quatre chiffres que
-# les serveurs affichent vraiment.
+# Ce qu'on propose quand on cree un compteur. La premiere est celle que
+# tout le monde affiche ; les suivantes evitent d'ecrire soi-meme un
+# gabarit pour les cas courants.
 MODELES = (
     {"clef": "membres", "gabarit": "📊 Membres : {membres}"},
     {"clef": "humains", "gabarit": "👥 Joueurs : {humains}"},
     {"clef": "en_ligne", "gabarit": "🟢 En ligne : {en_ligne}"},
+    {"clef": "en_vocal", "gabarit": "🔊 En vocal : {en_vocal}"},
     {"clef": "boosts", "gabarit": "🚀 Boosts : {boosts}"},
+    {"clef": "bots", "gabarit": "🤖 Bots : {bots}"},
+    {"clef": "salons", "gabarit": "💬 Salons : {salons}"},
+    {"clef": "roles", "gabarit": "🎭 Rôles : {roles}"},
 )
 
 _ROLE = re.compile(r"\{(?:role|rôle)\s*:\s*(\d{15,25})\}")
