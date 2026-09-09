@@ -4013,3 +4013,26 @@ Discord ne se rattrape pas.
 ### Ce qui attend l'utilisateur
 
 Les trois invitations à remplacer. Rien d'autre ne bloque.
+
+### Suite du §56 — les trois invitations, remplacées le même jour
+
+| Carte | Nouveau code | Serveur | Membres | Expiration |
+|---|---|---|---|---|
+| Darryliens / Ennes | `p2rp39KUyY` | 𝗗𝗔𝗥𝗥𝗬𝗟𝗜𝗘𝗡𝗦/𝗘𝗡𝗡𝗘𝗦 | 1 219 | jamais |
+| VPG Belgique | `VcjmAc7jgj` | 🇧🇪 VPG Belgique | 4 182 | jamais |
+| xWS Tournament | `yEJvXJ4yZM` | 𝐱𝐖𝐒 TOURNAMENT | 321 | jamais |
+
+Les trois répondent, les trois portent une icône, et les trois sont sans
+expiration : la page ne retombera pas dans le même état la semaine
+prochaine.
+
+Le code d'invitation sert aussi de clef de cache — `modbot-partenaire-<code>` —
+donc en changer un vide son cache de lui-même : aucun navigateur ne reste
+sur l'ancienne réponse.
+
+**Une invitation morte se dit maintenant en console.** Elle ne se voyait
+nulle part : la carte retombait sur son monogramme — comportement voulu —
+et le bouton « Rejoindre » menait au vide sans que rien ne le signale.
+`initLogosPartenaires()` nomme désormais la carte, le code et le statut
+HTTP. C'est le seul endroit d'où le défaut se diagnostique sans
+interroger Discord à la main.
