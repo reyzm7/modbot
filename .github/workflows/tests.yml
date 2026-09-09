@@ -1,0 +1,64 @@
+# Les vingt suites du bot, a chaque poussee.
+#
+# Elles existaient toutes, et aucune ne tournait toute seule. Railway
+# deploie `main` au push : sans ce fichier, la seule verification d'un
+# lot etait qu'il demarre.
+#
+# Aucun secret n'est utilise. Les suites tournent sans jeton Discord et
+# sans reseau vers Discord — `test_demarrage.py` retire lui-meme TOKEN
+# de l'environnement pour verifier que le port reste ouvert quand il
+# manque.
+name: Tests du bot
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Le bot
+        uses: actions/checkout@v4
+        with:
+          path: modbot
+
+      # `test_api.py` croise le wiki du site avec les commandes reelles.
+      # Sans le site a cote, ce croisement est saute en silence, et c'est
+      # exactement ainsi qu'un wiki perime a deja survecu sept commits.
+      - name: Le site, a cote
+        uses: actions/checkout@v4
+        with:
+          repository: reyzm7/modbot-site
+          path: modbot-site
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: modbot/requirements.txt
+
+      - name: Les dependances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r modbot/requirements.txt
+
+      # Toutes les suites tournent, meme apres un echec : un premier
+      # rouge ne doit pas cacher les suivants. Le code de sortie retient
+      # qu'au moins une a echoue.
+      - name: Les suites
+        working-directory: modbot
+        run: |
+          echec=0
+          echo "── test_security (unittest)"
+          python -m unittest test_security || echec=1
+          for f in test_*.py; do
+            if [ "$f" = "test_security.py" ]; then
+              continue
+            fi
+            echo "── $f"
+            python "$f" || echec=1
+          done
+          exit $echec
