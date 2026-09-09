@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **9 septembre 2026** (voir §55 pour le dernier lot livré).
+> Dernière mise à jour : **9 septembre 2026** (voir §56 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -3936,3 +3936,80 @@ de mesure, ni adresse conservée, ni profil de visiteur.
 | `modbot-site/admin.html` | le conteneur du formulaire et la liste |
 | `modbot-site/style.css` | la barre corrigée est rayée, l'habillage du formulaire |
 | `modbot-site/translations.js` | 12 clefs × 5 langues, et `priv.jamais3` réécrite |
+
+## 56. Livré le 9 septembre 2026 — trois logos absents, une barre pliée en deux, un salon oublié
+
+### Les logos manquants ne manquent pas : les invitations sont mortes
+
+Trois cartes de la page partenaires montrent leur monogramme au lieu du
+logo du serveur. Ce n'est pas un défaut d'affichage — le repli fonctionne
+exactement comme prévu. **Les trois invitations renvoient un 404
+« L'invitation a expiré »** :
+
+| Carte | Code | État |
+|---|---|---|
+| Darryliens / Ennes | `d3XQ8tGm6` | expirée |
+| VPG Belgique | `wGW9XrUbz` | expirée |
+| xWS Tournament | `caAkTDeTe` | expirée |
+
+Les cinq autres répondent : Twitch Memez94, ePro League, CPG Belge,
+VPG Suisse, PFL France.
+
+Le logo n'est donc pas la seule perte : le bouton **« Rejoindre le
+serveur » de ces trois cartes mène à une invitation morte**. C'est le
+plus gênant des deux.
+
+**Aucun code ne répare ça** : il faut trois nouveaux liens, et créés
+**sans expiration** (durée « jamais » dans Discord), sinon la page
+retombera dans le même état dans sept jours. Le cache local garde une
+invitation lue pendant 24 h, ce qui explique qu'un navigateur montre
+encore le logo quand un autre montre déjà le monogramme.
+
+### La barre latérale de l'administration se pliait en deux
+
+`.admin-nav` déclarait **deux** colonnes de grille — `34px minmax(0, 1fr)` —
+pour **trois** enfants : `<span>01</span>`, le `<svg>` de l'icône, et le
+texte nu. Le troisième enfant est un item de grille anonyme : il partait
+donc à la ligne suivante, dans la colonne de 34 px. D'où « Vue globale »
+coupé en deux, « Blacklist bot » aussi, et une barre deux fois trop haute.
+
+Le défaut date du jour où les icônes sont arrivées dans ces boutons : le
+HTML a gagné un enfant, la grille est restée à deux colonnes.
+
+Trois colonnes désormais. Mesuré dans le navigateur : les boutons passent
+de 89 px et 64 px à 51 px et 42 px, une seule ligne chacun.
+
+### Retirer un compteur supprime son salon
+
+`DELETE /api/guilds/{id}/compteurs/{channel_id}`, nouvelle route.
+
+Le salon d'un compteur ne sert qu'à porter son chiffre : personne ne peut
+s'y connecter, il ne porte aucun message, et son nom **est** le compteur.
+En laisser un derrière soi, c'est laisser un nom qui ne bouge plus — un
+chiffre faux affiché en tête de serveur.
+
+Deux garde-fous :
+
+- **le réglage est retiré avant la suppression, et même si Discord la
+  refuse.** Sinon un salon déjà supprimé à la main bloquerait le réglage
+  pour toujours ;
+- **`salon_du_serveur()` reste la cloison** : on ne supprime jamais le
+  salon d'un autre serveur, même si l'identifiant en venait.
+
+Côté site, suppression en deux temps — le bouton devient « Confirmer »
+pendant cinq secondes, comme pour les giveaways. Supprimer un salon
+Discord ne se rattrape pas.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot/bot.py` | `api_compteur_supprimer()` et sa route |
+| `modbot-site/script.js` | `supprimerCompteur()`, suppression en deux temps |
+| `modbot-site/style.css` | `.admin-nav` passe à trois colonnes |
+| `modbot-site/dashboard.html` | l'avertissement sous la liste des compteurs |
+| `modbot-site/translations.js` | 2 clefs × 5 langues |
+
+### Ce qui attend l'utilisateur
+
+Les trois invitations à remplacer. Rien d'autre ne bloque.

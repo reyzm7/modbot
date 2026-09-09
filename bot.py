@@ -10318,6 +10318,8 @@ async def start_dashboard_api():
     app.router.add_post("/api/guilds/{guild_id}/reaction-roles/publish", api_publish_reaction_roles)
     app.router.add_post("/api/guilds/{guild_id}/socials/test", api_test_social)
     app.router.add_post("/api/guilds/{guild_id}/compteurs", api_compteur_creer)
+    app.router.add_delete("/api/guilds/{guild_id}/compteurs/{channel_id}",
+                          api_compteur_supprimer)
 
     # Administration
     app.router.add_get("/api/admin/stats", api_admin_stats)
@@ -11326,6 +11328,57 @@ async def api_compteur_creer(request):
     return api_json({"ok": True, "channel_id": str(salon.id),
                      "name": salon.name, "compteurs": cfg["compteurs"]},
                     request=request)
+
+
+async def api_compteur_supprimer(request):
+    """
+    Retire un compteur, et supprime le salon qui le portait.
+
+    Ce salon n'a pas d'autre usage : personne ne peut s'y connecter, il
+    ne porte aucun message, et son nom EST le compteur. Le garder apres
+    avoir retire le compteur laissait un salon au chiffre fige, qui
+    ment doucement au lieu de disparaitre.
+
+    Le reglage est retire AVANT la suppression, et meme si Discord la
+    refuse : sinon un salon deja supprime a la main bloquerait le
+    reglage pour toujours.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    cible = str(request.match_info.get("channel_id") or "").strip()
+
+    cfg = get_cfg(guild.id)
+    liste = cfg.get("compteurs")
+    liste = list(liste) if isinstance(liste, list) else []
+    restants = [c for c in liste
+                if str((c or {}).get("channel_id") or "") != cible]
+    if len(restants) == len(liste):
+        raise web.HTTPNotFound(text="Ce compteur n'existe pas sur ce serveur.")
+
+    cfg["compteurs"] = sanitize_compteurs(guild, restants)
+    set_cfg(guild.id, cfg)
+
+    # `salon_du_serveur` est la cloison : on ne supprime jamais le salon
+    # d'un autre serveur, meme si l'identifiant en venait.
+    salon = salon_du_serveur(guild, cible)
+    supprime = False
+    detail = ""
+    if salon is None:
+        detail = "Le salon n'existait plus : le compteur est retire."
+    else:
+        try:
+            await salon.delete(reason="[ModBot] Compteur retire")
+            supprime = True
+        except discord.Forbidden:
+            detail = ("Compteur retire, mais ModBot n'a pas le droit de "
+                      "supprimer ce salon.")
+        except discord.HTTPException as ex:
+            detail = f"Compteur retire, mais Discord a refuse : {ex}"
+
+    dashboard_log("compteur_supprimer", guild, identity.get("username"),
+                  "%s (salon supprime : %s)" % (cible, "oui" if supprime else "non"))
+    return api_json({"ok": True, "deleted": supprime, "detail": detail,
+                     "compteurs": cfg["compteurs"]}, request=request)
 
 async def dashboard_social_loop():
     """
