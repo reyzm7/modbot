@@ -17895,14 +17895,13 @@ async def cmd_reset(i: discord.Interaction, membre: discord.Member):
 # a choisir sa place, au lieu de la voir disparaitre en silence d'une aide
 # que plus personne ne relit.
 CATEGORIES_COMMANDES = [
-    ("🛡️", "Protection", ["securite", "captcha"]),
+    ("🛡️", "Protection", ["securite"]),
     ("🔨", "Modération", ["warn", "ban", "deban", "ban-list", "avert-count",
                           "reset-avert", "infractions", "infractions-reset", "insultes"]),
     ("🧹", "Messages", ["clear-message", "clear-all", "annonce", "patchnotes", "massdm"]),
     ("🎫", "Support", ["addticket", "report", "suggest"]),
     ("🎉", "Communauté", ["giveaway", "translate"]),
     ("💾", "Sauvegardes", ["backup"]),
-    ("🤖", "Assistant IA", ["ia"]),
     ("📊", "Statistiques", ["serverstats", "modstats", "profilestats"]),
     ("🧰", "Outils", ["panel", "aide", "info-bot"]),
 ]

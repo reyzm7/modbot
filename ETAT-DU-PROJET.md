@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **11 août 2026** (voir §22 pour le dernier lot livré).
+> Dernière mise à jour : **9 septembre 2026** (voir §53 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -3585,3 +3585,198 @@ unique, accueil sans rail de commandes ni patch notes, démo à deux écrans.
 Un piège rencontré deux fois : **`applySiteLanguage()` écrase le texte du HTML
 par celui des traductions**. Corriger le HTML ne suffit jamais — la valeur vit
 dans `translations.js`.
+
+## 52. Livré le 9 septembre 2026 — le site racontait encore l'avant-premium
+
+Rien de cassé : des textes. Mais un site qui promet gratuitement ce qu'il
+facture, et qui propose d'essayer deux commandes retirées, ment à ses
+visiteurs aussi sûrement qu'un bug.
+
+### Ce que voyait tout le monde
+
+Trois textes affirmaient encore que rien n'est réservé, alors que douze
+ensembles de fonctionnalités sont payants depuis le 2 septembre :
+
+- la carte « Soutien » de l'accueil — « Tout est inclus. Aucune
+  fonctionnalité n'est réservée, aucun paiement n'est demandé » — qui
+  listait de surcroît les **alertes réseaux** et le **journal complet**
+  parmi les fonctions gratuites, alors que les deux sont premium ;
+- la réponse « Quels sont les tarifs ? » de l'assistant flottant ;
+- le panneau « Modèle économique » de l'espace d'administration.
+
+La carte dit maintenant ce qui reste gratuit, et le dit juste : cinq
+catégories de journal, pas le journal complet ; tickets, captcha,
+giveaways et avis, pas les relais réseaux.
+
+Le wiki, lui, annonçait **treize sections** de dashboard et n'en listait
+que seize — il y en a **vingt et une**. Manquaient : score de sécurité,
+vocaux, événements, messages récurrents, compteurs. Ajoutées, dans les
+cinq langues.
+
+### La page Premium en annonçait douze et en montrait dix
+
+`PREMIUM_FONCTIONS`, dans `script.js`, est une copie à la main de
+`FONCTIONNALITES` de `premium_core.py`. Elle n'avait pas suivi :
+**messages récurrents** et **score de sécurité** manquaient, alors que la
+phrase juste au-dessus annonce « douze ensembles » et que
+`/api/premium/offers` en renvoie bien douze.
+
+La copie reste volontaire — le site traduit ces textes en cinq langues, ce
+que l'API ne fait pas. Mais c'est un point à revérifier à chaque
+fonctionnalité premium ajoutée.
+
+### Deux commandes proposées à l'essai n'existent plus
+
+La démo de l'accueil offrait de cliquer sur **`/captcha`** et **`/ia`**,
+retirées du bot le 27 août (§45). Le visiteur voyait une réponse, allait
+sur Discord, et ne trouvait rien. Les deux entrées sont parties, avec
+leurs douze clefs de traduction devenues orphelines.
+
+Le nombre affiché par la démo de `/aide` suit : « Protection 2 » devient
+« 1 », puisque `/securite` y reste seule. Les trois autres nombres étaient
+déjà exacts.
+
+`CATEGORIES_COMMANDES`, dans `bot.py`, citait encore les deux noms. Sans
+effet — `inventaire_commandes()` filtre sur l'arbre réel des commandes —
+mais une liste qui nomme des commandes mortes finit par être recopiée
+quelque part.
+
+### Le repli HTML mentait sur vingt-trois éléments
+
+Le texte écrit en dur dans les pages est ce qu'on voit avant que
+`applySiteLanguage()` ne passe — et pour toujours si le JavaScript échoue.
+Vingt-trois de ces textes étaient restés à une version antérieure de leur
+traduction, dont deux qui affichaient **23,99 € pour six mois** quand le
+tarif est de **19,99 €** : les conditions d'utilisation et le wiki. La
+traduction, elle, était juste — c'est bien le repli seul qui était faux.
+
+Tous réalignés sur la valeur française, **pour les seuls éléments dont le
+contenu est du texte pur**. Un élément qui contient des balises ne voit
+remplacer que son premier nœud de texte : son repli n'a pas à être
+identique, et l'aligner casserait la mise en forme.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot-site/translations.js` | par langue : 9 clefs ajoutées, 7 réécrites, 12 orphelines retirées. Les cinq langues restent à égalité, 1758 clefs chacune |
+| `modbot-site/script.js` | démos `/captcha` et `/ia` retirées, messages récurrents et score de sécurité ajoutés à la page Premium |
+| `modbot-site/index.html`, `wiki.html`, `conditions.html`, `confidentialite.html`, `admin.html`, `dashboard.html`, `partenaires.html`, `premium.html` | replis réalignés, cinq rubriques ajoutées au wiki |
+| `modbot/bot.py` | `CATEGORIES_COMMANDES` ne cite plus `captcha` ni `ia` |
+
+### Vérifications, et ce qui reste à passer
+
+**Aucun test n'a pu être exécuté** : ni Node ni Python n'étaient installés
+sur la machine de cette session. Les contrôles ont été faits autrement :
+`translations.js` relu par un analyseur JSON — cinq langues, 1758 clefs
+chacune, aucune divergence — et les fragments modifiés de `script.js` par
+un contrôle d'équilibre des délimiteurs.
+
+`python test_api.py` et `python -m unittest test_security` restent donc à
+passer avant de pousser.
+
+Deux croisements mériteraient d'être outillés, parce qu'ils sont de la même
+nature que celui que `test_api.py` fait déjà entre le wiki et les commandes :
+
+1. le repli HTML contre la valeur française, pour les éléments de texte pur ;
+2. `PREMIUM_FONCTIONS` contre `FONCTIONNALITES`.
+
+## 53. Livré le 9 septembre 2026 — une adresse fausse enregistrée cassait tout, sur un seul appareil
+
+Trois pannes signalées le même jour : les chiffres de l'accueil
+indisponibles, la connexion à l'espace d'administration qui tombe sur une
+page 404 de Railway, le dashboard qui annonce « API ModBot injoignable ».
+Une seule cause, et la phrase qui l'a désignée : **« sur mon téléphone je
+ne les ai pas »**.
+
+### La cause
+
+`localStorage` porte la clef `modbot-api-url`. Elle contenait l'adresse du
+**tableau de bord Railway** — `railway.com/project/…/variables?environmentId=…` —
+et non celle du bot. Le `localStorage` est propre à un appareil et à un
+navigateur : le téléphone n'avait pas la clef, donc le téléphone marchait.
+
+Trois défauts la rendaient définitive :
+
+1. **La balise `<meta name="modbot-api-url">` était masquée.**
+   `getConfiguredModbotApiBase()` renvoyait le `localStorage` *ou* la
+   balise. Une valeur enregistrée écartait donc la balise de la liste des
+   candidates : la découverte automatique ne pouvait plus retomber sur la
+   bonne adresse, jamais.
+
+2. **Rien n'oubliait une adresse morte.** `forgetAutoApiBase()` n'efface
+   que les adresses trouvées toutes seules, pas la saisie manuelle.
+
+3. **Aucune page ne vérifiait avant de partir.** L'accueil lisait
+   `getModbotApiBase()` et appelait `/api/public/stats` à l'aveugle ;
+   l'espace d'administration construisait
+   `…/api/auth/discord/login?redirect=…` sur cette même adresse et y
+   envoyait le navigateur — d'où la page 404 de Railway.
+
+### Les corrections
+
+**`normalizeApiBase()` ne garde plus que l'origine.** Protocole, hôte,
+port. Un lien avec un chemin et une requête ne peut plus être enregistré
+tel quel : `railway.com/project/…?environmentId=…` devient
+`https://railway.com`, qui échoue proprement à la sonde au lieu de
+fabriquer `…?environmentId=…/api/health`. Ce qui n'est ni `http` ni
+`https` est refusé, une adresse locale sans protocole passe en `http`, et
+un hôte sans point n'est accepté que s'il est local ou explicitement
+préfixé — une phrase tapée par mégarde n'est plus une adresse.
+
+**La balise meta reste toujours candidate.** La saisie manuelle passe
+toujours en premier — la décision du §6 tient, une URL déployée obsolète
+doit pouvoir être corrigée sans redéploiement — mais elle ne masque plus
+la balise. C'est la correction qui, à elle seule, débloque les trois
+pannes.
+
+**Une adresse enregistrée qui ne répond plus est oubliée.**
+`rememberApiBase()` efface `modbot-api-url` quand une *autre* adresse
+vient de répondre. Elle est essayée en premier : si on arrive là avec une
+adresse différente, c'est qu'elle n'a pas répondu.
+
+**Les pages sans dashboard sondent avant de partir.** `sonderBaseApi()` et
+`trouverBaseApiJoignable()`, au niveau module, servent l'accueil et
+l'espace d'administration — le dashboard garde la sienne, à l'intérieur de
+`initDashboard()`. L'accueil essaie toutes les candidates ; le bouton de
+connexion de l'administration cherche une adresse joignable avant de
+rediriger.
+
+### Vérification
+
+Faite dans un navigateur, sur le site en production, en rejouant la panne :
+`modbot-api-url` posée sur l'adresse Railway, puis le code corrigé collé
+dans la console.
+
+```
+candidats : ["https://railway.com",
+             "https://web-production-6ad2d.up.railway.app",
+             "https://modbot-website.vercel.app"]
+essais    : railway.com -> Failed to fetch
+            web-production-6ad2d.up.railway.app -> OK
+membres   : 7589
+modbot-api-url apres : null      ← l'adresse fausse est oubliee
+```
+
+`normalizeApiBase()` a été passée sur treize cas — lien Railway complet,
+adresse nue sans protocole, `localhost:8080`, `javascript:`, `file:`,
+phrase quelconque — et la sonde sur trois.
+
+### Pour un appareil déjà cassé, avant le redéploiement
+
+Le site se répare tout seul au premier chargement une fois déployé. Sur un
+appareil qui ne peut pas attendre, dans la console du navigateur :
+
+```js
+localStorage.removeItem("modbot-api-url");
+localStorage.removeItem("modbot-api-base-auto");
+sessionStorage.removeItem("modbot-api-base");
+location.reload();
+```
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot-site/script.js` | `normalizeApiBase` réduite à l'origine, `getMetaApiBase` ajoutée, meta toujours candidate, `rememberApiBase` oublie l'adresse morte, `sonderBaseApi` / `trouverBaseApiJoignable` ajoutées, accueil et administration branchés dessus, champ d'adresse qui refuse une saisie invalide |
+| `modbot-site/REPRISE.md` | piège 3 mis à jour : le `localStorage` passe avant la balise, mais ne la masque plus |
