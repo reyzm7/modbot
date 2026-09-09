@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **9 septembre 2026** (voir §54 pour le dernier lot livré).
+> Dernière mise à jour : **9 septembre 2026** (voir §55 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -3864,3 +3864,75 @@ proposée.
 | `modbot-site/script.js` | `COMPTEUR_VARIABLES`, `COMPTEUR_MODELES`, l'aperçu gère les nouveaux jetons et `{role:…}` |
 | `modbot-site/partenaires.html` | la carte PFL France |
 | `modbot-site/translations.js` | 8 clefs × 5 langues (6 variables, 2 pour le partenaire) |
+
+## 55. Livré le 9 septembre 2026 — corriger un jour du compteur de visites
+
+Un clic sur une barre de l'histogramme ouvre un formulaire : nouveau
+nombre, raison, enregistrer. Le jour corrigé garde une rayure sur sa
+barre et une astérisque sur son chiffre, et la correction s'inscrit sous
+l'histogramme.
+
+### Pourquoi une correction, et pas une saisie libre
+
+Un compteur d'audience se corrige : une journée passée à tester le site
+gonfle son chiffre — le 3 septembre affiche 135 quand les autres jours
+tournent entre 4 et 23 — et un redémarrage sans volume en perdait.
+Refuser toute correction laisse un chiffre faux.
+
+Mais un chiffre qu'on peut changer sans laisser de trace n'est plus une
+mesure. La correction est donc **enregistrée avec son auteur, sa raison,
+et les deux valeurs**, elle passe dans le journal du dashboard, et le
+panneau la montre. C'est ce qui sépare une correction d'une réécriture,
+et c'est ce qui permet, dans six mois, de savoir d'où vient un chiffre.
+
+**La raison est obligatoire, côté serveur comme côté site** : moins de
+trois caractères et le bot refuse en 400. Ce n'est pas une formalité —
+c'est la seule chose qui rende la trace utile.
+
+### Le détail
+
+`visites_corriger()` dans `bot.py` :
+
+- le **total suit le delta**. Corriger un jour sans corriger le total
+  laisserait les deux chiffres se contredire dans le même panneau ;
+- les corrections sont bornées à cinquante, et vivent dans
+  `visites.json` — déjà dans `FICHIERS_SAUVEGARDES`, donc elles
+  survivent aux redéploiements ;
+- `visites_lire()` les fait voyager avec l'état, sinon `visites_ajouter()`
+  les écraserait au premier visiteur suivant.
+
+`visites_resume(detail=False)` : le détail — les corrections, avec le nom
+de leur auteur — **ne sort que par la route d'administration**. Les
+routes publiques `/api/public/visite` et `/api/public/visites` rendent ce
+qu'elles rendaient.
+
+`POST /api/admin/visites`, à côté du `GET` qui existait, réservé aux
+administrateurs du bot.
+
+### Le compteur n'est affiché nulle part publiquement
+
+Vérifié : `data-visites-*` n'existe que dans `admin.html`, et aucune page
+publique ne lit `/api/public/visites`. Ce chiffre est un outil de bord,
+pas un argument de vente affiché aux visiteurs.
+
+### Un mensonge dans la politique de confidentialité, corrigé au passage
+
+`priv.jamais3` affirmait : « Aucune mesure d'audience du site : le nombre
+de visites n'est pas compté, et l'espace d'administration le dit
+explicitement. » C'était faux — la même page, trois sections plus bas,
+explique le compteur, et l'espace d'administration affiche 25 472
+visites. Un reste d'avant le compteur.
+
+La ligne dit maintenant ce qui est vrai : aucune mesure d'audience
+**nominative**, un compteur de pages ouvertes et rien d'autre — ni cookie
+de mesure, ni adresse conservée, ni profil de visiteur.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot/bot.py` | `visites_corriger()`, `visites_resume(detail=)`, `POST /api/admin/visites` |
+| `modbot-site/script.js` | barres cliquables, formulaire de correction, liste des corrections |
+| `modbot-site/admin.html` | le conteneur du formulaire et la liste |
+| `modbot-site/style.css` | la barre corrigée est rayée, l'habillage du formulaire |
+| `modbot-site/translations.js` | 12 clefs × 5 langues, et `priv.jamais3` réécrite |

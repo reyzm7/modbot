@@ -8727,9 +8727,14 @@ def visites_lire():
         donnees = {}
     total = donnees.get("total")
     jours = donnees.get("jours")
+    corrections = donnees.get("corrections")
     return {
         "total": int(total) if isinstance(total, (int, float)) else VISITES_DEPART,
         "jours": jours if isinstance(jours, dict) else {},
+        # Les corrections voyagent avec l'etat : `visites_ajouter` sauve
+        # ce que cette fonction rend, et les perdrait sinon au premier
+        # visiteur suivant.
+        "corrections": corrections if isinstance(corrections, list) else [],
     }
 
 
@@ -8756,15 +8761,60 @@ def visites_ajouter(nombre=1):
     return etat
 
 
-def visites_resume():
+VISITES_CORRECTIONS_GARDEES = 50
+_VISITE_JOUR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def visites_corriger(jour, valeur, auteur="", raison=""):
+    """
+    Corrige le compte d'un jour, et garde la trace de la correction.
+
+    Un compteur d'audience se corrige : une journee passee a tester le
+    site gonfle son chiffre, un redemarrage en perd. Refuser toute
+    correction laisserait un chiffre faux ; l'autoriser sans trace le
+    rendrait invérifiable. On enregistre donc qui, quand, de combien a
+    combien et pourquoi — et le panneau marque le jour corrige.
+
+    Le total suit le delta : corriger un jour sans corriger le total
+    laisserait les deux chiffres se contredire.
+    """
+    etat = visites_lire()
+    avant = int(etat["jours"].get(jour, 0))
+    apres = max(0, min(int(valeur), 10_000_000))
+    etat["jours"][jour] = apres
+    etat["total"] = max(0, int(etat["total"]) + (apres - avant))
+    corrections = list(etat.get("corrections") or [])
+    corrections.append({
+        "jour": jour,
+        "avant": avant,
+        "apres": apres,
+        "auteur": auteur or "?",
+        "raison": raison,
+        "le": datetime.now(timezone.utc).isoformat(),
+    })
+    etat["corrections"] = corrections[-VISITES_CORRECTIONS_GARDEES:]
+    jsave(F_VISITES, etat)
+    return etat
+
+
+def visites_resume(detail=False):
     etat = visites_lire()
     jour = visites_aujourdhui_clef()
     derniers = sorted(etat["jours"].items())[-14:]
-    return {
+    resume = {
         "total": etat["total"],
         "aujourdhui": int(etat["jours"].get(jour, 0)),
         "historique": [{"jour": j, "visites": int(n)} for j, n in derniers],
     }
+    if not detail:
+        # Une correction porte le nom de son auteur : elle sort par la
+        # route d'administration, jamais par la route publique.
+        return resume
+    corriges = {c.get("jour") for c in (etat.get("corrections") or [])}
+    for entree in resume["historique"]:
+        entree["corrige"] = entree["jour"] in corriges
+    resume["corrections"] = list(reversed(etat.get("corrections") or []))[:10]
+    return resume
 
 
 async def api_visite_ping(request):
@@ -8787,7 +8837,42 @@ async def api_visites_lecture(request):
 async def api_admin_visites(request):
     """Le detail, pour la console d'administration."""
     await api_identity(request, admin_required=True)
-    return api_json({"ok": True, **visites_resume()}, request=request)
+    return api_json({"ok": True, **visites_resume(detail=True)}, request=request)
+
+
+async def api_admin_visites_corriger(request):
+    """
+    Corrige le compte d'un jour.
+
+    Reservee aux administrateurs du bot, et jamais silencieuse : la
+    correction est enregistree avec son auteur, sa raison et les deux
+    chiffres, le journal la reprend, et le panneau marque le jour.
+    C'est ce qui separe une correction d'une reecriture.
+    """
+    identity = await api_identity(request, admin_required=True)
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    jour = str(payload.get("day") or "").strip()
+    if not _VISITE_JOUR.match(jour):
+        raise web.HTTPBadRequest(text="Jour attendu au format AAAA-MM-JJ.")
+    try:
+        valeur = int(payload.get("visits"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="Nombre de visites invalide.")
+    if valeur < 0 or valeur > 10_000_000:
+        raise web.HTTPBadRequest(text="Nombre de visites hors bornes.")
+    raison = clean_short_text(payload.get("reason"), "", 200)
+    if len(raison) < 3:
+        raise web.HTTPBadRequest(
+            text="Dis pourquoi : une correction sans raison n'en est plus une.")
+
+    auteur = clean_short_text(identity.get("username"), "", 80) or "Dashboard"
+    visites_corriger(jour, valeur, auteur=auteur, raison=raison)
+    dashboard_log("visites_correction", None, auteur,
+                  "%s : %s (%s)" % (jour, valeur, raison))
+    return api_json({"ok": True, **visites_resume(detail=True)}, request=request)
 
 
 async def api_premium_offres(request):
@@ -10211,6 +10296,7 @@ async def start_dashboard_api():
     app.router.add_post("/api/public/visite", api_visite_ping)
     app.router.add_get("/api/public/visites", api_visites_lecture)
     app.router.add_get("/api/admin/visites", api_admin_visites)
+    app.router.add_post("/api/admin/visites", api_admin_visites_corriger)
     app.router.add_get("/api/admin/premium/acheteurs", api_admin_premium_acheteurs)
     app.router.add_post("/api/admin/premium/{guild_id}/litige", api_admin_premium_litige)
     app.router.add_get("/api/guilds/{guild_id}/security/score", api_score_securite)
