@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **9 septembre 2026** (voir §57 pour le dernier lot livré).
+> Dernière mise à jour : **9 septembre 2026** (voir §58 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4112,3 +4112,76 @@ Elle ne remplace pas un essai réel : elle ne clique pas sur une barre de
 l'histogramme, ne passe pas un paiement Stripe, ne vérifie pas qu'un
 salon de compteur disparaît vraiment. Ce qu'elle attrape, c'est la
 dérive — et la dérive est ce qui a coûté le plus cher cette semaine.
+
+## 58. Livré le 9 septembre 2026 — l'onde au clic partout, et la rubrique qui glisse
+
+### L'onde ne vivait que sur le dashboard
+
+Elle était accrochée bouton par bouton, au chargement, par un
+`querySelectorAll(".dashboard-page button, …")`. Deux conséquences :
+
+* **les sept autres pages n'en avaient aucune** — accueil, premium,
+  partenaires, wiki, administration, les deux pages légales ;
+* **tout ce que le JavaScript crée ensuite naissait sans onde** : une
+  ligne de compteur, une carte de giveaway, le formulaire de correction
+  des visites, la liste des serveurs.
+
+Un **seul écouteur, délégué au document**, les couvre tous — y compris
+ceux qui n'existent pas encore. C'est moins de code que la version
+précédente.
+
+Deux détails : un clic au clavier n'a pas de coordonnées — `detail`
+vaut alors `0` — et l'onde serait partie du coin haut-gauche ; elle part
+du centre. Et la pastille de couleur est exclue : elle **est** sa
+couleur, une onde blanche par-dessus la ferait passer pour une autre.
+
+### Changer de rubrique était une coupure nette
+
+`.dash-panel.is-active` ne faisait que `display: block`. C'est le geste
+le plus répété du produit — vingt et une rubriques — et il n'avait
+aucune transition. Quarante centièmes de seconde, opacité et douze
+pixels de glissement. Même chose pour les sept vues de l'espace
+d'administration.
+
+### Deux cartes gagnent leur survol
+
+Les cartes de fonctionnalité et de tarif en avaient un ; celles des
+**partenaires** et du **premium**, non. Ce sont pourtant les deux pages
+où l'on vient regarder avant de décider.
+
+### Tout se tait sous `prefers-reduced-motion`
+
+Le garde-fou est dans le JavaScript **et** dans le CSS : l'onde n'est pas
+créée, l'entrée de rubrique et les survols sont neutralisés. Le
+navigateur d'essai demandait justement « animations réduites », ce qui a
+permis de vérifier le silence avant de vérifier le mouvement.
+
+### Le fond n'a pas été touché, et ce n'est pas un oubli
+
+La demande portait aussi sur l'arrière-plan. En cherchant où le brancher,
+deux choses sont apparues :
+
+1. **Le champ d'étoiles, les trois nébuleuses et `body::before` sont
+   éteints**, en `display: none !important`, dans la couche « thème
+   professionnel » — avec la raison écrite à côté : *« elles nuisaient à
+   la lisibilité et donnaient un rendu template peu crédible »*. Le
+   `<canvas>` du champ d'étoiles tourne toujours en JavaScript, invisible.
+2. **Ce qui reste — `body::after` — porte déjà `lightSweep`**, un
+   balayage de lumière toutes les neuf secondes. Or une animation en
+   cours l'emporte sur toute déclaration : y poser un mouvement de plus
+   n'aurait rien fait **sans d'abord supprimer celui-là**.
+
+Une première version de ce lot posait les nébuleuses sur cinq pages de
+plus et une parallaxe au pointeur. Les deux ont été retirées avant
+livraison : les nébuleuses y seraient restées invisibles, et la
+parallaxe aurait échangé une animation contre une autre.
+
+**Rallumer le décor est une décision de design, pas une correction.**
+Elle attend l'utilisateur.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot-site/script.js` | `mouvementReduit()`, `initOndeAuClic()` délégué ; l'ancienne boucle du dashboard retirée |
+| `modbot-site/style.css` | entrée de rubrique, survol des cartes partenaires et premium, hôtes d'onde, bloc `prefers-reduced-motion` |
