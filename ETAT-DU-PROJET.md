@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **9 septembre 2026** (voir §56 pour le dernier lot livré).
+> Dernière mise à jour : **9 septembre 2026** (voir §57 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4036,3 +4036,79 @@ et le bouton « Rejoindre » menait au vide sans que rien ne le signale.
 `initLogosPartenaires()` nomme désormais la carte, le code et le statut
 HTTP. C'est le seul endroit d'où le défaut se diagnostique sans
 interroger Discord à la main.
+
+## 57. Livré le 9 septembre 2026 — les tests tournent tout seuls, et croisent les deux dépôts
+
+Vingt-quatre fichiers de tests — vingt côté bot, quatre côté site — et
+aucun ne tournait sans qu'on y pense, depuis une machine où Python est
+installé. Toute la journée du 9 septembre a été livrée sans qu'une seule
+suite ne soit passée.
+
+`.github/workflows/tests.yml`, dans chaque dépôt, les lance à chaque
+poussée sur `main` et sur chaque pull request. Gratuit : les deux dépôts
+sont publics.
+
+### Les deux dépôts sont mis côte à côte dans le job
+
+C'est le point qui compte. `test_api.py` croise le wiki du site avec les
+commandes réelles du bot, et se **saute en silence** si le site n'est pas
+là — c'est ainsi qu'un wiki périmé a déjà survécu sept commits (§45).
+Chaque workflow fait donc un second `checkout` de l'autre dépôt, dans le
+dossier voisin. La disposition est celle du poste de travail :
+`workspace/modbot` et `workspace/modbot-site`.
+
+### `test_derives.py` — le pendant du croisement wiki/commandes
+
+Le site recopie à la main plusieurs listes que le bot détient : il lui
+faut des libellés traduits en cinq langues, ce que l'API ne rend pas. La
+copie est délibérée. Sa dérive, non — elle a coûté trois défauts en une
+semaine.
+
+Le nouveau test croise quatre choses :
+
+| Ce qui est croisé | Le défaut que ça verrouille |
+|---|---|
+| `PREMIUM_FONCTIONS` ↔ `premium_core.FONCTIONNALITES` | la page annonçait douze fonctionnalités, en montrait dix |
+| `COMPTEUR_VARIABLES` ↔ `compteurs.VARIABLES` | une puce inconnue du bot est **effacée** du nom du salon, sans rien dire |
+| `COMPTEUR_MODELES` ↔ `compteurs.MODELES` | deux listes à tenir à jour à la main |
+| repli HTML ↔ valeur française | 23 textes périmés, dont deux tarifs faux dans les CGU |
+
+Les trois premiers importent `premium_core` et `compteurs` **pour de
+vrai** — les deux modules ne dépendent que de la bibliothèque standard,
+c'est ce qui les rend lisibles depuis le dépôt du site. Ils se sautent
+proprement si le dépôt du bot est absent, comme le croisement du wiki.
+
+### Une étape par suite, côté site
+
+La liste des étapes se lit d'un coup d'œil dans l'onglet Actions, et
+`if: always()` les fait toutes tourner même après un échec : un premier
+rouge ne doit pas cacher les suivants. Côté bot, une boucle sur les vingt
+fichiers, avec le même principe — le code de sortie retient qu'au moins
+une a échoué.
+
+`test_security.py` est le seul en style `unittest` sans `main()` : il se
+lance par `python -m unittest test_security`, les dix-neuf autres par
+`python <fichier>`.
+
+### Le premier rouge, en deux minutes
+
+`test_i18n.py` tient une liste des textes qui restent identiques dans
+toutes les langues — la marque, les commandes slash, les noms des
+partenaires. **PFL France**, ajoutée le matin même, n'y était pas : son
+`<h3>` passait donc pour un texte oublié par le moteur de traduction.
+
+Le test avait raison. C'est exactement ce qu'on attend d'une CI le jour
+de son installation.
+
+### État après installation
+
+Les deux dépôts sont verts. Les vingt suites du bot passent, dont
+`test_compteurs.py` avec ses trois vérifications neuves, et `test_api.py`
+avec le croisement du wiki enfin actif.
+
+### Ce qui reste hors de portée d'une CI
+
+Elle ne remplace pas un essai réel : elle ne clique pas sur une barre de
+l'histogramme, ne passe pas un paiement Stripe, ne vérifie pas qu'un
+salon de compteur disparaît vraiment. Ce qu'elle attrape, c'est la
+dérive — et la dérive est ce qui a coûté le plus cher cette semaine.
