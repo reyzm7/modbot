@@ -4185,3 +4185,65 @@ Elle attend l'utilisateur.
 |---|---|
 | `modbot-site/script.js` | `mouvementReduit()`, `initOndeAuClic()` délégué ; l'ancienne boucle du dashboard retirée |
 | `modbot-site/style.css` | entrée de rubrique, survol des cartes partenaires et premium, hôtes d'onde, bloc `prefers-reduced-motion` |
+
+### Suite du §58 — l'option 1 retenue : une seule couche rallumée
+
+La décision revenait à l'utilisateur, elle est prise : **la lueur seule**,
+à moitié moins forte, sur les pages publiques.
+
+Ce qui reste éteint : le champ d'étoiles et les trois nébuleuses. Ce qui
+se rallume : `.page-glow`, à `opacity: 0.5`.
+
+**Hors du dashboard et de l'espace d'administration.** `admin.html` porte
+`class="dashboard-page admin-page"` : le sélecteur
+`body:not(.dashboard-page) .page-glow` exclut donc les deux d'un seul
+mot. On reste longtemps sur ces deux pages, devant des chiffres et des
+champs ; un décor qui dérive derrière un tableau fatigue.
+
+Le `!important` sur `display` n'est pas un caprice : la règle qui éteint
+la lueur en porte un, et rien d'autre ne la rallumerait.
+
+### Le piège, et la façon d'en sortir
+
+`.page-glow` porte déjà `glowMove`, qui pilote `transform`. **Une
+animation en cours l'emporte sur toute déclaration de la cascade** :
+poser un second `transform` sur l'élément n'aurait rien fait, et lui
+donner la place aurait supprimé la dérive existante. C'est le même mur
+que sur `body::after`.
+
+La sortie : **composer le pointeur DANS la keyframe**.
+
+```css
+@keyframes glowMove {
+  from { transform: translate3d(calc(var(--parallaxe-x, 0) * 18px), …) scale(1); }
+  to   { transform: translate3d(calc(3% + var(--parallaxe-x, 0) * 18px), …) scale(1.08); }
+}
+```
+
+Les deux translations s'additionnent dans la même valeur. Les propriétés
+personnalisées sont résolues à chaque image, donc le pointeur est suivi
+en direct sans que la dérive lente change d'un iota. Le JavaScript ne
+fait plus que **poser deux nombres sur la racine** — il ne touche à
+aucun style d'élément.
+
+Dix-huit pixels d'amplitude : un fond doit se déplacer moins que ce
+qu'on regarde, sinon ce n'est plus un fond. Et l'approche de la cible se
+fait par huitièmes, à chaque image : suivre le curseur exactement colle
+le décor au doigt et donne le mal de mer.
+
+### Ce qui se tait, et ce qui reste
+
+Sous `prefers-reduced-motion`, la lueur **reste visible** — c'est un
+dégradé, pas un mouvement — mais elle cesse de dériver et ne suit plus
+le pointeur. Le JavaScript ne s'installe pas non plus sur un écran
+tactile : sans survol, le fond sauterait d'un point à l'autre à chaque
+appui.
+
+### Vérifié sur le site déployé
+
+| | |
+|---|---|
+| `premium.html` | lueur affichée, `opacity: 0.5` |
+| `dashboard.html` | lueur à `display: none` — inchangé |
+| pointeur | `--parallaxe-x: 0.5` déplace la lueur de 9 px, soit 0,5 × 18 |
+| animations réduites | `animation: none`, `transform: none`, lueur toujours visible |
