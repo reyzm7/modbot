@@ -4560,3 +4560,157 @@ Avant ce lot : 0 partout sur ce PC. En mode normal, le décor bouge toujours
 |---|---|
 | `modbot-site/script.js` | `initFondVivant()` : mode calme (`calme`, `RAYON_CALME`, éclats `fixe`), sur toutes les pages ; exclusions revues |
 | `modbot-site/style.css` | la toile n'est plus masquée sous `prefers-reduced-motion` |
+
+## 63. Livré le 10 septembre 2026 — la langue du bot, à 100 %
+
+Demande : « sur les embeds, enlève le bouton traduction, mets dans le site
+une rubrique "langue du bot", et il faut que ça marche à 100 % ».
+
+### Ce que voit l'utilisateur
+
+- **Dashboard › Langue du bot** : français, anglais, espagnol, allemand,
+  arabe — les cinq langues du site. Chaque langue s'affiche sous son propre
+  nom (« Español », jamais « Espagnol »).
+- Tout ce que le bot écrit sur le serveur passe dans cette langue :
+  messages, embeds, boutons, menus, fenêtres, autocomplétion, logs.
+- Ce que tapent les membres et le staff — motifs, annonces, messages de
+  bienvenue personnalisés, messages cités dans les logs — **n'est pas
+  touché**.
+- Le menu « 🌍 Traduire ce message » quitte les embeds (`/aide`,
+  `/info-bot`, logs). La vue reste enregistrée : les messages publiés avant
+  gardent un menu qui répond. Le clic droit « Traduire » reste, pour tout le
+  reste.
+- Le panel de langue dans Discord propose les mêmes cinq langues.
+
+### Comment ça marche : traduire à la sortie
+
+Le bot compte environ **2 450 phrases**, éparpillées dans 18 000 lignes. Les
+traduire fonction par fonction serait un chantier sans fin, toujours en
+retard d'un commit. `langue_bot.py` traduit donc **au moment où le message
+part vers Discord** :
+
+1. **Le relevé.** `extraire_modeles` lit le code avec `ast` et relève chaque
+   phrase que le bot peut écrire. Une f-string devient un modèle :
+   `f"Raison : {raison}"` donne `Raison : ⟦0⟧`. Sont écartés : docstrings,
+   clés de dictionnaire, valeurs comparées, arguments de `print`, de `re.*`,
+   de `.get(clé, …)` (le premier seulement : le second est souvent la phrase
+   par défaut), les listes de données (mots filtrés, motifs d'arnaque…), et
+   l'anglais déjà écrit à la main (`"…" if lang == "fr" else "…"`,
+   `{"fr": …, "en": …}`).
+2. **Le dictionnaire.** `dictionnaire.py` traduit chaque modèle une fois pour
+   toutes dans `traductions/<langue>.json`. Chaque ligne part **protégée** :
+   valeurs, mentions, liens, code, commandes `/…` et marques `**`, `__`,
+   `~~`, `||` deviennent des jetons que le traducteur laisse en place. Une
+   ligne qui perd un jeton est retraduite morceau par morceau.
+3. **La sortie.** `installer_discord` enveloppe les envois de discord.py
+   (`Messageable.send`, `Message.edit`, `InteractionResponse.*`,
+   `Interaction.edit_original_response`, `Webhook.send` et
+   `edit_message`, le suivi des interactions). Le traducteur reconnaît le
+   modèle, prend la phrase traduite et remet les valeurs à leur place. Un
+   texte que rien ne reconnaît part tel quel : c'est ce qu'a écrit
+   quelqu'un.
+
+Quelques règles qui comptent :
+
+- **Anglais écrit à la main d'abord.** `get_lang()` rend toujours `fr` ou
+  `en` : `TEXTS` et les `if lang == "fr"` gardent leur anglais écrit à la
+  main. Pour l'espagnol, l'allemand et l'arabe, le code écrit en français et
+  la sortie traduit. `langue_serveur()` rend la vraie langue choisie.
+- **Un modèle trop maigre est écarté** : `⟦0⟧ dans ⟦1⟧` prendrait « un bug
+  dans le salon » d'un membre pour lui. Encadré de deux valeurs, un modèle
+  doit avoir au moins 10 lettres à lui.
+- **Une vue renvoyée à un autre serveur repart du français**, jamais d'une
+  traduction ; les options d'un menu sont copiées, jamais modifiées en
+  place (les listes d'options sont souvent des constantes partagées).
+- **Un embed traduit qui dépasserait 6 000 caractères part en français**
+  plutôt que d'être refusé par Discord.
+- **Une erreur de traduction ne bloque jamais un envoi** : le message part
+  tel quel, et la console le dit.
+
+### Les commandes /
+
+Discord ne connaît qu'**une** liste de commandes pour tous les serveurs : il
+n'existe pas de description « par serveur ». L'ancienne synchro serveur par
+serveur ne changeait donc rien (elle annonçait pourtant « descriptions
+synchronisées ») et effaçait au passage les commandes propres à chaque
+serveur. Elle est retirée, avec `SLASH_DESCRIPTIONS` qu'elle seule lisait.
+
+Les descriptions passent désormais par un `app_commands.Translator` : chaque
+membre les voit **dans la langue de son application Discord**. Les noms ne
+changent jamais (`/aide` reste `/aide`). Si Discord refusait une traduction,
+la synchro recommence sans les traductions plutôt que de priver le bot de
+ses commandes. L'arabe n'est pas une langue de l'application Discord : un
+client en arabe voit les descriptions françaises.
+
+### Le dictionnaire se tient à jour tout seul
+
+- **La CI** (`tests.yml`, désormais sur toutes les branches) lance
+  `dictionnaire.py` avant les suites, puis repousse `traductions/` sur la
+  branche testée. Une phrase ajoutée au code est traduite à la poussée
+  suivante.
+- **`test_langue.py` échoue s'il manque une seule phrase**, dans une seule
+  langue, ou si une traduction a perdu une valeur.
+- **Une correction à la main survit** : le script ne retraduit jamais une
+  phrase déjà présente. Pour corriger, modifier `traductions/<langue>.json`
+  en gardant les jetons `⟦n⟧`.
+- **Les corrections connues** (`CORRECTIONS` dans `dictionnaire.py`)
+  s'appliquent à tout le dictionnaire à chaque passage : « boleto » (un
+  billet de train) redevient « ticket » en espagnol ; l'espace après un emoji
+  de tête est remis quand le traducteur l'a mangé.
+- **Le glossaire** remplace « salon » par « canal » avant traduction :
+  « salon » sortait en « lounge » ; « canal » sort en channel, canal, Kanal,
+  قناة — les mots de Discord.
+- Le service de traduction (point d'accès public de Google) **freine** les
+  runners de la CI au bout de ~150 requêtes : au premier passage, l'arabe est
+  resté vide. Une langue interrompue ne bloque plus les suivantes, les lots
+  sont plus gros et plus espacés, un 429 fait attendre franchement, et la
+  poussée suivante reprend là où la précédente s'est arrêtée.
+
+### Le dashboard
+
+- La rubrique se lisait comme « le premier `<select>` de la rubrique », avec
+  des libellés pour valeurs (« Français », « English ») : toute langue
+  ajoutée repartait en français sans rien dire. Elle se lit maintenant par
+  son nom (`data-bot-language`) et envoie le code. `test_selecteurs.py` le
+  verrouille.
+- Le menu « Ton des messages », relié à rien, disparaît.
+- **« Reset » ne remettait rien** : il marquait la rubrique modifiée et
+  annonçait « Section réinitialisée ». **« Abandonner » non plus** : les
+  valeurs abandonnées restaient dans les champs et repartaient au bot avec
+  l'enregistrement suivant de n'importe quelle autre rubrique. Les deux
+  remettent désormais à l'écran le **dernier état confirmé par le bot**,
+  retenu à chaque chargement, import et enregistrement. Le bouton
+  « Réinitialiser la vue » du Résumé, qui n'a aucun réglage, disparaît.
+- La page Premium et le dashboard ne demandent plus `/api/me/licences` sans
+  session : la réponse était un **401 certain**, rouge dans la console de
+  chaque visiteur. C'était la seule requête en échec sur les huit pages du
+  site.
+
+### Travailler sur cette machine : l'accès contrôlé aux dossiers
+
+Windows Defender a l'**accès contrôlé aux dossiers** activé
+(`EnableControlledFolderAccess : 1`). Il interdit aux programmes non
+approuvés — `git.exe`, les outils de Git Bash — de **créer** des fichiers
+dans `Documents` : `git fetch`, `git commit` et `git pull` y échouent avec
+« unable to create temporary file ». Le réglage n'a pas été touché.
+
+Pour livrer quand même, les deux dépôts ont été clonés dans le dossier
+temporaire de la session, les changements y ont été recopiés, puis validés
+et poussés de là. **Les copies de `Documents` sont donc en retard sur
+GitHub** : un `git pull` les remettra à jour une fois `git.exe` autorisé
+(Sécurité Windows › Protection contre les virus et menaces › Protection
+contre les ransomwares › Autoriser une application).
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot/langue_bot.py` | nouveau : relevé, traducteur, enveloppes discord.py, `Translator` des commandes |
+| `modbot/dictionnaire.py` | nouveau : traduction protégée, par lots, corrections connues |
+| `modbot/traductions/*.json` | nouveau : en, es, de, ar — tenus par la CI |
+| `modbot/test_langue.py` | nouveau : relevé, traducteur, générateur, couverture des dictionnaires, objets Discord |
+| `modbot/bot.py` | cinq langues, `langue_serveur`, sortie traduite, panel de langue, `Translator` ; synchro par serveur, `SLASH_DESCRIPTIONS` et `avec_traduction` retirés |
+| `modbot/.github/workflows/tests.yml` | toutes les branches, dictionnaire avant les suites, annotations d'échec |
+| `modbot-site/dashboard.html`, `translations.js` | rubrique « Langue du bot » (5 langues) ; « Ton des messages » et le reset du Résumé retirés |
+| `modbot-site/script.js` | langue lue par son nom ; « Reset » et « Abandonner » au dernier état enregistré ; plus de 401 sans session |
+| `modbot-site/test_selecteurs.py` | la langue se lit par son nom, et la liste propose les cinq codes |
