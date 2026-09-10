@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **10 septembre 2026** (voir §59 pour le dernier lot livré).
+> Dernière mise à jour : **10 septembre 2026** (voir §60 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4312,3 +4312,96 @@ propriété qu'on vient de changer.
 | Fichier | Ce qui change |
 |---|---|
 | `modbot-site/style.css` | `.hero-copy h1` sous `@supports`, `@keyframes haloRespire` et `refletTitre`, repos sous `prefers-reduced-motion` |
+
+## 60. Livré le 10 septembre 2026 — le fond vit : sentinelles, boucliers, éclats
+
+Demande : « quand on touche le fond, une lueur qui apparaît, des petites
+particules… des trucs en rapport avec le bot, sois imaginaire ».
+
+Le thème avait éteint le décor de fond pour la lisibilité (§58). Ce lot en
+ajoute **à la demande explicite de l'utilisateur**, en gardant deux
+principes de ce choix : tout reste derrière le contenu, et le spectaculaire
+est bref.
+
+### Ce qui vit, et pourquoi c'est ModBot
+
+| Élément | Ce que c'est | Ce que ça raconte |
+|---|---|---|
+| **Sentinelles** | 9 points lumineux qui dérivent, reliés par un fil quand ils se croisent, curieux du pointeur | un réseau de serveurs sous surveillance |
+| **Bouclier** | un anneau hexagonal qui s'étend depuis le point touché, avec sa lueur | la protection |
+| **Éclats** | petits boucliers, coches vertes, points qui retombent en s'éteignant | la validation, le captcha passé |
+| **Confinement** | cinq touches rapides : le bouclier couvre l'écran, une ruche d'hexagones s'allume sur son passage, les sentinelles accourent | `/securite lockdown`, en miniature |
+
+Le confinement est un secret : rien ne l'annonce. Il ne coûte rien à qui
+ne le trouve pas.
+
+### « Le fond, c'est ce qui n'a pas de fond »
+
+La toile est **derrière** le contenu. Un toucher sur une carte ou sur
+l'image du partenaire lèverait un bouclier caché dessous, et le geste
+semblerait n'avoir rien fait. `surUneSurface()` remonte donc depuis
+l'élément touché : le premier ancêtre qui peint quelque chose de
+consistant — une image de fond, une couleur opaque à plus de 35 % — dit
+qu'on n'a pas touché le fond.
+
+Relevé sur l'accueil : les marges du hero comptent comme fond. La carte du
+partenaire principal non, ni le titre, dont le reflet du §59 est un
+dégradé. Les contrôles (liens, boutons, champs, la démo, l'assistant) sont
+exclus d'office, et une sélection de texte en cours aussi.
+
+### Ce qui le rend léger
+
+- **Une seule toile, une seule boucle d'images.**
+- **Les halos sont peints une fois**, dans cinq petites toiles hors écran,
+  une par couleur : `shadowBlur` à chaque image coûterait cher, un
+  `drawImage` ne coûte presque rien.
+- Composition additive (`lighter`), **260 éclats au plus**, résolution
+  plafonnée à 2× la densité de pixels.
+- La boucle s'arrête d'elle-même quand l'onglet est caché : c'est ce que
+  fait `requestAnimationFrame`.
+- **Écran tactile** : 5 sentinelles au lieu de 9, et elles ne suivent pas
+  le doigt — sans survol, le fond sauterait à chaque appui.
+
+### Ce qui se tait
+
+- **Pages publiques seulement**, comme la lueur : ni dashboard ni
+  administration.
+- **Rien du tout sous `prefers-reduced-motion`**, pas même la toile. Si le
+  réglage change en cours de visite, elle se retire.
+
+### Le décor ne peut plus emporter le reste
+
+`initOndeAuClic`, `initParallaxeFond` et `initFondVivant` sont appelées dans
+un `try/catch`. Une exception levée dans l'une d'elles aurait interrompu le
+gestionnaire `DOMContentLoaded`, et les statistiques comme le dashboard,
+qui s'initialisent juste après, ne démarraient pas. Un décor qui tombe doit
+tomber seul.
+
+### Comment ça a été vérifié, sans Node ni Python
+
+- **Analyse réelle par un moteur JavaScript** : la fonction a été exécutée
+  dans un navigateur, et son empreinte comparée à celle du fichier —
+  **2602234421** sur 9 510 caractères, identiques. Le code essayé est donc
+  bien celui qui part. Une erreur de syntaxe aurait coupé tout le JavaScript
+  du site : c'était le risque à écarter avant de pousser.
+- **Essai déterministe** : l'onglet d'essai est caché, et bride les
+  minuteurs. `requestAnimationFrame` y a été remplacé par une file que
+  l'essai vide à la main, image par image. Captures faites après un
+  toucher, puis après un confinement.
+- **Un faux défaut à connaître** : dans cet onglet caché, la fenêtre mesure
+  0 × 0 tant qu'on ne lui impose pas de taille. La toile y naissait vide et
+  `elementFromPoint` ne trouvait rien. Ce n'est pas le code — une taille
+  imposée (1280 × 720) a suffi.
+
+### Une limite assumée
+
+`body::after`, le dégradé sobre du thème, se peint au-dessus de la toile, à
+22 % d'opacité : il la voile légèrement. Le passer dessous demanderait de
+toucher au thème ; le voile est à peine perceptible, il reste.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot-site/script.js` | `initFondVivant()` ; les trois initialisations de décor dans un `try/catch` |
+| `modbot-site/style.css` | `.fond-vivant` ; masquée sous `prefers-reduced-motion` |
