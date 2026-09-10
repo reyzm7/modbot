@@ -1252,7 +1252,7 @@ class _FauxChamp:
 
 async def verifier_traduction():
     """
-    Le bouton de traduction : structure gardee, et jamais de message vide.
+    La traduction d'un message : structure gardee, et jamais de message vide.
 
     Le point delicat n'est pas de traduire — c'est de ne rien casser quand la
     traduction echoue. Un service gratuit tombe reguliermement ; un embed a
@@ -1276,22 +1276,10 @@ async def verifier_traduction():
     verifier("le selecteur porte un custom_id fixe",
              any(getattr(i, "custom_id", None) == "modbot:traduire" for i in vue.children))
 
-    # Une vue pleine ne doit pas faire echouer l'envoi.
-    pleine = d.ui.View(timeout=None)
-    for rangee in range(5):
-        pleine.add_item(d.ui.Button(label=f"b{rangee}", row=rangee,
-                                    custom_id=f"essai:{rangee}"))
-    avant = len(pleine.children)
-    rendue = bot_mod.avec_traduction(pleine)
-    verifier("une vue deja pleine est rendue inchangee",
-             len(rendue.children) == avant, f"{avant} -> {len(rendue.children)}")
-
-    creuse = d.ui.View(timeout=None)
-    creuse.add_item(d.ui.Button(label="un", row=0, custom_id="essai:un"))
-    verifier("une vue avec de la place recoit le selecteur",
-             len(bot_mod.avec_traduction(creuse).children) == 2)
-    verifier("sans vue, on en cree une",
-             isinstance(bot_mod.avec_traduction(None), bot_mod.VueTraduction))
+    # Les embeds du bot n'en portent plus : le bot ecrit deja dans la
+    # langue du serveur. La vue reste pour les messages publies avant.
+    verifier("aucun embed n'ajoute plus le menu de traduction",
+             not hasattr(bot_mod, "avec_traduction"))
 
     # La structure de l'embed doit survivre a la traduction.
     origine = d.Embed(title="Membre banni", description="La sanction est enregistree.")

@@ -16,6 +16,7 @@ import premium_core as pc
 import security_score as sc_score
 import reseaux_sociaux as rs
 import compteurs as cpt
+import langue_bot as lb
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -134,16 +135,20 @@ LANGUES_CHOICES = [
     app_commands.Choice(name="🇸🇦 Arabe",       value="ar"),
 ]
 
+# Les langues du bot : celles du site. Chaque choix est decrit dans SA
+# langue — c'est celle que lit quelqu'un qui cherche la sienne.
 BOT_LANGUAGE_CHOICES = [
-    discord.SelectOption(label="Français", value="fr", emoji="🇫🇷", description="Messages et panels en français"),
-    discord.SelectOption(label="English", value="en", emoji="🇬🇧", description="Bot messages and panels in English"),
+    discord.SelectOption(label=infos["nom"], value=code, emoji=infos["drapeau"],
+                         description=infos["description"])
+    for code, infos in lb.LANGUES.items()
 ]
 
-BOT_LANGUAGES = {
-    "fr": "🇫🇷 Français",
-    "en": "🇬🇧 English",
-}
+BOT_LANGUAGES = {code: f"{infos['drapeau']} {infos['nom']}" for code, infos in lb.LANGUES.items()}
 DEFAULT_LANG = "fr"
+# Les langues ecrites a la main, dans TEXTS et dans les « if lang == "fr" ».
+# Pour les autres, le code ecrit en francais, et la traduction a la sortie
+# (langue_bot.py) fait le reste.
+LANGUES_ECRITES = ("fr", "en")
 
 TEXTS = {
     "main_panel_title": {"fr": "Panel d'administration", "en": "Administration panel"},
@@ -161,8 +166,8 @@ TEXTS = {
     "language_panel_desc": {"fr": "Choisis la langue utilisee par le bot sur ce serveur.", "en": "Choose the language used by the bot on this server."},
     "language_current": {"fr": "Langue actuelle", "en": "Current language"},
     "language_updated": {"fr": "✅ Langue mise a jour", "en": "✅ Language updated"},
-    "slash_sync_ok": {"fr": "🔄 Les descriptions des slash commandes ont ete synchronisees pour ce serveur.", "en": "🔄 Slash command descriptions were synced for this server."},
-    "slash_sync_fail": {"fr": "La langue est sauvegardee, mais la synchronisation des slash commandes a echoue : {error}", "en": "The language was saved, but slash command sync failed: {error}"},
+    "language_saved": {"fr": "Messages, embeds, boutons et menus du bot sont desormais dans cette langue sur ce serveur.", "en": "The bot's messages, embeds, buttons and menus now use this language on this server."},
+    "slash_note": {"fr": "Les descriptions des commandes / suivent la langue de l'application Discord de chaque membre : Discord ne permet pas de les changer serveur par serveur.", "en": "Slash command descriptions follow each member's Discord app language: Discord does not allow changing them per server."},
     "ticket_panel_author": {"fr": "{guild_name} Ticket System", "en": "{guild_name} Ticket System"},
     "ticket_panel_title": {"fr": "Ouvre ton ticket", "en": "Open your ticket"},
     "ticket_panel_desc": {
@@ -247,30 +252,6 @@ TEXTS = {
     "btn_edit_footer": {"fr": "✏️ Footer", "en": "✏️ Footer"},
     "btn_reset": {"fr": "♻️ Reinitialiser", "en": "♻️ Reset"},
     "btn_preview": {"fr": "👁️ Apercu", "en": "👁️ Preview"},
-}
-
-SLASH_DESCRIPTIONS = {
-    "insultes": {"fr": "Voir la liste des mots interdits", "en": "View the forbidden word list"},
-    "suggest": {"fr": "Faire une suggestion", "en": "Submit a suggestion"},
-    "report": {"fr": "Signaler un bug ou un joueur", "en": "Report a bug or a player"},
-    "patchnotes": {"fr": "Publier des patch notes", "en": "Publish patch notes"},
-    "panel": {"fr": "Ouvrir le panel d'outils Discord", "en": "Open the Discord tools panel"},
-    "aide": {"fr": "Voir l'aide complete du bot", "en": "View the full bot help"},
-    "warn": {"fr": "Donner un avertissement a un membre", "en": "Warn a member"},
-    "ban": {"fr": "Bannir manuellement un membre", "en": "Manually ban a member"},
-    "deban": {"fr": "Debannir un membre par son ID", "en": "Unban a member by ID"},
-    "annonce": {"fr": "Publier une annonce officielle", "en": "Publish an official announcement"},
-    "massdm": {"fr": "Envoyer un DM en masse", "en": "Send a mass DM"},
-    "translate": {"fr": "Traduire un message", "en": "Translate a message"},
-    "avert-count": {"fr": "Voir les avertissements d'un membre", "en": "View a member's warnings"},
-    "profilestats": {"fr": "Voir les statistiques d'un membre", "en": "View a member's statistics"},
-    "serverstats": {"fr": "Voir les statistiques du serveur", "en": "View server statistics"},
-    "modstats": {"fr": "Voir les statistiques de moderation", "en": "View moderation statistics"},
-    "ban-list": {"fr": "Voir la liste des membres bannis", "en": "View the ban list"},
-    "reset-avert": {"fr": "Reinitialiser les avertissements", "en": "Reset warnings"},
-    "info-bot": {"fr": "Informations sur le bot", "en": "Bot information"},
-    "clear-message": {"fr": "Supprimer 1 a 100 messages du salon", "en": "Delete 1 to 100 channel messages"},
-    "clear-all": {"fr": "Supprimer tous les messages du salon", "en": "Delete every channel message"},
 }
 
 # ── Ou vivent les donnees ────────────────────────────────────────────────
@@ -893,10 +874,21 @@ def id_salon_du_serveur(guild, ident):
     return int(salon.id) if salon is not None else None
 
 
-def get_lang(gid):
+def langue_serveur(gid):
+    """La langue choisie pour le serveur : fr, en, es, de ou ar."""
     cfg = get_cfg(gid) if gid else {}
     lang = cfg.get("langue") or DEFAULT_LANG
     return lang if lang in BOT_LANGUAGES else DEFAULT_LANG
+
+def get_lang(gid):
+    """
+    La langue dans laquelle le CODE ecrit : le francais, ou l'anglais quand
+    le serveur l'a choisi — TEXTS et les « if lang == "fr" » ont leur version
+    anglaise ecrite a la main. Pour l'espagnol, l'allemand et l'arabe, le
+    code ecrit en francais et la traduction a la sortie fait le reste.
+    """
+    lang = langue_serveur(gid)
+    return lang if lang in LANGUES_ECRITES else DEFAULT_LANG
 
 def tr(gid, key, **kwargs):
     lang = get_lang(gid)
@@ -908,7 +900,18 @@ def tr(gid, key, **kwargs):
         return text
 
 def format_lang(gid):
-    return BOT_LANGUAGES.get(get_lang(gid), BOT_LANGUAGES[DEFAULT_LANG])
+    return BOT_LANGUAGES.get(langue_serveur(gid), BOT_LANGUAGES[DEFAULT_LANG])
+
+# ── La langue du bot, a la sortie ───────────────────────────────────────
+# Tout ce qui part vers Discord passe par la traduction (langue_bot.py) :
+# messages, embeds, boutons, menus, fenetres. Un dictionnaire absent ou
+# illisible laisse simplement le bot en francais.
+try:
+    TRADUCTEUR = lb.Traducteur(lb.charger_dictionnaires())
+    lb.installer_discord(TRADUCTEUR, langue_serveur)
+except Exception as ex:
+    TRADUCTEUR = lb.Traducteur({})
+    print(f"Langue du bot : traduction desactivee ({type(ex).__name__}: {ex})")
 
 def localize_buttons(view, gid, mapping):
     for child in getattr(view, "children", []):
@@ -3443,32 +3446,17 @@ class SelecteurTraduction(discord.ui.Select):
 
 
 class VueTraduction(discord.ui.View):
-    """Vue persistante : un seul selecteur, aucun etat a retenir."""
+    """
+    Vue persistante : un seul selecteur, aucun etat a retenir.
+
+    Les embeds n'en portent plus — le bot ecrit deja dans la langue du
+    serveur. Elle reste enregistree pour les messages publies avant : leur
+    menu continue de repondre.
+    """
 
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(SelecteurTraduction())
-
-
-def avec_traduction(vue=None):
-    """
-    Ajoute le selecteur de traduction a une vue, s'il y a la place.
-
-    Discord limite une vue a cinq rangees, et un selecteur en occupe une
-    entiere. Plutot que de lever une exception au moment de l'envoi — donc de
-    faire disparaitre le message — on rend la vue inchangee quand elle est
-    pleine.
-    """
-    if vue is None:
-        return VueTraduction()
-    try:
-        rangees = {getattr(item, "row", None) for item in vue.children}
-        if len(vue.children) >= 20 or len([r for r in rangees if r is not None]) >= 5:
-            return vue
-        vue.add_item(SelecteurTraduction())
-    except Exception:
-        pass
-    return vue
 
 
 async def fetch_message_for_translate(interaction, message_ref, salon=None):
@@ -8041,7 +8029,7 @@ DASHBOARD_PANELS = {
     "ratings": "Avis — notes et commentaires laissés par les membres",
     "channels": "Salons — salons utilisés par ModBot",
     "socials": "Réseaux — annonces automatiques Twitch, YouTube, X",
-    "language": "Langue — langue des messages du bot, et pays du serveur affiché sur la carte publique",
+    "language": "Langue du bot — la langue de tout ce que le bot écrit sur le serveur (français, anglais, espagnol, allemand, arabe), et pays du serveur affiché sur la carte publique",
 }
 
 ASSISTANT_MAX_QUESTION = 1200
@@ -12422,18 +12410,20 @@ class VuePanelPersonnalisation(discord.ui.View):
 class SelectLangueBot(discord.ui.Select):
     def __init__(self, gid=None):
         placeholder = "Choisir la langue" if get_lang(gid) == "fr" else "Choose language"
-        super().__init__(placeholder=placeholder, options=BOT_LANGUAGE_CHOICES, min_values=1, max_values=1, row=0)
+        actuelle = langue_serveur(gid)
+        options = [discord.SelectOption(label=o.label, value=o.value, emoji=o.emoji,
+                                        description=o.description, default=(o.value == actuelle))
+                   for o in BOT_LANGUAGE_CHOICES]
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1, row=0)
+        # Chaque langue sous son propre nom, jamais traduit.
+        self._modbot_options_brutes = True
 
     async def callback(self, i: discord.Interaction):
         await _safe_defer(i)
         update_cfg(i.guild.id, "langue", self.values[0])
-        ok, err = await sync_guild_command_language(i.guild)
         e = build_language_embed(i.guild)
-        e.add_field(
-            name=tr(i.guild.id, "language_updated"),
-            value=tr(i.guild.id, "slash_sync_ok") if ok else tr(i.guild.id, "slash_sync_fail", error=err),
-            inline=False,
-        )
+        e.add_field(name=tr(i.guild.id, "language_updated"),
+                    value=tr(i.guild.id, "language_saved"), inline=False)
         try:
             await i.edit_original_response(embed=e, view=VuePanelLangue(i.guild.id))
         except Exception:
@@ -12450,9 +12440,9 @@ class VuePanelLangue(discord.ui.View):
     async def reset(self, i: discord.Interaction, b):
         await _safe_defer(i)
         update_cfg(i.guild.id, "langue", DEFAULT_LANG)
-        ok, err = await sync_guild_command_language(i.guild)
         e = build_language_embed(i.guild)
-        e.add_field(name=tr(i.guild.id, "language_updated"), value=tr(i.guild.id, "slash_sync_ok") if ok else tr(i.guild.id, "slash_sync_fail", error=err), inline=False)
+        e.add_field(name=tr(i.guild.id, "language_updated"),
+                    value=tr(i.guild.id, "language_saved"), inline=False)
         await i.followup.send(embed=e, ephemeral=True)
 
 class VuePanelRating(discord.ui.View):
@@ -14305,8 +14295,7 @@ async def log_event(guild, category, title, description="", fields=None, color=N
         except Exception:
             pass
     try:
-        await channel.send(embed=embed, view=VueTraduction(),
-                           allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     except Exception:
         pass
 
@@ -17102,7 +17091,7 @@ def build_language_embed(guild):
     e.add_field(name=f"🌐 {tr(gid, 'language_current')}", value=format_lang(gid), inline=True)
     e.add_field(
         name="⚙️ Slash commandes" if lang == "fr" else "⚙️ Slash commands",
-        value="Les noms et descriptions sont resynchronises apres changement." if lang == "fr" else "Names and descriptions are synced after a language change.",
+        value=tr(gid, "slash_note"),
         inline=False,
     )
     return e
@@ -17127,22 +17116,6 @@ def build_rating_embed(guild):
     if last:
         e.add_field(name="🕒 Dernieres notes" if lang == "fr" else "🕒 Latest ratings", value="\n".join(last), inline=False)
     return e
-
-async def sync_guild_command_language(guild):
-    lang = get_lang(guild.id)
-    for cmd in bot.tree.get_commands():
-        desc = SLASH_DESCRIPTIONS.get(cmd.name, {}).get(lang)
-        if not desc:
-            continue
-        try:
-            cmd.description = desc[:100]
-        except Exception:
-            pass
-    try:
-        await bot.tree.sync(guild=guild)
-        return True, None
-    except Exception as ex:
-        return False, str(ex)
 
 # ════════════════════════════════════════════════
 #  STATUT DU PROFIL
@@ -17273,12 +17246,22 @@ async def on_ready():
     if not _sauvegarde_task or _sauvegarde_task.done():
         _sauvegarde_task = asyncio.create_task(sauvegarde_discord_loop())
     try:
-        synced = await bot.tree.sync()
+        # Les descriptions des commandes, dans chaque langue de Discord.
+        # Discord ne connait qu'une liste de commandes pour tous les
+        # serveurs : la resynchroniser serveur par serveur, comme on le
+        # faisait, ne changeait rien — et effacait au passage les commandes
+        # propres a chaque serveur.
+        if bot.tree.translator is None:
+            await bot.tree.set_translator(lb.traducteur_commandes(TRADUCTEUR))
+        try:
+            synced = await bot.tree.sync()
+        except discord.HTTPException as err:
+            # Une traduction refusee par Discord ne doit pas priver le bot
+            # de ses commandes : on resynchronise sans les traductions.
+            print(f"sync traduite refusee, nouvel essai sans : {err}")
+            await bot.tree.set_translator(None)
+            synced = await bot.tree.sync()
         for guild in bot.guilds:
-            try:
-                await sync_guild_command_language(guild)
-            except Exception as err:
-                print(f"sync langue {guild.id}: {err}")
             try:
                 await cleanup_configured_system_messages(guild)
             except Exception as err:
@@ -17296,9 +17279,9 @@ async def traduire_ce_message(interaction: discord.Interaction, message: discord
     """
     Clic droit sur n'importe quel message → Applications → Traduire.
 
-    Le bouton pose sur les embeds ne couvre que les messages du bot, et une
-    vue Discord est limitee a cinq rangees : certains embeds n'ont pas la
-    place. Ce menu, lui, marche partout — y compris sur les messages des
+    Les embeds du bot ne portent plus de menu de traduction : le bot ecrit
+    deja dans la langue du serveur (langue_bot.py). Ce menu reste pour tout
+    le reste, et il marche partout — y compris sur les messages des
     membres.
     """
     await interaction.response.send_message(
@@ -18156,7 +18139,7 @@ async def cmd_aide(i: discord.Interaction):
         "Le **dashboard** règle ce qui ne se fait pas en commande : bienvenue, "
         "tickets, rôles-réactions, logs, réseaux."), inline=False)
 
-    await i.response.send_message(embed=e, view=avec_traduction(vue_liens_modbot()), ephemeral=True)
+    await i.response.send_message(embed=e, view=vue_liens_modbot(), ephemeral=True)
 
 
 @bot.tree.command(name="info-bot", description="ℹ️ Informations sur ModBot")
@@ -18221,7 +18204,7 @@ async def cmd_info(i: discord.Interaction):
                       f"{sys.version_info.major}.{sys.version_info.minor}")
 
     try:
-        await i.response.send_message(embed=e, view=avec_traduction(vue_liens_modbot()))
+        await i.response.send_message(embed=e, view=vue_liens_modbot())
     except Exception:
         pass
 

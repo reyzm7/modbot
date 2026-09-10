@@ -1,8 +1,8 @@
-# Les vingt suites du bot, a chaque poussee.
+# Les suites du bot, a chaque poussee, sur toutes les branches.
 #
 # Elles existaient toutes, et aucune ne tournait toute seule. Railway
 # deploie `main` au push : sans ce fichier, la seule verification d'un
-# lot etait qu'il demarre.
+# lot etait qu'il demarre. Une branche passe ici AVANT d'atteindre main.
 #
 # Aucun secret n'est utilise. Les suites tournent sans jeton Discord et
 # sans reseau vers Discord — `test_demarrage.py` retire lui-meme TOKEN
@@ -12,9 +12,17 @@ name: Tests du bot
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
   workflow_dispatch:
+
+# Le dictionnaire complete est repousse sur la branche testee.
+permissions:
+  contents: write
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   bot:
@@ -45,20 +53,54 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r modbot/requirements.txt
 
+      # Chaque phrase nouvelle du bot, traduite dans chaque langue
+      # (langue_bot.py). Une panne du service de traduction n'arrete pas
+      # ici : c'est `test_langue.py` qui dira ce qui manque.
+      - name: Le dictionnaire
+        if: github.event_name != 'pull_request'
+        working-directory: modbot
+        run: python dictionnaire.py || echo "::warning::dictionnaire incomplet"
+
       # Toutes les suites tournent, meme apres un echec : un premier
       # rouge ne doit pas cacher les suivants. Le code de sortie retient
-      # qu'au moins une a echoue.
+      # qu'au moins une a echoue, et chaque echec laisse une annotation
+      # lisible sans ouvrir le journal.
       - name: Les suites
         working-directory: modbot
         run: |
           echec=0
-          echo "── test_security (unittest)"
-          python -m unittest test_security || echec=1
+          lancer() {
+            nom="$1"; shift
+            echo "── $nom"
+            if "$@" > sortie.txt 2>&1; then
+              cat sortie.txt
+            else
+              cat sortie.txt
+              echec=1
+              resume=$(grep -E "ECHEC|Error|Traceback|File \"|assert" sortie.txt | tail -n 25 \
+                       | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+              echo "::error title=$nom::${resume}"
+            fi
+          }
+          lancer test_security python -m unittest test_security
           for f in test_*.py; do
             if [ "$f" = "test_security.py" ]; then
               continue
             fi
-            echo "── $f"
-            python "$f" || echec=1
+            lancer "$f" python "$f"
           done
+          rm -f sortie.txt
           exit $echec
+
+      - name: Le dictionnaire, repousse
+        if: always() && github.event_name != 'pull_request'
+        working-directory: modbot
+        run: |
+          if [ -n "$(git status --porcelain traductions)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add traductions
+            git commit -m "Dictionnaire du bot : phrases nouvelles traduites"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
