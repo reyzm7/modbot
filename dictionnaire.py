@@ -55,14 +55,24 @@ MARQUES = frozenset({"**", "__", "~~", "||"})
 
 # Ce que le traducteur rend de travers, langue par langue. Applique a
 # CHAQUE passage, sur tout le dictionnaire : une correction vaut aussi pour
-# les phrases deja traduites. « Ticket » sort en « boleto » — un billet
-# de train — la ou Discord et ses bots disent « ticket ».
+# les phrases deja traduites.
+#
+# Chaque regle : (motif, remplacement, condition sur la ligne francaise ou
+# None). « Ticket » sort en « boleto » — un billet de train — ou en
+# « entrada » — une place de spectacle — la ou Discord et ses bots disent
+# « ticket ». Mais « entrada » veut aussi dire « entree » ou « saisie » :
+# celle-la n'est corrigee que si la ligne francaise parle de ticket.
+_PARLE_DE_TICKET = re.compile(r"(?i)ticket")
 CORRECTIONS = {
     "es": (
-        (re.compile(r"\bBoletos\b"), "Tickets"),
-        (re.compile(r"\bboletos\b"), "tickets"),
-        (re.compile(r"\bBoleto\b"), "Ticket"),
-        (re.compile(r"\bboleto\b"), "ticket"),
+        (re.compile(r"\bBoletos\b"), "Tickets", None),
+        (re.compile(r"\bboletos\b"), "tickets", None),
+        (re.compile(r"\bBoleto\b"), "Ticket", None),
+        (re.compile(r"\bboleto\b"), "ticket", None),
+        (re.compile(r"\bEntradas\b"), "Tickets", _PARLE_DE_TICKET),
+        (re.compile(r"\bentradas\b"), "tickets", _PARLE_DE_TICKET),
+        (re.compile(r"\bEntrada\b"), "Ticket", _PARLE_DE_TICKET),
+        (re.compile(r"\bentrada\b"), "ticket", _PARLE_DE_TICKET),
     ),
 }
 
@@ -201,11 +211,17 @@ def garder_espace_emoji(source, traduction):
 def corriger(langue, modele, traduction):
     """Les corrections connues, ligne par ligne ; rend la traduction corrigee."""
     sources, lignes = modele.split("\n"), traduction.split("\n")
-    if len(sources) == len(lignes):
-        lignes = [garder_espace_emoji(s, t) for s, t in zip(sources, lignes)]
-    corrigee = "\n".join(lignes)
-    for motif, mot in CORRECTIONS.get(langue, ()):
-        corrigee = motif.sub(mot, corrigee)
+    if len(sources) != len(lignes):
+        # Lignes desalignees : on corrige d'un bloc, face a la phrase entiere.
+        sources, lignes = [modele], [traduction]
+    corrigees = []
+    for source, ligne in zip(sources, lignes):
+        ligne = garder_espace_emoji(source, ligne)
+        for motif, mot, condition in CORRECTIONS.get(langue, ()):
+            if condition is None or condition.search(source):
+                ligne = motif.sub(mot, ligne)
+        corrigees.append(ligne)
+    corrigee = "\n".join(corrigees)
     return corrigee if lb.traduction_valide(modele, corrigee) else traduction
 
 

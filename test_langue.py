@@ -139,6 +139,14 @@ def tester_generateur():
     verifier("tout reprend sa place, et le gras reste colle",
              rendu == "**Reason:** <@⟦0⟧> in the channel `/aide` https://exemple.fr/x",
              rendu)
+    rendu = dico.corriger("es", "Tickets aujourd'hui", "Entradas hoy")
+    verifier("« entradas » redevient « tickets » quand la phrase parle de ticket",
+             rendu == "Tickets hoy", rendu)
+    rendu = dico.corriger("es", "Un captcha à l'entrée", "Un captcha en la entrada")
+    verifier("« entrada » reste une entree quand la phrase n'en parle pas",
+             rendu == "Un captcha en la entrada", rendu)
+    rendu = dico.corriger("de", "🎫 Ticket cree !", "🎫Ticket erstellt!")
+    verifier("l'espace apres l'emoji de tete est remis", rendu == "🎫 Ticket erstellt!", rendu)
 
 
 def tester_dictionnaires():
