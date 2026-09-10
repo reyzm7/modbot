@@ -212,10 +212,13 @@ async def tester_discord():
     verifier("un menu de langues garde les noms d'origine",
              brut.options[0].label == "Option A")
 
-    args, kwargs = lb.traduire_charge("en", traduire, ("Raison : pub",), {"embed": e})
+    args, kwargs = lb.traduire_charge("en", traduire, ("Raison : pub",), {"embed": e},
+                                      indice_contenu=0)
     verifier("un envoi : le contenu et l'embed sont traduits",
-             args[0] == "Reason: pub" and kwargs["embed"].title == "Member banned")
-    args, kwargs = lb.traduire_charge("fr", traduire, ("Raison : pub",), {"embed": e})
+             args[0] == "Reason: pub" and kwargs["embed"].title == "Member banned",
+             f"{args[0]!r} / {kwargs['embed'].title!r}")
+    args, kwargs = lb.traduire_charge("fr", traduire, ("Raison : pub",), {"embed": e},
+                                      indice_contenu=0)
     verifier("un envoi en francais part tel quel",
              args[0] == "Raison : pub" and kwargs["embed"] is e)
 

@@ -53,10 +53,28 @@ PROTEGES = re.compile(
 PREMIER_PROTEGE = 100
 MARQUES = frozenset({"**", "__", "~~", "||"})
 
+# Ce que le traducteur rend de travers, langue par langue. Applique a
+# CHAQUE passage, sur tout le dictionnaire : une correction vaut aussi pour
+# les phrases deja traduites. « Ticket » sort en « boleto » — un billet
+# de train — la ou Discord et ses bots disent « ticket ».
+CORRECTIONS = {
+    "es": (
+        (re.compile(r"\bBoletos\b"), "Tickets"),
+        (re.compile(r"\bboletos\b"), "tickets"),
+        (re.compile(r"\bBoleto\b"), "Ticket"),
+        (re.compile(r"\bboleto\b"), "ticket"),
+    ),
+}
+
+# Un emoji en tete de ligne, et l'espace qui le suit : le traducteur mange
+# parfois l'espace (« 🎫Ticket erstellt! »).
+_EMOJI_DEBUT = re.compile(
+    "^([#*0-9]?[☀-➿\U0001F000-\U0001FAFF️‍⃣]+)(\\s+)")
+
 URL = "https://translate.googleapis.com/translate_a/single"
-PAUSE = 0.4
-TAILLE_LOT = 3000
-LIGNES_PAR_LOT = 60
+PAUSE = 1.0
+TAILLE_LOT = 4500
+LIGNES_PAR_LOT = 90
 MODELES_PAR_PASSE = 400
 _A_DES_LETTRES = re.compile(r"[^\W\d_]")
 
@@ -113,8 +131,12 @@ def _requete(texte, langue):
             time.sleep(PAUSE)
             return "".join(bloc[0] for bloc in (donnees[0] or []) if bloc and bloc[0])
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as erreur:
-            attente = 5 * 2 ** essai
-            print(f"    {type(erreur).__name__} : nouvel essai dans {attente} s")
+            # 429 : le service freine ce client. Attendre un peu ne suffit
+            # pas, il faut attendre franchement.
+            limite = getattr(erreur, "code", None) == 429
+            attente = (30 if limite else 5) * 2 ** essai
+            print(f"    {type(erreur).__name__} {getattr(erreur, 'code', '')} : "
+                  f"nouvel essai dans {attente} s")
             time.sleep(attente)
     raise RuntimeError("le service de traduction ne repond plus")
 
@@ -164,6 +186,29 @@ def _par_morceaux(prepare, langue):
     return "".join(parties)
 
 
+def garder_espace_emoji(source, traduction):
+    """Remet l'espace qui suivait l'emoji de tete, si le traducteur l'a mange."""
+    trouve = _EMOJI_DEBUT.match(source)
+    if not trouve:
+        return traduction
+    emoji, espace = trouve.groups()
+    reste = traduction[len(emoji):]
+    if traduction.startswith(emoji) and reste and not reste[0].isspace():
+        return emoji + espace + reste
+    return traduction
+
+
+def corriger(langue, modele, traduction):
+    """Les corrections connues, ligne par ligne ; rend la traduction corrigee."""
+    sources, lignes = modele.split("\n"), traduction.split("\n")
+    if len(sources) == len(lignes):
+        lignes = [garder_espace_emoji(s, t) for s, t in zip(sources, lignes)]
+    corrigee = "\n".join(lignes)
+    for motif, mot in CORRECTIONS.get(langue, ()):
+        corrigee = motif.sub(mot, corrigee)
+    return corrigee if lb.traduction_valide(modele, corrigee) else traduction
+
+
 def completer(langue, modeles, dictionnaire):
     """Traduit ce qui manque, par passes ; rend le nombre de phrases ajoutees."""
     manquants = [m for m in modeles if not lb.traduction_valide(m, dictionnaire.get(m, ""))]
@@ -190,7 +235,7 @@ def completer(langue, modeles, dictionnaire):
                 coeur = ligne.strip()
                 lignes.append(lb.Traducteur._habiller(ligne, rendues[coeur])
                               if coeur in rendues else ligne)
-            traduction = "\n".join(lignes)
+            traduction = corriger(langue, modele, "\n".join(lignes))
             if lb.traduction_valide(modele, traduction):
                 dictionnaire[modele] = traduction
                 ajoutes += 1
@@ -217,8 +262,21 @@ def main(argv):
             continue
         for modele in obsoletes:
             del dictionnaire[modele]
+        corrigees = 0
+        for modele, traduction in list(dictionnaire.items()):
+            nouvelle = corriger(langue, modele, traduction)
+            if nouvelle != traduction:
+                dictionnaire[modele] = nouvelle
+                corrigees += 1
+        if corrigees:
+            print(f"[{langue}] {corrigees} traduction(s) corrigee(s)")
         lb.ecrire_dictionnaire(langue, dictionnaire)
-        completer(langue, modeles, dictionnaire)
+        # Une langue que le service refuse ne bloque pas les suivantes :
+        # ce qui est fait est deja ecrit, et la poussee suivante reprendra.
+        try:
+            completer(langue, modeles, dictionnaire)
+        except RuntimeError as erreur:
+            print(f"[{langue}] interrompu : {erreur}")
         reste = [m for m in modeles if not lb.traduction_valide(m, dictionnaire.get(m, ""))]
         if reste:
             manque_quelque_chose = True

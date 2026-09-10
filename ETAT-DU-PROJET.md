@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **10 septembre 2026** (voir §61 pour le dernier lot livré).
+> Dernière mise à jour : **10 septembre 2026** (voir §63 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4492,3 +4492,71 @@ se règlent sur le temps écoulé, pas sur le nombre d'images.
 | Fichier | Ce qui change |
 |---|---|
 | `modbot-site/script.js` | `initFondVivant()` : glyphes, cadenas, menaces, paquets ; `releverContenu`, `voiler`, `placerLibrement`, `tropPres` ; trois genres d'onde |
+
+## 62. Livré le 10 septembre 2026 — le fond vivant sur toutes les pages, et sur PC
+
+Demande : « sur mon PC ça marche pas mais mon tel oui, mets le même fond
+partout mais sans que tu touches sur l'écran, et les trucs c'est seulement
+dans l'accueil ».
+
+### Pourquoi le PC ne montrait rien
+
+Windows traduit **« Effets d'animation » coupés** (Paramètres › Accessibilité
+› Effets visuels) en `prefers-reduced-motion: reduce`. Sous ce réglage, le
+décor se taisait entièrement : `initFondVivant()` sortait tout de suite, et
+une règle CSS masquait la toile. Le PC du propriétaire a ce réglage coupé ;
+son téléphone, non. Ce n'était pas un bug de rendu : c'était voulu, et trop
+radical.
+
+### Le mode calme, plutôt que rien
+
+Sous « animations réduites », le décor reste, mais **rien ne se déplace** :
+tout apparaît et s'efface en fondu — c'est ce que recommandent les guides
+d'accessibilité, remplacer un mouvement par un fondu.
+
+| Élément | En mode calme |
+|---|---|
+| Glyphes, cadenas, sentinelles | immobiles ; ils naissent et meurent en fondu |
+| Sentinelles | elles respirent par l'éclat, plus par la taille |
+| Paquets sur les fils | aucun |
+| Capture d'une menace | pas de trait qui traverse l'écran : la sentinelle ne s'est pas approchée |
+| Onde du toucher | elle apparaît à sa taille et s'efface sur place |
+| Éclats du toucher | posés tout autour du point touché, fixes |
+
+Le toucher marche donc aussi sur PC. Si le réglage change pendant la visite,
+le décor bascule sans recharger la page.
+
+### Partout, et plus seulement sur l'accueil
+
+- **Dashboard et administration** ont le décor, eux aussi ; le voile y
+  protège les panneaux, les cartes et les barres comme il protège le texte
+  ailleurs.
+- Les **blocs d'en-tête entiers** (`.hero-copy`, `.section-heading`,
+  `.premium-hero`, `.partners-hero`, `.wiki-hero`) ne sont plus exclus d'un
+  seul tenant : sur les pages chargées, ils avalaient toute la place libre,
+  et le décor ne trouvait plus où naître ailleurs que sur l'accueil. Leurs
+  lignes de texte restent protégées, et la rangée de boutons du hero reste
+  exclue en entier.
+
+### Vérifié
+
+Pixels allumés par la toile, à 1280 × 720, en mode calme, après 240 images :
+
+| Page | Pixels | Page | Pixels |
+|---|---|---|---|
+| Accueil | 6 356 | Conditions | 8 143 |
+| Premium | 5 622 | Confidentialité | 5 185 |
+| Partenaires | 6 921 | Dashboard | 6 335 |
+| Wiki | 9 069 | Administration | 3 184 |
+
+Avant ce lot : 0 partout sur ce PC. En mode normal, le décor bouge toujours
+(3 718 pixels changent en une seconde sur l'accueil, 1 017 sur Premium en
+375 × 812). Un toucher en mode calme fait passer la zone de 664 à
+14 611 pixels allumés, puis l'éclat s'éteint sur place.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot-site/script.js` | `initFondVivant()` : mode calme (`calme`, `RAYON_CALME`, éclats `fixe`), sur toutes les pages ; exclusions revues |
+| `modbot-site/style.css` | la toile n'est plus masquée sous `prefers-reduced-motion` |
