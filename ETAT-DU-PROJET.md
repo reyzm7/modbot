@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **10 septembre 2026** (voir §60 pour le dernier lot livré).
+> Dernière mise à jour : **10 septembre 2026** (voir §61 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4405,3 +4405,90 @@ toucher au thème ; le voile est à peine perceptible, il reste.
 |---|---|
 | `modbot-site/script.js` | `initFondVivant()` ; les trois initialisations de décor dans un `try/catch` |
 | `modbot-site/style.css` | `.fond-vivant` ; masquée sous `prefers-reduced-motion` |
+
+## 61. Livré le 10 septembre 2026 — du code et de la sécurité en fond, et aucun bug d'affichage
+
+Demande : « quand on touche c'est parfait, mets des trucs en rapport avec
+le codage et la sécurité, en fond aussi, mets-en un peu plus, et pas de
+bug d'affichage ».
+
+### Ce qui s'ajoute
+
+Le toucher n'a pas bougé : ses réglages sont repris à l'identique, sous le
+nom `normale`. Autour de lui, le fond gagne le métier du bot.
+
+| Élément | Ce que c'est |
+|---|---|
+| **Glyphes** | des mots de code (`</>`, `0xFF`, `async`, `try { }`, `git push`…) et de sécurité (`sha256`, `HMAC`, `2FA`, `verify()`, `ban()`, `/securite`…) qui dérivent vers le haut, naissent et meurent en fondu |
+| **Cadenas** | fermés le plus souvent ; ils s'ouvrent un instant, puis se referment dans un éclat vert |
+| **Menaces** | un point rouge qui palpite ; la sentinelle la plus proche fond dessus, la vise d'un trait cyan et la neutralise en une coche verte et un petit bouclier. Au bout de trois secondes, la capture se fait de toute façon : une menace ne reste jamais sans réponse |
+| **Paquets** | de petites lueurs qui parcourent les fils du réseau des sentinelles |
+| **Éclats du toucher** | ils gagnent des cadenas et des bouts de code (`</>`, `{ }`, `01`…) |
+
+Un peu plus de tout : **13 sentinelles, 32 glyphes, 7 cadenas** au bureau ;
+7, 12 et 3 sur écran tactile.
+
+### Pas de bug d'affichage : quatre essais, quatre défauts trouvés
+
+Chaque version a été essayée sur les **vrais fichiers**, puis regardée.
+Chaque capture a montré quelque chose :
+
+1. **Des glyphes sous la barre de navigation**, et l'un d'eux coupé par le
+   haut de l'écran.
+2. **`/securite` lisible à travers un bouton.** Le bouton secondaire n'est
+   opaque qu'à 5,5 % : un mot de code vu à travers lui a l'air d'un défaut.
+3. **Le voile a trop effacé.** Tout ce qui naissait derrière le contenu
+   disparaissait, et sur mobile il ne restait presque rien — l'inverse de
+   « mets-en un peu plus ».
+4. **Un amas sur mobile** : cinq mots empilés à côté d'un bouton, parce que
+   les rares places libres attiraient tout au même endroit.
+
+D'où les règles actuelles :
+
+- **Le voile.** Glyphes et cadenas s'estompent — par petites touches, jamais
+  d'un coup — derrière les textes, boutons, champs, cartes, l'en-tête et le
+  **bloc entier** du hero et des en-têtes de section, avec 22 px de marge
+  latérale et 16 px en hauteur. Le relevé du contenu se refait à chaque
+  défilement et toutes les demi-secondes : une carte qui glisse en
+  apparaissant ou un logo qui se charge déplacent le contenu sans défiler.
+- **Naître là où l'on voit** (`placerLibrement`) : quelques tirages au
+  hasard hors du contenu, jamais à moins de 30 px d'un bord, ni dans la
+  bande au-dessus de l'en-tête.
+- **Jamais en amas** (`tropPres`) : pas deux éléments à moins de 70 × 34 px.
+- **Les sentinelles** ne s'effacent pas derrière le contenu — ce sont des
+  points, pas des mots — mais elles descendent à 40 %, leurs fils et leurs
+  paquets avec elles.
+- **Les menaces ne naissent jamais derrière le contenu** ; faute de place,
+  elles attendent la fois suivante.
+
+**Un choix assumé sur mobile** : le premier écran est plein de texte, le
+décor y est donc calme. Il apparaît dans les espaces libres quand on fait
+défiler.
+
+### Coût
+
+**0,39 ms par image au bureau, 0,10 ms sur mobile**, soit 2 % et moins de
+1 % du budget d'une animation à 60 images par seconde.
+
+### Comment l'essayer sans Node ni Python
+
+La machine de cette session n'a ni l'un ni l'autre, donc pas de
+`devserver.js`. Un serveur de fichiers en **PowerShell pur**
+(`System.Net.HttpListener`) les remplace : il sert le dossier du site sur
+`http://localhost:4173`, avec les bons types MIME et un 404 pour le reste.
+
+Les captures d'écran du navigateur d'essai échouaient — sa fenêtre ne se
+dessinait pas. Le serveur a donc reçu une seconde adresse,
+`POST /__capture?nom=…`, qui écrit sur le disque ce qu'on lui envoie. La
+page y déposait l'état de sa toile, sur le fond sombre du site, avec les
+blocs de texte tracés en fil blanc. C'est ce qui a permis de **voir** les
+quatre défauts ci-dessus.
+
+L'horloge des images était simulée pendant les essais : menaces et cadenas
+se règlent sur le temps écoulé, pas sur le nombre d'images.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot-site/script.js` | `initFondVivant()` : glyphes, cadenas, menaces, paquets ; `releverContenu`, `voiler`, `placerLibrement`, `tropPres` ; trois genres d'onde |
