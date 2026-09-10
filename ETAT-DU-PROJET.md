@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **9 septembre 2026** (voir §58 pour le dernier lot livré).
+> Dernière mise à jour : **10 septembre 2026** (voir §59 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4247,3 +4247,68 @@ appui.
 | `dashboard.html` | lueur à `display: none` — inchangé |
 | pointeur | `--parallaxe-x: 0.5` déplace la lueur de 9 px, soit 0,5 × 18 |
 | animations réduites | `animation: none`, `transform: none`, lueur toujours visible |
+
+## 59. Livré le 10 septembre 2026 — le titre de l'accueil respire, et un reflet le traverse
+
+Demande : « une animation ici aussi », sur le haut de l'accueil. Le titre
+« ModBot » n'avait qu'une entrée — `heroTextEnter`, une fois au
+chargement — puis restait immobile.
+
+### Ce qui bouge
+
+- **Le halo respire** : il s'élargit et s'intensifie en 6,5 s, puis revient.
+- **Un reflet lavande traverse le mot**, de gauche à droite, en deux
+  secondes environ, puis se tait près de quatre secondes. Le cycle entier
+  dure sept secondes.
+
+Les deux démarrent après l'entrée du titre. Rien d'autre du hero ne bouge :
+les boutons gardent la sobriété que le thème leur a donnée
+(« les effets de brillance décoratifs sont neutralisés »).
+
+### Deux pièges, un chacun
+
+**Le halo ne pouvait pas rester un `text-shadow`.** Le reflet est un
+dégradé découpé dans les lettres (`background-clip: text`, texte
+transparent). Or l'ombre de texte se peint **par-dessus** ce dégradé : à
+l'écran, le titre virait au lavande terne. Trois rendus comparés côte à
+côte — production, dégradé avec `text-shadow`, dégradé avec
+`filter: drop-shadow` — seul le dernier garde le blanc d'origine : le
+filtre s'applique au rendu fini, donc derrière lui.
+
+**`heroTextEnter` est répété dans la liste d'animations.** `.hero-copy h1`
+est plus précis que `.hero-copy > *` : un `animation` qui l'omettrait
+remplacerait l'entrée, et le titre resterait à l'opacité nulle d'où il
+part. Même raison dans le bloc `prefers-reduced-motion` : on y garde
+l'entrée — que le reset global ramène à 0,01 ms — et on retire le reste.
+
+### Le garde-fou
+
+Tout est sous `@supports (background-clip: text)`. Sur un navigateur qui
+ne saurait pas découper un fond dans du texte, un texte transparent serait
+invisible ; il garde alors le titre d'avant, blanc et fixe.
+
+Au repos — début et fin de cycle, ou animations réduites — la bande est
+hors du mot : le dégradé est du blanc pur, et le titre est celui d'avant,
+à l'identique.
+
+### Une fausse piste qui a coûté du temps, à connaître
+
+Pendant les essais, le texte refusait de devenir transparent, même avec
+une déclaration en ligne `!important`. Ce n'était pas le CSS : le
+navigateur d'essai demandait « animations réduites », et le reset global
+de la feuille — `transition-duration: 0.01ms !important` sur `*` — donne
+une durée de transition à **toutes** les propriétés, `transition-property`
+valant `all` par défaut. Dans un onglet caché, l'horloge des transitions
+ne tourne pas : la couleur restait figée à sa valeur de départ. Couper la
+transition en ligne l'a prouvé.
+
+**Aucun effet chez un visiteur** : dans un onglet visible, une transition
+de 0,01 ms s'achève aussitôt. Mais un essai automatisé dans un onglet
+caché, avec animations réduites, lira toujours l'ancienne valeur d'une
+propriété qu'on vient de changer.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot-site/style.css` | `.hero-copy h1` sous `@supports`, `@keyframes haloRespire` et `refletTitre`, repos sous `prefers-reduced-motion` |
