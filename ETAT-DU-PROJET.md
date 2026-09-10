@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **10 septembre 2026** (voir §63 pour le dernier lot livré).
+> Dernière mise à jour : **11 septembre 2026** (voir §64 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4714,3 +4714,29 @@ contre les ransomwares › Autoriser une application).
 | `modbot-site/dashboard.html`, `translations.js` | rubrique « Langue du bot » (5 langues) ; « Ton des messages » et le reset du Résumé retirés |
 | `modbot-site/script.js` | langue lue par son nom ; « Reset » et « Abandonner » au dernier état enregistré ; plus de 401 sans session |
 | `modbot-site/test_selecteurs.py` | la langue se lit par son nom, et la liste propose les cinq codes |
+
+## 64. Livré le 11 septembre 2026 — un nouveau partenaire : POODX Ranking Server
+
+Demande : « https://discord.gg/2ZgSE4YZH partenaire ».
+
+| Carte | Code | Serveur | Membres | Expiration |
+|---|---|---|---|---|
+| POODX Ranking Server | `2ZgSE4YZH` | POODX Ranking Server | 780 (139 en ligne) | **10 octobre 2026** |
+
+**Cette invitation expire dans un mois**, contrairement à celles du §56.
+Passé le 10 octobre, la carte retombe sur son monogramme « PR » et le
+bouton « Rejoindre » mène au vide ; la console le signale (§56). À
+remplacer par une invitation sans expiration.
+
+Le texte de la carte s'en tient à ce que montre l'invitation : un serveur
+de classement compétitif, qui fait accepter son règlement à l'entrée (écran
+de vérification des membres, salon des conditions). Rien sur des retours
+faits à ModBot, comme sur les autres cartes : ce serait inventé.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot-site/partenaires.html` | la carte, après xWS Tournament |
+| `modbot-site/translations.js` | 2 clefs × 5 langues |
+| `modbot-site/test_i18n.py` | le nom du serveur, qui ne se traduit pas |
