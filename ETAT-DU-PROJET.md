@@ -4721,12 +4721,13 @@ Demande : « https://discord.gg/2ZgSE4YZH partenaire ».
 
 | Carte | Code | Serveur | Membres | Expiration |
 |---|---|---|---|---|
-| POODX Ranking Server | `2ZgSE4YZH` | POODX Ranking Server | 780 (139 en ligne) | **10 octobre 2026** |
+| POODX Ranking Server | `dhFkRSDZgv` | POODX Ranking Server | 781 (140 en ligne) | jamais |
 
-**Cette invitation expire dans un mois**, contrairement à celles du §56.
-Passé le 10 octobre, la carte retombe sur son monogramme « PR » et le
-bouton « Rejoindre » mène au vide ; la console le signale (§56). À
-remplacer par une invitation sans expiration.
+La première invitation (`2ZgSE4YZH`) expirait le 10 octobre 2026 : passé
+cette date, la carte serait retombée sur son monogramme « PR » et le bouton
+« Rejoindre » aurait mené au vide. Elle a été remplacée le jour même par
+`dhFkRSDZgv`, sans expiration — même serveur (identifiant
+`1441920167046021194`), vérifié sur l'API des invitations de Discord.
 
 Le texte de la carte s'en tient à ce que montre l'invitation : un serveur
 de classement compétitif, qui fait accepter son règlement à l'entrée (écran
