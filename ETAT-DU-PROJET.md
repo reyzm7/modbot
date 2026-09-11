@@ -4832,3 +4832,25 @@ Le prix payé est toujours celui du bot : le navigateur n'envoie qu'une clef.
 | `modbot-site/translations.js` | ~120 clefs × 5 langues ; dates des conditions et de la confidentialité ; ligne Stripe |
 | `modbot-site/conditions.html`, `confidentialite.html` | sections « Boutique » |
 | `modbot-site/test_derives.py`, `test_i18n.py` | la page, et le croisement des prix avec le bot |
+
+### La présentation, demandée avant la mise en ligne
+
+« La boutique juste après le serveur de Memez94 à l'accueil, un bouton
+"aller à la boutique", un bouton Boutique en haut, et une belle interface
+avec des packs — fais ça vraiment bien. »
+
+- **Accueil** : juste après le partenaire principal Twitch Memez94, un bloc
+  « Nouveau : la boutique », avec le prix d'appel de chaque rayon et un
+  bouton « Aller à la boutique ».
+- **Barre du haut** : un bouton doré « Boutique » (`.nav-boutique`) sur les
+  sept pages publiques, en plus de l'entrée du menu « Accès ».
+- **Page Boutique** : titre en dégradé ; garanties (Stripe, carte ou PayPal,
+  réponse sous 24 h) ; trois tuiles de rayon ; **les packs d'abord**, avec
+  les deux pièces qu'ils contiennent, « Économise … » et le prix barré ; une
+  teinte par rayon (violet pour les bots, cyan pour les sites, or pour les
+  packs) ; « Toujours compris » ; les étapes ; la FAQ ; un bandeau
+  « Demander un devis ».
+- **Les prix d'appel** (« dès 39 € ») sont calculés depuis
+  `BOUTIQUE_ARTICLES` (`remplirPrixDAppel()`), lui-même croisé avec
+  `boutique.py` par `test_derives.py` : aucun prix n'est écrit dans les
+  traductions, rien ne peut dériver.
