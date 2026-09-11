@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **11 septembre 2026** (voir §64 pour le dernier lot livré).
+> Dernière mise à jour : **11 septembre 2026** (voir §65 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4741,3 +4741,94 @@ faits à ModBot, comme sur les autres cartes : ce serait inventé.
 | `modbot-site/partenaires.html` | la carte, après xWS Tournament |
 | `modbot-site/translations.js` | 2 clefs × 5 langues |
 | `modbot-site/test_i18n.py` | le nom du serveur, qui ne se traduit pas |
+
+## 65. Livré le 11 septembre 2026 — la boutique : bots et sites sur mesure
+
+Demande : « crée une boutique sur le site pour vendre des créations de site
+et de bot, conseille-moi des prix et des packs, avec Stripe ou PayPal, et je
+dois recevoir une notification de qui a commandé. Il clique sur PayPal ou
+Stripe, ça lui demande son ID ou son pseudo Discord, puis il paie. »
+
+Choix du propriétaire : grille « équilibrée », paiement complet à la
+commande, PayPal **via Stripe**.
+
+### Le catalogue
+
+| Article | Prix | Délai | Révisions |
+|---|---|---|---|
+| Bot Essentiel | 39 € | 3 j | 1 |
+| Bot Avancé | 89 € | 7 j | 2 |
+| Bot Pro | 199 € | 14 j | 3 |
+| Site Vitrine | 69 € | 4 j | 1 |
+| Site Complet | 179 € | 10 j | 2 |
+| Site + Dashboard | 399 € | 21 j | 3 |
+| Pack Starter (Bot Essentiel + Site Vitrine) | 89 € au lieu de 108 € | 7 j | 1 |
+| Pack Serveur (Bot Avancé + Site Complet) | 229 € au lieu de 268 € | 14 j | 2 |
+| Pack Pro (Bot Pro + Site + Dashboard) | 499 € au lieu de 598 € | 30 j | 3 |
+
+**Changer un prix** : `boutique.py` (en centimes) **et** `BOUTIQUE_ARTICLES`
+dans `modbot-site/script.js`. `test_derives.py` échoue si les deux divergent.
+Le prix payé est toujours celui du bot : le navigateur n'envoie qu'une clef.
+
+### Le parcours
+
+1. La carte porte deux boutons, **Carte bancaire** et **PayPal**.
+2. Une fenêtre demande le pseudo ou l'identifiant Discord (vérifié des deux
+   côtés), une description facultative du projet, et une case : « j'ai lu
+   les conditions et je demande que le travail commence dès le paiement ».
+3. `POST /api/boutique/commande` ouvre une session Stripe Checkout
+   (`mode=payment`, montant du catalogue, moyen `card` ou `paypal`) et
+   enregistre la commande « en attente » dans `commandes.json`.
+4. Le **webhook Stripe signé** — le même que le premium — passe la commande
+   à « payée » si `payment_status` vaut `paid`, puis l'annonce :
+   - dans le **salon des paiements** (`SALON_PAIEMENTS`) ;
+   - en **message privé à chaque administrateur** du bot
+     (`DASHBOARD_ADMIN_IDS`) ;
+   - au **client**, s'il a donné son identifiant et partage un serveur avec
+     le bot (Discord refuse sinon un message privé).
+
+### Ce qui ne se contourne pas
+
+- **Le retour sur `boutique.html?commande=reussie` ne valide rien** : on peut
+  taper cette adresse à la main. Seul le webhook signé passe une commande à
+  « payée ».
+- **Une commande payée n'est annoncée qu'une fois**, même si Stripe renvoie
+  l'événement.
+- **Les sessions de la boutique rendent la main avant les branches du
+  premium** : elles ne portent ni `user_id` ni `client_reference_id`, et ne
+  créent jamais de licence.
+- **Six commandes par tranche de dix minutes et par adresse** : chaque
+  commande ouvre une session chez Stripe.
+- Si le fichier des commandes est perdu entre la commande et le paiement,
+  **Stripe fait foi** : la commande est reconstituée depuis ses métadonnées
+  et annoncée quand même.
+- Une commande jamais payée est oubliée au bout de deux jours ;
+  `commandes.json` fait partie des sauvegardes Discord et n'entre jamais
+  dans le dépôt.
+
+### Ce qu'il reste à faire au propriétaire
+
+- **Activer PayPal dans Stripe** : tableau de bord Stripe › Paramètres ›
+  Moyens de paiement › PayPal. Tant que ce n'est pas fait, le bouton PayPal
+  répond « Le paiement PayPal n'est pas encore ouvert » et la carte bancaire
+  reste disponible.
+- Facultatif : ajouter l'événement `checkout.session.async_payment_succeeded`
+  au webhook Stripe. Il ne sert qu'aux moyens de paiement différés ; la
+  carte et PayPal sont confirmés tout de suite.
+- Vendre des prestations demande, en France, une activité déclarée (par
+  exemple une micro-entreprise). Les conditions de la boutique sont une base
+  raisonnable, pas un avis juridique.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot/boutique.py` | nouveau : catalogue, validation, numéros, ménage |
+| `modbot/bot.py` | routes `/api/boutique/*`, caisse Stripe, branche boutique du webhook, `annoncer_commande()`, `commandes.json` sauvegardé, quota et CORS |
+| `modbot/test_boutique.py` | nouveau : catalogue, contact Discord, prix imposé par le bot, PayPal, webhook signé, annonce unique, commande reconstituée |
+| `modbot-site/boutique.html` | nouvelle page, avec la fenêtre de commande |
+| `modbot-site/script.js` | `BOUTIQUE_ARTICLES`, `initPageBoutique()` |
+| `modbot-site/style.css` | cartes, étapes, fenêtre |
+| `modbot-site/translations.js` | ~120 clefs × 5 langues ; dates des conditions et de la confidentialité ; ligne Stripe |
+| `modbot-site/conditions.html`, `confidentialite.html` | sections « Boutique » |
+| `modbot-site/test_derives.py`, `test_i18n.py` | la page, et le croisement des prix avec le bot |
