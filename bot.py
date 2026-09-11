@@ -17,6 +17,7 @@ import security_score as sc_score
 import reseaux_sociaux as rs
 import compteurs as cpt
 import langue_bot as lb
+import boutique as bq
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -300,6 +301,7 @@ F_ADMINS = chemin_donnees("admins.json")
 F_PREMIUM = chemin_donnees("premium.json")
 F_VISITES = chemin_donnees("visites.json")
 F_LICENCES = chemin_donnees("licences.json")
+F_COMMANDES = chemin_donnees("commandes.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -411,6 +413,9 @@ FICHIERS_SAUVEGARDES = (
     # places lui restent. Sans elles, un acheteur perdait ses places
     # libres au premier redeploiement, sans aucune trace.
     "licences.json",
+    # Les commandes de la boutique : qui a paye quoi, et comment le
+    # recontacter. Les perdre, ce serait perdre un client qui a paye.
+    "commandes.json",
     # Le compteur de visites : le perdre le ferait repartir a son
     # chiffre de depart, ce qui serait faux.
     "visites.json",
@@ -5333,7 +5338,7 @@ def resolve_cors_origin(request):
 # nominative et n'acceptent aucune authentification, donc restreindre leur
 # CORS n'apporterait rien — et casserait l'affichage si le site change de
 # domaine sans que DASHBOARD_ALLOWED_ORIGINS soit mis a jour.
-CORS_PUBLIC_PATHS = ("/api/public/", "/api/premium/offers")
+CORS_PUBLIC_PATHS = ("/api/public/", "/api/premium/offers", "/api/boutique/")
 
 
 def apply_cors(response, request=None):
@@ -5399,6 +5404,10 @@ def client_ip(request):
 # Quotas par prefixe de route : (requetes, fenetre en secondes)
 RATE_LIMITS = [
     ("/api/auth/", (10, 60)),
+    # Chaque commande ouvre une session de paiement chez Stripe : six par
+    # tranche de dix minutes suffisent a quelqu'un qui hesite, pas a
+    # quelqu'un qui voudrait en fabriquer par milliers.
+    ("/api/boutique/commande", (6, 600)),
     ("/api/admin/", (30, 60)),
     ("/api/", (120, 60)),
 ]
@@ -9132,6 +9141,196 @@ async def api_premium_checkout(request):
     return api_json({"ok": True, "url": corps.get("url", "")}, request=request)
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  LA BOUTIQUE
+#
+#  Des creations vendues sur le site : bots et sites faits sur mesure. Le
+#  catalogue et la validation vivent dans boutique.py ; ici, le paiement
+#  (Stripe, par carte ou PayPal), l'enregistrement et l'annonce.
+#
+#  Une commande n'est payee que quand Stripe le dit, par le webhook signe
+#  plus bas. Le retour du navigateur sur « commande=reussie » ne prouve
+#  rien : on peut taper cette adresse a la main.
+# ══════════════════════════════════════════════════════════════════════
+
+def commandes_tout():
+    donnees = jload(F_COMMANDES)
+    return donnees if isinstance(donnees, dict) else {}
+
+
+def commande_ecrire(fiche):
+    """Enregistre une commande, et oublie celles restees impayees trop longtemps."""
+    donnees = bq.elaguer(dict(commandes_tout()))
+    donnees[fiche["numero"]] = fiche
+    jsave(F_COMMANDES, donnees)
+    return fiche
+
+
+async def api_boutique_offres(request):
+    """Le catalogue, et si la caisse est ouverte. Aucune donnee nominative."""
+    return api_json({"ok": True, "articles": bq.catalogue_public(),
+                     "checkout_available": bool(STRIPE_SECRET_KEY)}, request=request)
+
+
+async def api_boutique_commande(request):
+    """
+    Ouvre la page de paiement d'une commande.
+
+    Pas de compte exige : le client donne son pseudo ou son identifiant
+    Discord, et c'est par la qu'on le recontacte. Le montant vient du
+    catalogue — jamais de la requete.
+    """
+    payload = await request.json() if request.can_read_body else {}
+    commande, erreur = bq.valider_commande(payload)
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    article = bq.ARTICLES[commande["article"]]
+    numero = bq.nouveau_numero(set(commandes_tout()))
+    fiche = bq.nouvelle_commande(numero, commande, now().isoformat())
+
+    site = (DASHBOARD_SITE_URL or "").rsplit("/", 1)[0] or DASHBOARD_SITE_URL
+    donnees = {
+        "mode": "payment",
+        "payment_method_types[0]": bq.MOYENS[commande["moyen"]],
+        "line_items[0][quantity]": "1",
+        "line_items[0][price_data][currency]": bq.DEVISE,
+        "line_items[0][price_data][unit_amount]": str(article["prix"]),
+        "line_items[0][price_data][product_data][name]": article["libelle"],
+        "line_items[0][price_data][product_data][description]":
+            f"Commande {numero} — création sur mesure",
+        "success_url": f"{site}/boutique.html?commande=reussie&numero={numero}",
+        "cancel_url": f"{site}/boutique.html?commande=annulee",
+        "payment_intent_data[description]": f"Boutique ModBot {numero} — {article['libelle']}",
+        "payment_intent_data[metadata][commande]": numero,
+    }
+    for clef, valeur in bq.metadonnees_stripe(numero, commande).items():
+        donnees[f"metadata[{clef}]"] = valeur
+
+    timeout = aiohttp.ClientTimeout(total=20)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            corps = await stripe_appel(session, "POST", "/checkout/sessions", donnees)
+    except web.HTTPBadGateway:
+        if commande["moyen"] == "paypal":
+            # PayPal n'existe dans Stripe qu'une fois active dans son tableau
+            # de bord. Le message brut de Stripe parle de « payment method
+            # type » : le client ne saurait pas quoi en faire.
+            raise web.HTTPBadGateway(
+                text="Le paiement PayPal n'est pas encore ouvert. "
+                     "Choisis la carte bancaire, ou réessaie plus tard.")
+        raise
+
+    fiche["session"] = str(corps.get("id") or "")
+    commande_ecrire(fiche)
+    dashboard_log("boutique_commande", None, commande["discord"],
+                  f"{numero} — {article['libelle']}")
+    return api_json({"ok": True, "url": corps.get("url", ""), "numero": numero},
+                    request=request)
+
+
+async def boutique_paiement_recu(session_stripe):
+    """
+    Stripe confirme le paiement d'une commande : on l'enregistre payee, puis
+    on previent. Stripe peut renvoyer le meme evenement plusieurs fois ; une
+    commande deja payee n'est annoncee qu'une seule fois.
+    """
+    meta = session_stripe.get("metadata") or {}
+    numero = str(meta.get("commande") or "")
+    if not bq.numero_valide(numero):
+        print(f"boutique: numero de commande illisible ({numero!r})")
+        return None
+    # « Terminee » ne veut pas dire « payee » pour un moyen de paiement
+    # differe : on attend alors checkout.session.async_payment_succeeded.
+    if session_stripe.get("payment_status") != "paid":
+        print(f"boutique: {numero} en attente de paiement")
+        return None
+
+    fiche = commandes_tout().get(numero) or bq.commande_depuis_stripe(
+        numero, meta, now().isoformat())
+    if fiche.get("statut") in ("payee", "livree"):
+        return fiche
+    details = session_stripe.get("customer_details") or {}
+    fiche.update({
+        "statut": "payee",
+        "payee_le": now().isoformat(),
+        "montant": int(session_stripe.get("amount_total") or fiche.get("montant") or 0),
+        "email": clean_short_text(details.get("email"), "", 200),
+        "nom_client": clean_short_text(details.get("name"), "", 120),
+        "session": str(session_stripe.get("id") or fiche.get("session") or ""),
+    })
+    commande_ecrire(fiche)
+    print(f"boutique: {numero} payee ({fiche.get('libelle')}, "
+          f"{bq.formater_prix(fiche['montant'])})")
+    await annoncer_commande(fiche)
+    return fiche
+
+
+async def annoncer_commande(fiche):
+    """
+    Previent l'equipe — dans le salon des paiements, et en message prive a
+    chaque administrateur du bot — puis confirme au client, si son
+    identifiant Discord permet de le joindre.
+
+    Chaque annonce est tentee a part : aucune ne doit empecher les autres,
+    ni faire echouer l'enregistrement d'une commande payee.
+    """
+    client = str(fiche.get("discord") or "?")
+    contact = (f"<@{client}> (`{client}`)" if fiche.get("discord_type") == "id"
+               else f"`{client}`")
+    champs = [
+        ("Commande", f"`{fiche.get('numero')}`"),
+        ("Article", fiche.get("libelle") or fiche.get("article") or "?"),
+        ("Montant", bq.formater_prix(int(fiche.get("montant") or 0))),
+        ("Payé par", bq.LIBELLES_MOYENS.get(fiche.get("moyen"), fiche.get("moyen") or "?")),
+        ("Discord", contact),
+        ("E-mail", fiche.get("email") or "—"),
+    ]
+
+    def pour_l_equipe():
+        embed = discord.Embed(
+            title="🛒 Nouvelle commande — boutique",
+            description=(f"**{fiche.get('libelle')}** commandé par {contact}.\n"
+                         "À recontacter sur Discord sous 24 h."),
+            color=0x43B581, timestamp=now())
+        for nom, valeur in champs:
+            embed.add_field(name=nom, value=str(valeur)[:1024] or "-", inline=True)
+        embed.add_field(name="Projet", value=(fiche.get("projet") or "—")[:1024], inline=False)
+        embed.set_footer(text="ModBot Boutique")
+        return embed
+
+    try:
+        salon = bot.get_channel(SALON_PAIEMENTS) or await bot.fetch_channel(SALON_PAIEMENTS)
+        await salon.send(embed=pour_l_equipe())
+    except Exception as erreur:
+        print(f"boutique: annonce dans le salon impossible : {erreur}")
+
+    for admin in sorted(DASHBOARD_ADMIN_IDS):
+        if not str(admin).isdigit():
+            continue
+        try:
+            utilisateur = bot.get_user(int(admin)) or await bot.fetch_user(int(admin))
+            await utilisateur.send(embed=pour_l_equipe())
+        except Exception as erreur:
+            print(f"boutique: message prive a {admin} impossible : {erreur}")
+
+    if fiche.get("discord_type") == "id":
+        # Discord n'accepte un message prive que si le client partage un
+        # serveur avec le bot : sinon, c'est l'equipe qui le contacte.
+        try:
+            acheteur = bot.get_user(int(client)) or await bot.fetch_user(int(client))
+            merci = discord.Embed(
+                title="✅ Commande reçue",
+                description=(f"Merci ! Ta commande **{fiche.get('libelle')}** "
+                             f"(`{fiche.get('numero')}`) est payée.\n"
+                             "On te contacte ici, sur Discord, sous 24 h pour "
+                             "parler de ton projet."),
+                color=0x43B581, timestamp=now())
+            merci.set_footer(text="ModBot Boutique")
+            await acheteur.send(embed=merci)
+        except Exception as erreur:
+            print(f"boutique: confirmation au client impossible : {erreur}")
+
+
 async def api_stripe_webhook(request):
     """
     Ce que Stripe nous raconte.
@@ -9155,6 +9354,14 @@ async def api_stripe_webhook(request):
     gid = str(meta.get("guild_id") or objet.get("client_reference_id") or "")
     plan = str(meta.get("plan") or "")
     uid = str(meta.get("user_id") or "")
+
+    # La boutique d'abord : ses sessions ne portent ni user_id ni guild_id,
+    # et ne doivent jamais tomber dans les branches du premium.
+    if meta.get("type") == "boutique":
+        if type_evenement in ("checkout.session.completed",
+                              "checkout.session.async_payment_succeeded"):
+            await boutique_paiement_recu(objet)
+        return api_json({"ok": True, "received": type_evenement})
 
     if type_evenement == "checkout.session.completed" and uid:
         # L'acheteur recoit une licence, pas un serveur : c'est lui qui
@@ -10298,6 +10505,10 @@ async def start_dashboard_api():
     # endroit, le serveur de l'adresse etant simplement ignore.
     app.router.add_post("/api/premium/checkout", api_premium_checkout)
     app.router.add_post("/api/guilds/{guild_id}/premium/checkout", api_premium_checkout)
+    # La boutique : catalogue et commande publics — le client n'a pas besoin
+    # de compte ModBot — et paiement confirme par le meme webhook Stripe.
+    app.router.add_get("/api/boutique/offres", api_boutique_offres)
+    app.router.add_post("/api/boutique/commande", api_boutique_commande)
     app.router.add_get("/api/admin/premium", api_admin_premium_list)
     app.router.add_post("/api/admin/premium", api_admin_premium_grant)
     app.router.add_delete("/api/admin/premium/{guild_id}", api_admin_premium_revoke)

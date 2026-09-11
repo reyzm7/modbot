@@ -35,3 +35,6 @@ venv/
 rating_attente.json
 visites.json
 licences.json
+
+# Les commandes de la boutique (pseudos, e-mails des clients)
+commandes.json
