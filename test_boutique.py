@@ -515,6 +515,7 @@ async def fausse_edition(annonce, embed, vue=None):
     editions.append((annonce, embed, vue))
 
 
+vraie_edition = bot_mod.editer_annonce
 bot_mod.api_identity = fausse_identite
 bot_mod.ecrire_au_client = faux_ecrire
 bot_mod.envoyer_au_salon = faux_salon
@@ -939,6 +940,15 @@ async def scenario_suivi():
     verifier("un identifiant tape directement suffit",
              bot_mod.trouver_client({"discord": "444444444444444444", "discord_type": "id"})
              == 444444444444444444)
+
+    # Une fiche alteree ne doit pas faire modifier un message ailleurs que
+    # dans le salon des paiements (test_cloison interdit toute autre
+    # recherche globale de salon).
+    appels_salon = []
+    bot_mod.bot.get_channel = lambda cid: appels_salon.append(cid)
+    await vraie_edition({"salon": "123456789012345678", "message": "42"}, None, None)
+    verifier("une annonce hors du salon des paiements n'est jamais rouverte",
+             appels_salon == [], str(appels_salon))
 
 
 asyncio.run(scenario_suivi())

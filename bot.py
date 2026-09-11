@@ -9399,12 +9399,19 @@ async def envoyer_au_salon(embed, vue=None):
 
 
 async def editer_annonce(annonce, embed, vue=None):
-    """Remet l'annonce du salon a jour ; sans vue, ses boutons disparaissent."""
-    if not isinstance(annonce, dict) or not str(annonce.get("message") or "").isdigit():
+    """
+    Remet l'annonce du salon a jour ; sans vue, ses boutons disparaissent.
+
+    Les annonces vivent toutes dans le salon des paiements : c'est lui qu'on
+    rouvre, jamais un salon lu dans le fichier. Sinon, une fiche alteree
+    ferait modifier au bot un message de n'importe quel serveur.
+    """
+    if (not isinstance(annonce, dict)
+            or str(annonce.get("salon") or "") != str(SALON_PAIEMENTS)
+            or not str(annonce.get("message") or "").isdigit()):
         return
     try:
-        salon = (bot.get_channel(int(annonce["salon"]))
-                 or await bot.fetch_channel(int(annonce["salon"])))
+        salon = bot.get_channel(SALON_PAIEMENTS) or await bot.fetch_channel(SALON_PAIEMENTS)
         message = await salon.fetch_message(int(annonce["message"]))
         await message.edit(embed=embed, view=vue)
     except Exception as erreur:
