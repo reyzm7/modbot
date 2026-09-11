@@ -44,13 +44,13 @@ ARTICLES = {
     "site_dashboard": {"categorie": "site", "libelle": "Site + Dashboard",
                        "prix": 17900, "delai": 21, "revisions": 3},
     "pack_starter": {"categorie": "pack", "libelle": "Pack Starter",
-                     "prix": 3900, "delai": 7, "revisions": 1,
+                     "prix": 4200, "delai": 7, "revisions": 1,
                      "contient": ("bot_essentiel", "site_vitrine")},
     "pack_serveur": {"categorie": "pack", "libelle": "Pack Serveur",
-                     "prix": 9900, "delai": 14, "revisions": 2,
+                     "prix": 10900, "delai": 14, "revisions": 2,
                      "contient": ("bot_avance", "site_complet")},
     "pack_pro": {"categorie": "pack", "libelle": "Pack Pro",
-                 "prix": 22900, "delai": 30, "revisions": 3,
+                 "prix": 24900, "delai": 30, "revisions": 3,
                  "contient": ("bot_pro", "site_dashboard")},
 }
 

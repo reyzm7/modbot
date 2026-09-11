@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **11 septembre 2026** (voir §67 pour le dernier lot livré).
+> Dernière mise à jour : **11 septembre 2026** (voir §68 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -5041,3 +5041,27 @@ numéro, prix, catégorie, lien cliquable échappé, logo, texte très long
 borné ; PDF joint au MP et au compte rendu Discord ; téléchargements et
 refus 404/403/409). Rendu contrôlé avec pdf.js. Site : `test_i18n`,
 `test_derives`, `test_declarations`, `test_selecteurs`, `test_bienvenue`.
+
+## 68. Livré le 11 septembre 2026 — packs, fond au clic, icônes, cartes acceptées
+
+Demande : « augmente quand même un peu les prix des packs ; retire le truc
+bizarre quand on clique sur l'arrière-plan ; rajoute des logos dans la barre
+du haut ; sur Carte bancaire, mets un logo Mastercard ou autre ».
+
+- **Packs** : Pack Starter 42 € (au lieu de 48 € séparément), Pack Serveur
+  109 € (au lieu de 128 €), Pack Pro 249 € (au lieu de 278 €). Les autres
+  prix du §67 ne bougent pas. `boutique.py` et `BOUTIQUE_ARTICLES`
+  changent ensemble.
+- **Le fond ne réagit plus au clic** : l'écouteur qui lançait bouclier,
+  éclats et, après cinq clics, le « confinement », est retiré avec ses
+  fonctions (`lancerEclats`, `surUneSurface`). Le décor vit seul :
+  sentinelles, menaces neutralisées, lueur qui suit le pointeur. L'onde sur
+  les boutons, elle, reste.
+- **Barre du haut** : chaque lien a son icône, à gauche du libellé —
+  Fonctionnalités, Démo, Soutenir, Wiki, Partenaires, FAQ, Tarifs, Ajouter
+  ModBot, Support Discord — sur les sept pages publiques. Le `data-i18n`
+  passe du lien à son `<span>`. Entre 981 et 1320 px de large, les icônes
+  s'effacent (sauf Boutique) pour que la barre ne déborde pas.
+- **Cartes acceptées** : badges Visa et Mastercard (symboles `i-visa` et
+  `i-mastercard` du sprite) sur le bouton « Carte bancaire », dans les
+  cartes de la boutique comme dans « Ton devis ».
