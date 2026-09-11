@@ -18,6 +18,7 @@ import reseaux_sociaux as rs
 import compteurs as cpt
 import langue_bot as lb
 import boutique as bq
+import devis_pdf as dp
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -9341,7 +9342,7 @@ def trouver_client(fiche):
     return None
 
 
-async def ecrire_au_client(fiche, titre, texte, couleur=0x5865F2, lien=None):
+async def ecrire_au_client(fiche, titre, texte, couleur=0x5865F2, lien=None, fichier=None):
     """
     (True, "") si le message prive part, (False, raison) sinon.
 
@@ -9357,12 +9358,15 @@ async def ecrire_au_client(fiche, titre, texte, couleur=0x5865F2, lien=None):
         utilisateur = bot.get_user(uid) or await bot.fetch_user(uid)
         embed = discord.Embed(title=titre, description=texte, color=couleur, timestamp=now())
         embed.set_footer(text="ModBot Boutique")
+        options = {"embed": embed}
         if lien:
             vue = discord.ui.View(timeout=None)
             vue.add_item(discord.ui.Button(label="Voir et payer", url=lien, emoji="💶"))
-            await utilisateur.send(embed=embed, view=vue)
-        else:
-            await utilisateur.send(embed=embed)
+            options["view"] = vue
+        if fichier:
+            nom, octets = fichier
+            options["file"] = discord.File(io.BytesIO(octets), filename=nom)
+        await utilisateur.send(**options)
     except discord.Forbidden:
         return False, "messages privés fermés, ou aucun serveur en commun avec le bot"
     except Exception as erreur:
@@ -9533,10 +9537,62 @@ def lien_devis(fiche):
             f"&cle={urllib.parse.quote(fiche.get('cle') or '')}")
 
 
+LOGO_DEVIS = os.path.join(BASE_DIR, "assets", "devis-logo.jpg")
+
+
+def logo_devis():
+    """Le logo du devis PDF. Sans lui, le devis reste complet."""
+    try:
+        with open(LOGO_DEVIS, "rb") as fichier:
+            return fichier.read()
+    except OSError:
+        return None
+
+
+def pdf_du_devis(fiche):
+    """Le devis PDF d'une demande chiffree : (nom du fichier, octets)."""
+    site = urllib.parse.urlparse(site_racine()).netloc or "modbot-website.vercel.app"
+    octets = dp.devis_pdf(fiche, lien=lien_devis(fiche),
+                          categorie=bq.libelle_categorie(fiche.get("categorie")),
+                          prix_label=bq.formater_prix(fiche.get("prix")),
+                          logo=logo_devis(), maintenant=now(), site=site)
+    return dp.nom_fichier(fiche), octets
+
+
+def pdf_ou_rien(fiche):
+    """Le PDF, ou None : un PDF rate ne doit jamais empecher d'envoyer le prix."""
+    try:
+        return pdf_du_devis(fiche)
+    except Exception as erreur:
+        print(f"boutique: PDF du devis {fiche.get('id')} impossible : {erreur}")
+        return None
+
+
+def reponse_pdf(fiche, request):
+    if not int(fiche.get("prix") or 0):
+        raise web.HTTPConflict(text="Ce devis n'a pas encore de prix.")
+    nom, octets = pdf_du_devis(fiche)
+    reponse = web.Response(body=octets, content_type="application/pdf",
+                           headers={"Content-Disposition": f'inline; filename="{nom}"',
+                                    "Cache-Control": "no-store"})
+    return apply_cors(reponse, request)
+
+
+async def api_boutique_devis_pdf(request):
+    """Le devis PDF, pour le client : la cle de son lien fait foi."""
+    fiche = _devis_du_client(request.match_info.get("devis_id"), request.query.get("cle"))
+    return reponse_pdf(fiche, request)
+
+
+async def api_admin_boutique_devis_pdf(request):
+    await api_identity(request, admin_required=True)
+    return reponse_pdf(_devis_ou_404(request.match_info.get("devis_id")), request)
+
+
 def embed_devis(fiche):
     embed = discord.Embed(
         title=f"📝 Demande sur mesure {fiche.get('id')}",
-        description=(f"**{bq.CATEGORIES_DEVIS.get(fiche.get('categorie'), '?')}** — "
+        description=(f"**{bq.libelle_categorie(fiche.get('categorie'))}** — "
                      f"{contact_affiche(fiche)}\n\n{(fiche.get('description') or '')[:3500]}"),
         color=0xF1C40F if fiche.get("statut") in ("nouveau", "propose") else 0x747F8D,
         timestamp=now())
@@ -9713,7 +9769,8 @@ async def boutique_proposer_prix(ident, prix_brut, message, par):
     lien = lien_devis(nouvelle)
     texte = bq.message_devis_prix(nouvelle, lien)
     envoye, raison = await ecrire_au_client(nouvelle, texte["titre"], texte["texte"],
-                                            couleur=0xF1C40F, lien=lien)
+                                            couleur=0xF1C40F, lien=lien,
+                                            fichier=pdf_ou_rien(nouvelle))
     nouvelle["historique"][-1]["message"] = envoye
     devis_ecrire(nouvelle)
     await editer_annonce(nouvelle.get("annonce"), embed_devis(nouvelle), vue_devis(nouvelle))
@@ -9898,12 +9955,15 @@ def compte_rendu_boutique(resultat, fait):
     return "\n".join(lignes)[:1900]
 
 
-async def _repondre_boutique(interaction, texte):
+async def _repondre_boutique(interaction, texte, fichier=None):
     try:
+        options = {"ephemeral": True}
+        if fichier:
+            options["file"] = discord.File(io.BytesIO(fichier[1]), filename=fichier[0])
         if interaction.response.is_done():
-            await interaction.followup.send(texte, ephemeral=True)
+            await interaction.followup.send(texte, **options)
         else:
-            await interaction.response.send_message(texte, ephemeral=True)
+            await interaction.response.send_message(texte, **options)
     except Exception as erreur:
         print(f"boutique: reponse a l'interaction impossible : {erreur}")
 
@@ -9979,8 +10039,11 @@ async def boutique_interaction(interaction):
             else:
                 await _repondre_boutique(interaction, "Action inconnue.")
                 return
+            # Le prix fixe depuis Discord : l'equipe recoit le meme PDF
+            # que le client, pour savoir exactement ce qui est parti.
+            fichier = pdf_ou_rien(devis_tout().get(ident) or {}) if action == "prix" else None
             await _repondre_boutique(interaction, compte_rendu_boutique(
-                resultat, FAITS_BOUTIQUE.get(action, "Fait.")))
+                resultat, FAITS_BOUTIQUE.get(action, "Fait.")), fichier)
     except web.HTTPException as ex:
         await _repondre_boutique(interaction, f"⚠️ {ex.text or 'Action impossible.'}")
     except Exception as ex:
@@ -11173,6 +11236,8 @@ async def start_dashboard_api():
     app.router.add_post("/api/boutique/devis", api_boutique_devis)
     app.router.add_get("/api/boutique/devis/{devis_id}", api_boutique_devis_lire)
     app.router.add_post("/api/boutique/devis/{devis_id}/payer", api_boutique_devis_payer)
+    app.router.add_get("/api/boutique/devis/{devis_id}/pdf", api_boutique_devis_pdf)
+    app.router.add_get("/api/admin/boutique/devis/{devis_id}/pdf", api_admin_boutique_devis_pdf)
     app.router.add_post("/api/boutique/sav", api_boutique_sav)
     app.router.add_get("/api/admin/boutique", api_admin_boutique)
     app.router.add_post("/api/admin/boutique/commandes/{numero}/statut", api_admin_boutique_statut)

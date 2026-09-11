@@ -32,25 +32,25 @@ DEVISE = "eur"
 # rester sous la somme de ses parties, sinon il n'a aucune raison d'etre.
 ARTICLES = {
     "bot_essentiel": {"categorie": "bot", "libelle": "Bot Essentiel",
-                      "prix": 3900, "delai": 3, "revisions": 1},
+                      "prix": 1900, "delai": 3, "revisions": 1},
     "bot_avance": {"categorie": "bot", "libelle": "Bot Avancé",
-                   "prix": 8900, "delai": 7, "revisions": 2},
+                   "prix": 4900, "delai": 7, "revisions": 2},
     "bot_pro": {"categorie": "bot", "libelle": "Bot Pro",
-                "prix": 19900, "delai": 14, "revisions": 3},
+                "prix": 9900, "delai": 14, "revisions": 3},
     "site_vitrine": {"categorie": "site", "libelle": "Site Vitrine",
-                     "prix": 6900, "delai": 4, "revisions": 1},
+                     "prix": 2900, "delai": 4, "revisions": 1},
     "site_complet": {"categorie": "site", "libelle": "Site Complet",
-                     "prix": 17900, "delai": 10, "revisions": 2},
+                     "prix": 7900, "delai": 10, "revisions": 2},
     "site_dashboard": {"categorie": "site", "libelle": "Site + Dashboard",
-                       "prix": 39900, "delai": 21, "revisions": 3},
+                       "prix": 17900, "delai": 21, "revisions": 3},
     "pack_starter": {"categorie": "pack", "libelle": "Pack Starter",
-                     "prix": 8900, "delai": 7, "revisions": 1,
+                     "prix": 3900, "delai": 7, "revisions": 1,
                      "contient": ("bot_essentiel", "site_vitrine")},
     "pack_serveur": {"categorie": "pack", "libelle": "Pack Serveur",
-                     "prix": 22900, "delai": 14, "revisions": 2,
+                     "prix": 9900, "delai": 14, "revisions": 2,
                      "contient": ("bot_avance", "site_complet")},
     "pack_pro": {"categorie": "pack", "libelle": "Pack Pro",
-                 "prix": 49900, "delai": 30, "revisions": 3,
+                 "prix": 22900, "delai": 30, "revisions": 3,
                  "contient": ("bot_pro", "site_dashboard")},
 }
 
@@ -430,6 +430,15 @@ def message_statut(fiche):
 
 CATEGORIES_DEVIS = {"bot": "Bot Discord", "site": "Site web",
                     "les_deux": "Bot et site", "autre": "Autre chose"}
+# La premiere question du formulaire : 1 = bot, 2 = site, 3 = les deux,
+# 4 = autre. Le meme numero suit la demande partout — annonce, devis PDF.
+NUMEROS_CATEGORIES = {"bot": 1, "site": 2, "les_deux": 3, "autre": 4}
+
+
+def libelle_categorie(categorie):
+    """« 3 · Bot et site » ; une categorie inconnue devient « 4 · Autre chose »."""
+    cle = categorie if categorie in CATEGORIES_DEVIS else "autre"
+    return f"{NUMEROS_CATEGORIES[cle]} · {CATEGORIES_DEVIS[cle]}"
 LIBELLES_DEVIS = {"nouveau": "À chiffrer", "propose": "Prix envoyé",
                   "payee": "Payé", "clos": "Clos"}
 DESCRIPTION_MIN = 20
@@ -499,6 +508,7 @@ def message_devis_prix(devis, lien):
     if devis.get("message_prix"):
         texte += f"{devis['message_prix']}\n\n"
     texte += (f"**Prix proposé : {formater_prix(devis.get('prix'))}**\n\n"
+              "Le devis détaillé est joint en PDF.\n\n"
               f"Pour payer, par carte ou PayPal : {lien}\n"
               "Le lien reste valable tant que la demande est ouverte.")
     return {"titre": "💶 Ton devis est prêt", "texte": texte[:4000]}

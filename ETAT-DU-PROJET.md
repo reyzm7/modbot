@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **11 septembre 2026** (voir §66 pour le dernier lot livré).
+> Dernière mise à jour : **11 septembre 2026** (voir §67 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4972,3 +4972,72 @@ requête, annonce en double) sont chacune attrapées. Côté site : `test_i18n`,
 
 PayPal était déjà actif dans Stripe à la mise en ligne du §65 : la ligne
 « Activer PayPal » de ce paragraphe est sans objet.
+
+## 67. Livré le 11 septembre 2026 — prix de lancement, devis PDF, avatar
+
+Demande : « baisse les prix flagrantement pour que je puisse faire des
+ventes ; règle le problème de l'avatar ; pour une demande de devis, crée un
+vrai devis PDF avec le logo de ModBot ». Aussi : la première question du
+sur-mesure est un choix numéroté (1 = bot, 2 = site, 3 = les deux,
+4 = autre).
+
+### Les nouveaux prix (environ −50 %)
+
+| Article | Avant | Maintenant |
+|---|---|---|
+| Bot Essentiel | 39 € | 19 € |
+| Bot Avancé | 89 € | 49 € |
+| Bot Pro | 199 € | 99 € |
+| Site Vitrine | 69 € | 29 € |
+| Site Complet | 179 € | 79 € |
+| Site + Dashboard | 399 € | 179 € |
+| Pack Starter | 89 € | 39 € (au lieu de 48 €) |
+| Pack Serveur | 229 € | 99 € (au lieu de 128 €) |
+| Pack Pro | 499 € | 229 € (au lieu de 278 €) |
+
+Délais et révisions inchangés. Aucun faux prix barré de « promotion » :
+l'ancien prix n'a été pratiqué que quelques heures, l'afficher comme
+référence serait trompeur. Le « au lieu de » des packs compare, comme
+avant, à la somme des deux pièces achetées séparément. Les prix vivent
+toujours dans `boutique.py` **et** `BOUTIQUE_ARTICLES` (`test_derives.py`
+veille à ce qu'ils concordent).
+
+### Le devis PDF
+
+`devis_pdf.py`, sans dépendance : une page A4, polices standard du format
+(Helvetica, codage WinAnsi — accents et « € » compris, un emoji devient
+« ? »), logo en JPEG (`assets/devis-logo.jpg`). Contenu : en-tête sombre
+avec le logo, « DEVIS », numéro et date ; client (pseudo, identifiant
+Discord) ; objet (« 3 · Bot et site ») ; description du projet (bornée à
+15 lignes) ; désignation, total TTC ; le mot de l'équipe ; un encadré
+« Pour accepter ce devis et payer » avec **le lien de paiement cliquable** ;
+le pied (conditions de la boutique).
+
+Il est créé quand l'équipe fixe le prix — un devis sans prix n'en est pas
+un — et :
+
+- **joint au message privé** du client, avec le prix et le lien ;
+- **téléchargeable par le client** sur « Ton devis »
+  (`GET /api/boutique/devis/{id}/pdf?cle=…`, même clé que le lien) ;
+- **téléchargeable dans l'admin** (bouton « Devis PDF »,
+  `GET /api/admin/boutique/devis/{id}/pdf`, réservé aux administrateurs) ;
+- **joint au compte rendu Discord** quand le prix est fixé depuis le salon.
+
+Un PDF qui échouerait n'empêche jamais l'envoi du prix. Pas encore de prix :
+409 ; mauvaise clé : 404.
+
+### L'avatar
+
+`/api/me` renvoie `avatar` (l'empreinte Discord) **et** `avatar_url`
+(l'adresse de l'image). La boutique et l'administration prenaient
+l'empreinte pour une adresse : image cassée. Elles lisent désormais
+`avatar_url`, et une image qui ne charge pas s'efface au lieu de laisser un
+cadre vide.
+
+### Vérifications
+
+`test_boutique.py` : 286 vérifications (PDF bien formé à l'octet près,
+numéro, prix, catégorie, lien cliquable échappé, logo, texte très long
+borné ; PDF joint au MP et au compte rendu Discord ; téléchargements et
+refus 404/403/409). Rendu contrôlé avec pdf.js. Site : `test_i18n`,
+`test_derives`, `test_declarations`, `test_selecteurs`, `test_bienvenue`.

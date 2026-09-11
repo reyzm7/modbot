@@ -6,7 +6,7 @@ se contourne pas.
 Trois choses comptent plus que le reste :
 
   * le PRIX vient du catalogue, jamais du navigateur. Une requete qui
-    annonce « prix : 1 » paie quand meme 39 € ;
+    annonce « prix : 1 » paie quand meme 19 € ;
   * une commande n'est PAYEE que sur un webhook Stripe signe, et avec
     `payment_status` a « paid ». Une signature fausse ne credite rien ;
   * une commande payee n'est ANNONCEE qu'une fois, meme quand Stripe
@@ -65,7 +65,7 @@ catalogue = bq.catalogue_public()
 verifier("le catalogue public reprend les neuf articles, dans l'ordre",
          [a["key"] for a in catalogue] == list(bq.ARTICLES))
 verifier("le catalogue public donne la valeur des packs",
-         next(a for a in catalogue if a["key"] == "pack_starter")["value"] == 10800)
+         next(a for a in catalogue if a["key"] == "pack_starter")["value"] == 4800)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -309,6 +309,80 @@ verifier("un texte garde ses retours a la ligne mais pas ses caracteres de contr
 
 
 # ══════════════════════════════════════════════════════════════════════
+print("\n--- Le devis en PDF ---")
+
+import re  # noqa: E402
+import zlib  # noqa: E402
+import devis_pdf as dp  # noqa: E402
+
+FAUX_JPEG = bytes.fromhex("ffd8ffe000104a46494600010100000100010000"
+                          "ffc00011080002000303012200021101031101ffd9")
+verifier("les dimensions d'un JPEG se lisent", dp.dimensions_jpeg(FAUX_JPEG) == (3, 2, 3),
+         str(dp.dimensions_jpeg(FAUX_JPEG)))
+try:
+    dp.dimensions_jpeg(b"\x89PNG\r\n\x1a\n")
+    refuse = False
+except ValueError:
+    refuse = True
+verifier("un fichier qui n'est pas un JPEG est refuse", refuse)
+verifier("le texte passe en WinAnsi : accents et euro gardes, emoji remplace",
+         dp.texte_winansi("€é😀") == b"\x80\xe9?")
+lignes = dp.couper("mot " * 300 + "x" * 400, 10.5, 300)
+verifier("chaque ligne coupee tient dans la largeur",
+         all(dp.largeur(ligne, 10.5) <= 300 for ligne in lignes),
+         str(max(dp.largeur(ligne, 10.5) for ligne in lignes)))
+
+
+def lire_pdf(octets):
+    """La structure d'un PDF : en-tete, table des positions exacte, pied, texte."""
+    debut = int(re.search(rb"startxref\s+(\d+)", octets).group(1))
+    table = octets[debut:]
+    positions = re.findall(rb"(\d{10}) 00000 n", table)
+    exacte = table.startswith(b"xref") and bool(positions)
+    for n, position in enumerate(positions, 1):
+        if not octets[int(position):].startswith(f"{n} 0 obj".encode()):
+            exacte = False
+    flux = [zlib.decompress(m.group(1)) for m in
+            re.finditer(rb"/FlateDecode >>\nstream\n(.*?)\nendstream", octets, re.S)]
+    return {"entete": octets.startswith(b"%PDF-1.4"),
+            "fin": octets.rstrip().endswith(b"%%EOF"),
+            "table": exacte, "texte": b"".join(flux)}
+
+
+lien_test = "https://modbot-website.vercel.app/boutique.html?devis=DV-260911-ABCD&cle=k(1)"
+pdf = dp.devis_pdf(dict(propose, discord_nom="Client"), lien=lien_test,
+                   categorie="3 · Bot et site", prix_label="89,90 €", logo=FAUX_JPEG,
+                   maintenant=instant)
+lu = lire_pdf(pdf)
+verifier("le devis est un PDF bien forme (en-tete, table des positions, pied)",
+         lu["entete"] and lu["fin"] and lu["table"])
+verifier("il porte le numero, le prix et le total",
+         b"DV-260911-ABCD" in lu["texte"] and b"89,90 \x80" in lu["texte"]
+         and b"Total TTC" in lu["texte"])
+verifier("il porte la categorie numerotee et le client",
+         b"3 \xb7 Bot et site" in lu["texte"] and b"(Client)" in lu["texte"])
+verifier("il porte le mot de l'equipe", b"Tickets + transcripts" in lu["texte"])
+verifier("le lien de paiement est cliquable, et bien echappe",
+         b"/S /URI /URI (" in pdf and b"cle=k\\(1\\)" in pdf)
+verifier("le logo est integre", b"/DCTDecode" in pdf and b"/Width 3 /Height 2" in pdf)
+sans_logo = dp.devis_pdf(propose, lien=lien_test, categorie="1 · Bot Discord", prix_label="19 €")
+verifier("sans logo, le devis reste un PDF complet",
+         lire_pdf(sans_logo)["table"] and b"/DCTDecode" not in sans_logo)
+long = dp.devis_pdf(dict(propose, description="Un projet 😀 " * 600, message_prix="x" * 3000),
+                    lien=lien_test, categorie="4 · Autre chose", prix_label="10 000 €")
+verifier("une description tres longue est bornee, sans casser le PDF",
+         lire_pdf(long)["table"] and b"\x85" in lire_pdf(long)["texte"])
+verifier("le nom du fichier porte le numero du devis",
+         dp.nom_fichier(propose) == "devis-DV-260911-ABCD.pdf")
+verifier("la categorie numerotee : 1 bot, 2 site, 3 les deux, 4 autre",
+         [bq.libelle_categorie(c) for c in ("bot", "site", "les_deux", "autre", "inconnue")]
+         == ["1 · Bot Discord", "2 · Site web", "3 · Bot et site", "4 · Autre chose",
+             "4 · Autre chose"])
+verifier("le message du prix annonce le PDF joint",
+         "joint en PDF" in bq.message_devis_prix(propose, "https://l")["texte"])
+
+
+# ══════════════════════════════════════════════════════════════════════
 print("\n--- La caisse et le webhook, dans le bot ---")
 
 import discord.ext.commands as _commands  # noqa: E402
@@ -375,7 +449,7 @@ async def scenario():
     verifier("la commande ouvre une session de paiement Stripe",
              chemin == "/checkout/sessions" and reponse["url"].startswith("https://"))
     verifier("le montant est celui du catalogue, pas celui de la requete",
-             donnees["line_items[0][price_data][unit_amount]"] == "3900",
+             donnees["line_items[0][price_data][unit_amount]"] == "1900",
              donnees["line_items[0][price_data][unit_amount]"])
     verifier("un paiement unique, pas un abonnement", donnees["mode"] == "payment")
     verifier("la carte bancaire est demandee a Stripe",
@@ -387,7 +461,7 @@ async def scenario():
              "client_reference_id" not in donnees and "metadata[user_id]" not in donnees)
     fiche = bot_mod.commandes_tout().get(reponse["numero"])
     verifier("la commande est enregistree, en attente de paiement",
-             fiche and fiche["statut"] == "en_attente" and fiche["montant"] == 3900)
+             fiche and fiche["statut"] == "en_attente" and fiche["montant"] == 1900)
 
     await commander(dict(bonne, moyen="paypal"))
     verifier("PayPal est demande a Stripe", envois_stripe[-1][2]["payment_method_types[0]"] == "paypal")
@@ -402,7 +476,7 @@ async def scenario():
     # Le webhook : signature, paiement confirme, une seule annonce.
     numero = reponse["numero"]
     evenement = {"type": "checkout.session.completed", "data": {"object": {
-        "id": "cs_test_1", "payment_status": "paid", "amount_total": 3900,
+        "id": "cs_test_1", "payment_status": "paid", "amount_total": 1900,
         "metadata": {"type": "boutique", "commande": numero, "article": "bot_essentiel",
                      "discord": "client_42", "moyen": "carte"},
         "customer_details": {"email": "client@exemple.fr", "name": "Client"}}}}
@@ -484,9 +558,9 @@ messages_prives = []
 joignable = [True]
 
 
-async def faux_ecrire(fiche, titre, texte, couleur=0, lien=None):
+async def faux_ecrire(fiche, titre, texte, couleur=0, lien=None, fichier=None):
     messages_prives.append({"a": fiche.get("discord"), "titre": titre, "texte": texte,
-                            "lien": lien})
+                            "lien": lien, "fichier": fichier})
     if joignable[0]:
         return True, ""
     return False, "messages privés fermés, ou aucun serveur en commun avec le bot"
@@ -572,14 +646,15 @@ class FauxUtilisateur:
 
 class FausseReponse:
     def __init__(self):
-        self.fait, self.envois, self.modal = False, [], None
+        self.fait, self.envois, self.modal, self.fichiers = False, [], None, []
 
     def is_done(self):
         return self.fait
 
-    async def send_message(self, texte, ephemeral=False):
+    async def send_message(self, texte, ephemeral=False, **options):
         self.fait = True
         self.envois.append(texte)
+        self.fichiers.append(options.get("file"))
 
     async def defer(self, ephemeral=False, thinking=False):
         self.fait = True
@@ -591,10 +666,11 @@ class FausseReponse:
 
 class FauxSuivi:
     def __init__(self):
-        self.envois = []
+        self.envois, self.fichiers = [], []
 
-    async def send(self, texte, ephemeral=False):
+    async def send(self, texte, ephemeral=False, **options):
         self.envois.append(texte)
+        self.fichiers.append(options.get("file"))
 
 
 class FausseInteraction:
@@ -728,6 +804,9 @@ async def scenario_suivi():
     devis = bot_mod.devis_tout().get(ident, {})
     verifier("la demande est enregistree, a chiffrer",
              statut == 200 and devis.get("statut") == "nouveau" and len(devis.get("cle", "")) >= 20)
+    statut, _ = await appel(bot_mod.api_boutique_devis_pdf, match={"devis_id": ident},
+                            query={"cle": devis.get("cle", "")})
+    verifier("pas de devis PDF tant qu'il n'y a pas de prix", statut == 409)
     verifier("la demande arrive dans le salon, avec « Proposer un prix » et « Clore »",
              boutons(annonces_salon[-1][1]) == [f"bq:d:prix:{ident}", f"bq:d:clore:{ident}"])
     verifier("la reponse au client ne donne pas la cle du lien", "cle" not in reponse)
@@ -748,6 +827,24 @@ async def scenario_suivi():
              and messages_prives[-1]["lien"] == reponse["lien"])
     verifier("le lien porte le devis et sa cle",
              f"devis={ident}" in reponse["lien"] and f"cle={devis['cle']}" in reponse["lien"])
+    fichier = messages_prives[-1].get("fichier")
+    verifier("le devis PDF est joint au message prive",
+             bool(fichier) and fichier[0] == f"devis-{ident}.pdf" and fichier[1].startswith(b"%PDF"),
+             str(fichier and fichier[0]))
+    verifier("le PDF envoye porte le logo ModBot", bool(fichier) and b"/DCTDecode" in fichier[1])
+    verifier("et le prix de la demande", bool(fichier) and b"89,90 \x80" in b"".join(
+        zlib.decompress(m.group(1)) for m in
+        re.finditer(rb"/FlateDecode >>\nstream\n(.*?)\nendstream", fichier[1], re.S)))
+    rep = await bot_mod.api_boutique_devis_pdf(requete(match=route, query={"cle": devis["cle"]}))
+    verifier("le client telecharge son devis PDF avec son lien",
+             rep.content_type == "application/pdf" and rep.body.startswith(b"%PDF")
+             and f"devis-{ident}.pdf" in rep.headers.get("Content-Disposition", ""))
+    statut, _ = await appel(bot_mod.api_boutique_devis_pdf, match=route, query={"cle": "fausse"})
+    verifier("pas de PDF avec une mauvaise cle", statut == 404)
+    statut, _ = await appel(bot_mod.api_admin_boutique_devis_pdf, jeton="membre", match=route)
+    verifier("le PDF de l'administration est reserve aux administrateurs", statut == 403)
+    rep = await bot_mod.api_admin_boutique_devis_pdf(requete(jeton="admin", match=route))
+    verifier("l'administration telecharge le PDF", rep.body.startswith(b"%PDF"))
 
     statut, _ = await appel(bot_mod.api_boutique_devis_lire, match=route, query={"cle": "fausse"})
     verifier("le devis ne s'ouvre pas avec une mauvaise cle", statut == 404)
@@ -890,6 +987,8 @@ async def scenario_suivi():
     verifier("le prix envoye depuis Discord part en prive, et le lien est rappele a l'equipe",
              bot_mod.devis_tout()[ident]["prix"] == 15000 and messages_prives[-1]["lien"]
              and messages_prives[-1]["lien"] in clic.texte(), clic.texte()[:120])
+    verifier("l'equipe recoit aussi le devis PDF dans le compte rendu Discord",
+             any(getattr(f, "filename", "") == f"devis-{ident}.pdf" for f in clic.followup.fichiers))
     clic = await cliquer(f"bq:d:clore:{ident}")
     verifier("« Clore » un devis depuis Discord", bot_mod.devis_tout()[ident]["statut"] == "clos")
 
@@ -922,12 +1021,14 @@ async def scenario_suivi():
     FauxUtilisateur.envois.clear()
     fiche = {"numero": "MB-260911-ABCD", "discord": "client_42", "discord_type": "pseudo",
              "discord_id": "333333333333333333"}
-    envoye, raison = await vrai_ecrire(fiche, "Titre", "Texte", lien="https://exemple.fr/devis")
+    envoye, raison = await vrai_ecrire(fiche, "Titre", "Texte", lien="https://exemple.fr/devis",
+                                       fichier=("devis-test.pdf", b"%PDF-1.4 test"))
     _, envoi = FauxUtilisateur.envois[-1] if FauxUtilisateur.envois else (None, {})
     verifier("le message prive part a l'identifiant connu",
              envoye and FauxUtilisateur.envois[-1][0] == 333333333333333333)
     verifier("avec un bouton-lien « Voir et payer »",
              envoi.get("view") is not None and envoi["view"].children[0].url == "https://exemple.fr/devis")
+    verifier("et le devis PDF joint", getattr(envoi.get("file"), "filename", "") == "devis-test.pdf")
     FauxUtilisateur.refuser[0] = True
     envoye, raison = await vrai_ecrire(dict(fiche), "Titre", "Texte")
     FauxUtilisateur.refuser[0] = False
@@ -966,6 +1067,8 @@ source = open("bot.py", encoding="utf-8").read()
 for route in ('add_post("/api/boutique/devis", api_boutique_devis)',
               'add_get("/api/boutique/devis/{devis_id}", api_boutique_devis_lire)',
               'add_post("/api/boutique/devis/{devis_id}/payer", api_boutique_devis_payer)',
+              'add_get("/api/boutique/devis/{devis_id}/pdf", api_boutique_devis_pdf)',
+              'add_get("/api/admin/boutique/devis/{devis_id}/pdf", api_admin_boutique_devis_pdf)',
               'add_post("/api/boutique/sav", api_boutique_sav)',
               'add_get("/api/admin/boutique", api_admin_boutique)',
               'add_post("/api/admin/boutique/commandes/{numero}/statut", api_admin_boutique_statut)',
