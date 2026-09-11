@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **11 septembre 2026** (voir §65 pour le dernier lot livré).
+> Dernière mise à jour : **11 septembre 2026** (voir §66 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -4854,3 +4854,121 @@ avec des packs — fais ça vraiment bien. »
   `BOUTIQUE_ARTICLES` (`remplirPrixDAppel()`), lui-même croisé avec
   `boutique.py` par `test_derives.py` : aucun prix n'est écrit dans les
   traductions, rien ne peut dériver.
+
+## 66. Livré le 11 septembre 2026 — suivi des commandes, devis sur mesure, assistance
+
+Demande : « rends la boutique beaucoup plus attractive avec des exemples
+concrets ; les commandes arrivent dans le salon des paiements ; dans l'admin,
+une rubrique achat/paiement avec l'historique et l'actuel, et des boutons
+"en cours de création", "commence dans N jours" et "liste d'attente" qui
+préviennent le client en MP avec son numéro de commande ; un SAV pour
+installer le bot et le faire découvrir ; un système où il dit ce qu'il veut
+exactement, je réponds avec un prix, et ça lui envoie un lien de paiement en
+MP. Aucun bug, tout vérifié. »
+
+### Le suivi d'une commande payée
+
+Statuts : `payee` (à traiter), `en_cours` (en cours de création),
+`planifiee` (commence dans N jours, date calculée et affichée), `attente`
+(liste d'attente), `livree`. Une commande impayée, livrée ou annulée ne
+bouge plus. Chaque changement :
+
+1. envoie un **message privé au client**, avec son numéro de commande ;
+2. s'inscrit dans l'**historique** de la commande (date, auteur, message
+   parti ou non) ;
+3. **remet à jour l'annonce** du salon des paiements (statut et boutons ;
+   une commande livrée perd ses boutons).
+
+Les mêmes actions existent à deux endroits, qui appellent la même fonction :
+
+- l'admin, rubrique **04 « Achats et paiements »** : compteurs (à traiter,
+  devis à chiffrer, assistance à répondre, encaissé), onglets **En cours /
+  Sur mesure / Assistance / Historique** ;
+- les **boutons sous l'annonce** dans `SALON_PAIEMENTS`, réservés aux
+  administrateurs du bot (« Commence dans… » ouvre une fenêtre qui demande
+  le nombre de jours).
+
+### La demande sur mesure (devis)
+
+1. Le client décrit son projet sur la boutique (catégorie, description d'au
+   moins 20 caractères, budget et délai facultatifs).
+2. La demande `DV-…` arrive dans l'admin **et** dans le salon, avec
+   « Proposer un prix » et « Clore ».
+3. L'équipe fixe le prix (1 à 10 000 €, « 120 » ou « 89,90 ») et un mot
+   facultatif. Le client reçoit en MP le prix et **un lien personnel**
+   `boutique.html?devis=…&cle=…`.
+4. Ce lien ouvre « Ton devis » : prix, mot de l'équipe, conditions, carte ou
+   PayPal. Une page Stripe expire au bout d'un jour ; le lien, lui, reste
+   valable : **chaque clic ouvre une session neuve**.
+5. Payé (webhook signé), le devis devient une **commande** `MB-…` au prix
+   du devis, annoncée comme les autres.
+
+Le prix vient du devis enregistré, jamais du navigateur. La clé du lien
+(`secrets.token_urlsafe`) n'est jamais renvoyée par la liste admin : elle ne
+voyage que dans le lien. Mauvaise clé et devis inconnu répondent pareil (404).
+
+### L'assistance (SAV)
+
+Section « Besoin d'aide avec ton bot ? » : trois raccourcis (installer
+ModBot, le wiki, le dashboard) et un formulaire (installation, découverte,
+problème, autre ; numéro de commande facultatif). La demande `SV-…` arrive
+dans l'admin et le salon ; la réponse de l'équipe part en MP ; « Clore »
+ferme la demande.
+
+### Joindre le client
+
+- **Connecté avec Discord** sur la boutique : son identifiant est pris dans
+  la session, il n'a rien à taper, et c'est lui qui permet le MP.
+- Sinon, son **pseudo** est cherché parmi les membres des serveurs du bot.
+- La boutique invite à **rejoindre le serveur ModBot** : Discord refuse un
+  MP sans serveur commun.
+- Un MP qui échoue est **dit, pas caché** : l'admin et le compte rendu
+  Discord donnent la raison, et le lien de paiement d'un devis reste affiché
+  pour être transmis autrement.
+
+### La vitrine
+
+- « **Exemples concrets** » : quatre cas dessinés en HTML (un ticket RP, un
+  accueil avec avertissement, une vitrine de serveur, un dashboard), chacun
+  relié à la formule qui le rend possible, avec son prix. Une note dit que
+  ce sont des aperçus d'illustration. Aucun faux avis, aucune fausse
+  réalisation : la seule « preuve » citée est ModBot lui-même.
+- « **Idéal pour** » sur chaque carte ; boutons « Voir des exemples »,
+  « Demander un devis », « Besoin d'aide ? » en tête ; une question de plus
+  dans la FAQ.
+
+### Garanties vérifiées par les tests
+
+`test_boutique.py` passe de 63 à **258 vérifications** :
+
+- routes admin : **401 sans session, 403 sans les droits**, et rien n'est
+  modifié ni envoyé dans ces deux cas ;
+- le prix d'un devis payé est **celui du devis**, même si la requête en
+  annonce un autre ; un devis payé ou clos ne se paie plus (409) ;
+- webhook d'un devis : commande payée, devis marqué payé, boutons retirés ;
+- boutons et fenêtres Discord : refusés aux non-administrateurs, statut,
+  jours, prix et réponse lus depuis la fenêtre (rangées **et** « labels »
+  des nouveaux composants) ;
+- vrai message privé : envoi, bouton-lien, messages privés fermés, pseudo
+  introuvable.
+
+Trois mutations volontaires du code (droit admin retiré, prix pris dans la
+requête, annonce en double) sont chacune attrapées. Côté site : `test_i18n`,
+`test_derives`, `test_declarations`, `test_selecteurs`, `test_bienvenue`.
+
+### Fichiers
+
+| Fichier | Ce qui change |
+|---|---|
+| `modbot/boutique.py` | statuts et messages, devis (prix, lien, paiement), SAV, contact depuis la session |
+| `modbot/bot.py` | `ecrire_au_client`, `trouver_client`, annonces à boutons, routes devis/SAV/admin, `boutique_interaction` (écouteur global), webhook des devis, `devis.json` et `sav.json` sauvegardés, quotas |
+| `modbot/test_boutique.py` | suivi, devis, SAV, admin, boutons Discord, vrai MP |
+| `modbot-site/boutique.html` | compte Discord, exemples, « Ton devis », formulaire sur mesure, assistance |
+| `modbot-site/admin.html` | rubrique 04 « Achats et paiements » (les suivantes renumérotées) |
+| `modbot-site/script.js` | compte, formulaires, devis du client ; rubrique admin |
+| `modbot-site/style.css` | aperçus, formulaires, devis, fiches de l'admin |
+| `modbot-site/translations.js` | 191 clefs × 5 langues |
+| `modbot-site/conditions.html`, `confidentialite.html` | devis, assistance, données des demandes |
+
+PayPal était déjà actif dans Stripe à la mise en ligne du §65 : la ligne
+« Activer PayPal » de ce paragraphe est sans objet.

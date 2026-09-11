@@ -38,3 +38,5 @@ licences.json
 
 # Les commandes de la boutique (pseudos, e-mails des clients)
 commandes.json
+devis.json
+sav.json

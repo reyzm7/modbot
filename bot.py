@@ -302,6 +302,8 @@ F_PREMIUM = chemin_donnees("premium.json")
 F_VISITES = chemin_donnees("visites.json")
 F_LICENCES = chemin_donnees("licences.json")
 F_COMMANDES = chemin_donnees("commandes.json")
+F_DEVIS = chemin_donnees("devis.json")
+F_SAV = chemin_donnees("sav.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -416,6 +418,10 @@ FICHIERS_SAUVEGARDES = (
     # Les commandes de la boutique : qui a paye quoi, et comment le
     # recontacter. Les perdre, ce serait perdre un client qui a paye.
     "commandes.json",
+    # Les demandes sur mesure et d'assistance : ce que le client a demande,
+    # et le prix qu'on lui a propose.
+    "devis.json",
+    "sav.json",
     # Le compteur de visites : le perdre le ferait repartir a son
     # chiffre de depart, ce qui serait faux.
     "visites.json",
@@ -5408,6 +5414,13 @@ RATE_LIMITS = [
     # tranche de dix minutes suffisent a quelqu'un qui hesite, pas a
     # quelqu'un qui voudrait en fabriquer par milliers.
     ("/api/boutique/commande", (6, 600)),
+    # Le lien d'un devis s'ouvre et se paie : large, mais borne — payer
+    # ouvre une session chez Stripe.
+    ("/api/boutique/devis/", (20, 600)),
+    # Une demande sur mesure ou d'assistance poste un message dans le
+    # salon de l'equipe : cinq par tranche de dix minutes.
+    ("/api/boutique/devis", (5, 600)),
+    ("/api/boutique/sav", (5, 600)),
     ("/api/admin/", (30, 60)),
     ("/api/", (120, 60)),
 ]
@@ -9145,8 +9158,10 @@ async def api_premium_checkout(request):
 #  LA BOUTIQUE
 #
 #  Des creations vendues sur le site : bots et sites faits sur mesure. Le
-#  catalogue et la validation vivent dans boutique.py ; ici, le paiement
-#  (Stripe, par carte ou PayPal), l'enregistrement et l'annonce.
+#  catalogue, la validation, les statuts et les messages vivent dans
+#  boutique.py ; ici, le paiement (Stripe, par carte ou PayPal), les
+#  demandes sur mesure, le service apres-vente, les messages prives au
+#  client et les boutons du salon des paiements.
 #
 #  Une commande n'est payee que quand Stripe le dit, par le webhook signe
 #  plus bas. Le retour du navigateur sur « commande=reussie » ne prouve
@@ -9172,44 +9187,50 @@ async def api_boutique_offres(request):
                      "checkout_available": bool(STRIPE_SECRET_KEY)}, request=request)
 
 
-async def api_boutique_commande(request):
+async def identite_facultative(request):
     """
-    Ouvre la page de paiement d'une commande.
+    L'identite Discord du visiteur s'il est connecte au site, sinon None.
 
-    Pas de compte exige : le client donne son pseudo ou son identifiant
-    Discord, et c'est par la qu'on le recontacte. Le montant vient du
-    catalogue — jamais de la requete.
+    Connecte, le client n'a rien a taper : son identifiant est connu et
+    verifie — et c'est lui qui permet de lui ecrire en prive.
     """
-    payload = await request.json() if request.can_read_body else {}
-    commande, erreur = bq.valider_commande(payload)
-    if erreur:
-        raise web.HTTPBadRequest(text=erreur)
-    article = bq.ARTICLES[commande["article"]]
-    numero = bq.nouveau_numero(set(commandes_tout()))
-    fiche = bq.nouvelle_commande(numero, commande, now().isoformat())
+    try:
+        identity = await api_identity(request)
+    except web.HTTPException:
+        return None
+    return identity if str(identity.get("user_id") or "").isdigit() else None
 
-    site = (DASHBOARD_SITE_URL or "").rsplit("/", 1)[0] or DASHBOARD_SITE_URL
+
+def site_racine():
+    return (DASHBOARD_SITE_URL or "").rsplit("/", 1)[0] or DASHBOARD_SITE_URL
+
+
+async def ouvrir_paiement(numero, commande, libelle, montant, retour_annule=None):
+    """
+    Ouvre la page de paiement Stripe d'une commande ; rend la reponse de
+    Stripe. Le montant vient du catalogue ou du devis — jamais de la requete.
+    """
+    site = site_racine()
     donnees = {
         "mode": "payment",
         "payment_method_types[0]": bq.MOYENS[commande["moyen"]],
         "line_items[0][quantity]": "1",
         "line_items[0][price_data][currency]": bq.DEVISE,
-        "line_items[0][price_data][unit_amount]": str(article["prix"]),
-        "line_items[0][price_data][product_data][name]": article["libelle"],
+        "line_items[0][price_data][unit_amount]": str(int(montant)),
+        "line_items[0][price_data][product_data][name]": str(libelle)[:250],
         "line_items[0][price_data][product_data][description]":
             f"Commande {numero} — création sur mesure",
         "success_url": f"{site}/boutique.html?commande=reussie&numero={numero}",
-        "cancel_url": f"{site}/boutique.html?commande=annulee",
-        "payment_intent_data[description]": f"Boutique ModBot {numero} — {article['libelle']}",
+        "cancel_url": retour_annule or f"{site}/boutique.html?commande=annulee",
+        "payment_intent_data[description]": f"Boutique ModBot {numero} — {libelle}"[:500],
         "payment_intent_data[metadata][commande]": numero,
     }
     for clef, valeur in bq.metadonnees_stripe(numero, commande).items():
         donnees[f"metadata[{clef}]"] = valeur
-
     timeout = aiohttp.ClientTimeout(total=20)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            corps = await stripe_appel(session, "POST", "/checkout/sessions", donnees)
+            return await stripe_appel(session, "POST", "/checkout/sessions", donnees)
     except web.HTTPBadGateway:
         if commande["moyen"] == "paypal":
             # PayPal n'existe dans Stripe qu'une fois active dans son tableau
@@ -9220,6 +9241,24 @@ async def api_boutique_commande(request):
                      "Choisis la carte bancaire, ou réessaie plus tard.")
         raise
 
+
+async def api_boutique_commande(request):
+    """
+    Ouvre la page de paiement d'une commande du catalogue.
+
+    Pas de compte exige : le client donne son pseudo ou son identifiant
+    Discord. S'il est connecte au site, on prend son identifiant Discord,
+    qui permet de lui ecrire a coup sur.
+    """
+    payload = await request.json() if request.can_read_body else {}
+    identite = await identite_facultative(request)
+    commande, erreur = bq.valider_commande(payload, contact=bq.contact_depuis_identite(identite))
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    article = bq.ARTICLES[commande["article"]]
+    numero = bq.nouveau_numero(set(commandes_tout()))
+    fiche = bq.nouvelle_commande(numero, commande, now().isoformat())
+    corps = await ouvrir_paiement(numero, commande, article["libelle"], article["prix"])
     fiche["session"] = str(corps.get("id") or "")
     commande_ecrire(fiche)
     dashboard_log("boutique_commande", None, commande["discord"],
@@ -9247,7 +9286,7 @@ async def boutique_paiement_recu(session_stripe):
 
     fiche = commandes_tout().get(numero) or bq.commande_depuis_stripe(
         numero, meta, now().isoformat())
-    if fiche.get("statut") in ("payee", "livree"):
+    if fiche.get("statut") not in ("en_attente", "annulee"):
         return fiche
     details = session_stripe.get("customer_details") or {}
     fiche.update({
@@ -9258,77 +9297,692 @@ async def boutique_paiement_recu(session_stripe):
         "nom_client": clean_short_text(details.get("name"), "", 120),
         "session": str(session_stripe.get("id") or fiche.get("session") or ""),
     })
+    fiche["historique"] = list(fiche.get("historique") or []) + [
+        {"date": fiche["payee_le"], "statut": "payee", "par": "Stripe"}]
     commande_ecrire(fiche)
+
+    # Un devis paye est un devis termine : il devient cette commande.
+    if fiche.get("devis"):
+        devis = devis_tout().get(fiche["devis"])
+        if devis and devis.get("statut") != "payee":
+            devis = bq.marquer_devis_paye(devis, numero, now().isoformat())
+            devis_ecrire(devis)
+            await editer_annonce(devis.get("annonce"), embed_devis(devis), None)
+
     print(f"boutique: {numero} payee ({fiche.get('libelle')}, "
           f"{bq.formater_prix(fiche['montant'])})")
     await annoncer_commande(fiche)
     return fiche
 
 
+# ── Joindre le client ──────────────────────────────────────────────────
+
+def trouver_client(fiche):
+    """
+    L'identifiant Discord du client, s'il est connu ou retrouvable.
+
+    Un pseudo ne suffit pas pour ecrire en prive : il faut l'identifiant.
+    On le cherche parmi les membres des serveurs du bot — c'est pour cela
+    que la boutique invite a rejoindre le serveur de support.
+    """
+    for candidat in (fiche.get("discord_id"),
+                     fiche.get("discord") if fiche.get("discord_type") == "id" else ""):
+        if str(candidat or "").isdigit():
+            return int(candidat)
+    pseudo = str(fiche.get("discord") or "").lower().split("#")[0]
+    if not pseudo:
+        return None
+    for guild in bot.guilds:
+        membre = discord.utils.find(
+            lambda m: m.name.lower() == pseudo or (m.global_name or "").lower() == pseudo,
+            guild.members)
+        if membre is not None:
+            return membre.id
+    return None
+
+
+async def ecrire_au_client(fiche, titre, texte, couleur=0x5865F2, lien=None):
+    """
+    (True, "") si le message prive part, (False, raison) sinon.
+
+    Discord n'accepte un message prive que si le client partage un serveur
+    avec le bot et ne les a pas fermes. Quand il echoue, l'equipe le sait,
+    avec la raison : elle peut alors le contacter autrement.
+    """
+    uid = trouver_client(fiche)
+    if uid is None:
+        return False, ("client introuvable : pas d'identifiant Discord, et personne "
+                       "de ce pseudo sur les serveurs du bot")
+    try:
+        utilisateur = bot.get_user(uid) or await bot.fetch_user(uid)
+        embed = discord.Embed(title=titre, description=texte, color=couleur, timestamp=now())
+        embed.set_footer(text="ModBot Boutique")
+        if lien:
+            vue = discord.ui.View(timeout=None)
+            vue.add_item(discord.ui.Button(label="Voir et payer", url=lien, emoji="💶"))
+            await utilisateur.send(embed=embed, view=vue)
+        else:
+            await utilisateur.send(embed=embed)
+    except discord.Forbidden:
+        return False, "messages privés fermés, ou aucun serveur en commun avec le bot"
+    except Exception as erreur:
+        return False, f"envoi impossible ({type(erreur).__name__})"
+    fiche["discord_id"] = str(uid)
+    return True, ""
+
+
+# ── Les annonces dans le salon des paiements ───────────────────────────
+
+COULEURS_STATUT = {"payee": 0x43B581, "attente": 0xFAA61A, "planifiee": 0x5865F2,
+                   "en_cours": 0x9B59B6, "livree": 0x2ECC71, "annulee": 0x747F8D}
+
+
+def contact_affiche(fiche):
+    client = str(fiche.get("discord") or "?")
+    uid = str(fiche.get("discord_id") or "")
+    nom = str(fiche.get("discord_nom") or "")
+    if uid.isdigit():
+        precision = nom or (client if client != uid else "")
+        return f"<@{uid}>" + (f" (`{precision}`)" if precision else "")
+    return f"`{client}`"
+
+
+async def envoyer_au_salon(embed, vue=None):
+    try:
+        salon = bot.get_channel(SALON_PAIEMENTS) or await bot.fetch_channel(SALON_PAIEMENTS)
+        if vue is not None:
+            return await salon.send(embed=embed, view=vue)
+        return await salon.send(embed=embed)
+    except Exception as erreur:
+        print(f"boutique: annonce dans le salon impossible : {erreur}")
+        return None
+
+
+async def editer_annonce(annonce, embed, vue=None):
+    """Remet l'annonce du salon a jour ; sans vue, ses boutons disparaissent."""
+    if not isinstance(annonce, dict) or not str(annonce.get("message") or "").isdigit():
+        return
+    try:
+        salon = (bot.get_channel(int(annonce["salon"]))
+                 or await bot.fetch_channel(int(annonce["salon"])))
+        message = await salon.fetch_message(int(annonce["message"]))
+        await message.edit(embed=embed, view=vue)
+    except Exception as erreur:
+        print(f"boutique: annonce {annonce.get('message')} non mise a jour : {erreur}")
+
+
+def _annonce(message):
+    return {"salon": str(message.channel.id), "message": str(message.id)}
+
+
+def vue_boutons(boutons):
+    """
+    Des boutons d'equipe. Ils n'ont pas de rappel : c'est `boutique_interaction`
+    qui les ecoute, par leur custom_id — ils marchent donc encore apres un
+    redemarrage du bot.
+    """
+    vue = discord.ui.View(timeout=None)
+    for libelle, emoji, custom_id, style in boutons:
+        vue.add_item(discord.ui.Button(label=libelle, emoji=emoji,
+                                       custom_id=custom_id, style=style))
+    return vue
+
+
+def embed_commande(fiche):
+    montant = int(fiche.get("montant") or 0)
+    embed = discord.Embed(
+        title=f"🛒 Commande {fiche.get('numero')}",
+        description=(f"**{fiche.get('libelle')}** — {bq.formater_prix(montant)}\n"
+                     f"Client : {contact_affiche(fiche)}"),
+        color=COULEURS_STATUT.get(fiche.get("statut"), 0x43B581), timestamp=now())
+    embed.add_field(name="Statut", value=bq.libelle_statut(fiche), inline=True)
+    embed.add_field(name="Payé par",
+                    value=bq.LIBELLES_MOYENS.get(fiche.get("moyen"), fiche.get("moyen") or "?"),
+                    inline=True)
+    embed.add_field(name="E-mail", value=fiche.get("email") or "—", inline=True)
+    if fiche.get("devis"):
+        embed.add_field(name="Devis", value=f"`{fiche['devis']}`", inline=True)
+    embed.add_field(name="Projet", value=(fiche.get("projet") or "—")[:1024], inline=False)
+    embed.set_footer(text="ModBot Boutique — les boutons préviennent le client en privé")
+    return embed
+
+
+def vue_commande(fiche):
+    if fiche.get("statut") not in bq.STATUTS_EN_COURS:
+        return None
+    numero = fiche.get("numero")
+    return vue_boutons([
+        ("En cours de création", "🛠️", f"bq:c:en_cours:{numero}", discord.ButtonStyle.primary),
+        ("Commence dans…", "📅", f"bq:c:planifiee:{numero}", discord.ButtonStyle.secondary),
+        ("Liste d'attente", "⏳", f"bq:c:attente:{numero}", discord.ButtonStyle.secondary),
+        ("Livrée", "✅", f"bq:c:livree:{numero}", discord.ButtonStyle.success),
+    ])
+
+
 async def annoncer_commande(fiche):
     """
-    Previent l'equipe — dans le salon des paiements, et en message prive a
-    chaque administrateur du bot — puis confirme au client, si son
-    identifiant Discord permet de le joindre.
+    Previent l'equipe — dans le salon des paiements, avec les boutons de
+    suivi, et en message prive a chaque administrateur du bot — puis
+    confirme au client.
 
     Chaque annonce est tentee a part : aucune ne doit empecher les autres,
     ni faire echouer l'enregistrement d'une commande payee.
     """
-    client = str(fiche.get("discord") or "?")
-    contact = (f"<@{client}> (`{client}`)" if fiche.get("discord_type") == "id"
-               else f"`{client}`")
-    champs = [
-        ("Commande", f"`{fiche.get('numero')}`"),
-        ("Article", fiche.get("libelle") or fiche.get("article") or "?"),
-        ("Montant", bq.formater_prix(int(fiche.get("montant") or 0))),
-        ("Payé par", bq.LIBELLES_MOYENS.get(fiche.get("moyen"), fiche.get("moyen") or "?")),
-        ("Discord", contact),
-        ("E-mail", fiche.get("email") or "—"),
-    ]
-
-    def pour_l_equipe():
-        embed = discord.Embed(
-            title="🛒 Nouvelle commande — boutique",
-            description=(f"**{fiche.get('libelle')}** commandé par {contact}.\n"
-                         "À recontacter sur Discord sous 24 h."),
-            color=0x43B581, timestamp=now())
-        for nom, valeur in champs:
-            embed.add_field(name=nom, value=str(valeur)[:1024] or "-", inline=True)
-        embed.add_field(name="Projet", value=(fiche.get("projet") or "—")[:1024], inline=False)
-        embed.set_footer(text="ModBot Boutique")
-        return embed
-
-    try:
-        salon = bot.get_channel(SALON_PAIEMENTS) or await bot.fetch_channel(SALON_PAIEMENTS)
-        await salon.send(embed=pour_l_equipe())
-    except Exception as erreur:
-        print(f"boutique: annonce dans le salon impossible : {erreur}")
+    message = await envoyer_au_salon(embed_commande(fiche), vue_commande(fiche))
+    if message is not None:
+        fiche["annonce"] = _annonce(message)
+        commande_ecrire(fiche)
 
     for admin in sorted(DASHBOARD_ADMIN_IDS):
         if not str(admin).isdigit():
             continue
         try:
             utilisateur = bot.get_user(int(admin)) or await bot.fetch_user(int(admin))
-            await utilisateur.send(embed=pour_l_equipe())
+            await utilisateur.send(embed=embed_commande(fiche))
         except Exception as erreur:
             print(f"boutique: message prive a {admin} impossible : {erreur}")
 
-    if fiche.get("discord_type") == "id":
-        # Discord n'accepte un message prive que si le client partage un
-        # serveur avec le bot : sinon, c'est l'equipe qui le contacte.
-        try:
-            acheteur = bot.get_user(int(client)) or await bot.fetch_user(int(client))
-            merci = discord.Embed(
-                title="✅ Commande reçue",
-                description=(f"Merci ! Ta commande **{fiche.get('libelle')}** "
-                             f"(`{fiche.get('numero')}`) est payée.\n"
-                             "On te contacte ici, sur Discord, sous 24 h pour "
-                             "parler de ton projet."),
-                color=0x43B581, timestamp=now())
-            merci.set_footer(text="ModBot Boutique")
-            await acheteur.send(embed=merci)
-        except Exception as erreur:
-            print(f"boutique: confirmation au client impossible : {erreur}")
+    merci = bq.message_paiement_recu(fiche)
+    envoye, raison = await ecrire_au_client(fiche, merci["titre"], merci["texte"],
+                                            couleur=0x43B581)
+    if envoye:
+        commande_ecrire(fiche)
+    else:
+        print(f"boutique: confirmation au client impossible : {raison}")
+
+
+# ── Les demandes sur mesure ────────────────────────────────────────────
+
+def _collection(chemin):
+    donnees = jload(chemin)
+    return donnees if isinstance(donnees, dict) else {}
+
+
+def devis_tout():
+    return _collection(F_DEVIS)
+
+
+def devis_ecrire(fiche):
+    donnees = dict(devis_tout())
+    donnees[fiche["id"]] = fiche
+    jsave(F_DEVIS, donnees)
+    return fiche
+
+
+def sav_tout():
+    return _collection(F_SAV)
+
+
+def sav_ecrire(fiche):
+    donnees = dict(sav_tout())
+    donnees[fiche["id"]] = fiche
+    jsave(F_SAV, donnees)
+    return fiche
+
+
+def lien_devis(fiche):
+    """Le lien personnel d'un devis : la cle en fait un lien que seul le client a."""
+    return (f"{site_racine()}/boutique.html?devis={urllib.parse.quote(fiche['id'])}"
+            f"&cle={urllib.parse.quote(fiche.get('cle') or '')}")
+
+
+def embed_devis(fiche):
+    embed = discord.Embed(
+        title=f"📝 Demande sur mesure {fiche.get('id')}",
+        description=(f"**{bq.CATEGORIES_DEVIS.get(fiche.get('categorie'), '?')}** — "
+                     f"{contact_affiche(fiche)}\n\n{(fiche.get('description') or '')[:3500]}"),
+        color=0xF1C40F if fiche.get("statut") in ("nouveau", "propose") else 0x747F8D,
+        timestamp=now())
+    embed.add_field(name="Statut", value=bq.LIBELLES_DEVIS.get(fiche.get("statut"), "?"),
+                    inline=True)
+    embed.add_field(name="Budget", value=fiche.get("budget") or "—", inline=True)
+    embed.add_field(name="Délai souhaité", value=fiche.get("delai") or "—", inline=True)
+    if int(fiche.get("prix") or 0):
+        embed.add_field(name="Prix proposé", value=bq.formater_prix(fiche["prix"]), inline=True)
+    if fiche.get("commande"):
+        embed.add_field(name="Commande", value=f"`{fiche['commande']}`", inline=True)
+    embed.set_footer(text="ModBot Boutique — « Proposer un prix » envoie le lien de paiement en privé")
+    return embed
+
+
+def vue_devis(fiche):
+    if fiche.get("statut") not in ("nouveau", "propose"):
+        return None
+    ident = fiche.get("id")
+    return vue_boutons([
+        ("Proposer un prix", "💶", f"bq:d:prix:{ident}", discord.ButtonStyle.primary),
+        ("Clore", "🗂️", f"bq:d:clore:{ident}", discord.ButtonStyle.secondary),
+    ])
+
+
+def _devis_ou_404(ident):
+    fiche = devis_tout().get(str(ident or ""))
+    if not isinstance(fiche, dict):
+        raise web.HTTPNotFound(text="Demande introuvable.")
+    return fiche
+
+
+def _devis_du_client(ident, cle):
+    """Le devis, si la cle est la bonne ; sinon la meme reponse qu'un devis inconnu."""
+    fiche = devis_tout().get(str(ident or ""))
+    if (not isinstance(fiche, dict)
+            or not hmac.compare_digest(str(fiche.get("cle") or "").encode(),
+                                       str(cle or "").encode())):
+        raise web.HTTPNotFound(text="Demande introuvable, ou lien incomplet.")
+    return fiche
+
+
+async def api_boutique_devis(request):
+    """Une demande sur mesure : elle arrive dans l'administration et dans le salon."""
+    payload = await request.json() if request.can_read_body else {}
+    identite = await identite_facultative(request)
+    champs, erreur = bq.valider_devis(payload, contact=bq.contact_depuis_identite(identite))
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    ident = bq.nouvel_identifiant("DV", set(devis_tout()))
+    fiche = devis_ecrire(bq.nouveau_devis(ident, champs, now().isoformat(),
+                                          secrets.token_urlsafe(18)))
+    message = await envoyer_au_salon(embed_devis(fiche), vue_devis(fiche))
+    if message is not None:
+        fiche["annonce"] = _annonce(message)
+        devis_ecrire(fiche)
+    dashboard_log("boutique_devis", None, fiche["discord"], ident)
+    return api_json({"ok": True, "id": ident}, request=request)
+
+
+async def api_boutique_devis_lire(request):
+    fiche = _devis_du_client(request.match_info.get("devis_id"), request.query.get("cle"))
+    return api_json({"ok": True, "devis": bq.devis_public(fiche)}, request=request)
+
+
+async def api_boutique_devis_payer(request):
+    """
+    Ouvre le paiement d'un devis. Une page Stripe expire au bout de 24 h ; le
+    lien du devis, lui, reste valable : chaque clic en ouvre une neuve.
+    """
+    payload = await request.json() if request.can_read_body else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    fiche = _devis_du_client(request.match_info.get("devis_id"), payload.get("cle"))
+    if not bq.devis_payable(fiche):
+        raise web.HTTPConflict(text="Cette demande n'attend pas de paiement.")
+    moyen = str(payload.get("moyen") or "")
+    if moyen not in bq.MOYENS:
+        raise web.HTTPBadRequest(text="Moyen de paiement inconnu : carte bancaire ou PayPal.")
+    if payload.get("conditions") is not True:
+        raise web.HTTPBadRequest(text="Il faut accepter les conditions de la boutique.")
+    numero = bq.nouveau_numero(set(commandes_tout()))
+    commande = bq.commande_depuis_devis(numero, fiche, moyen, now().isoformat())
+    corps = await ouvrir_paiement(numero, commande, commande["libelle"], commande["montant"],
+                                  lien_devis(fiche))
+    commande["session"] = str(corps.get("id") or "")
+    commande_ecrire(commande)
+    return api_json({"ok": True, "url": corps.get("url", ""), "numero": numero},
+                    request=request)
+
+
+# ── Le service apres-vente ─────────────────────────────────────────────
+
+def embed_sav(fiche):
+    embed = discord.Embed(
+        title=f"🧰 Demande d'assistance {fiche.get('id')}",
+        description=(f"**{bq.SUJETS_SAV.get(fiche.get('sujet'), '?')}** — "
+                     f"{contact_affiche(fiche)}\n\n{(fiche.get('message') or '')[:3000]}"),
+        color=0x3498DB if fiche.get("statut") != "clos" else 0x747F8D, timestamp=now())
+    embed.add_field(name="Statut", value=bq.LIBELLES_SAV.get(fiche.get("statut"), "?"),
+                    inline=True)
+    if fiche.get("numero"):
+        embed.add_field(name="Commande", value=f"`{fiche['numero']}`", inline=True)
+    for reponse in (fiche.get("reponses") or [])[-2:]:
+        embed.add_field(name=f"Réponse de {reponse.get('par') or 'l’équipe'}",
+                        value=str(reponse.get("texte") or "")[:1024], inline=False)
+    embed.set_footer(text="ModBot Boutique — « Répondre » envoie la réponse en privé")
+    return embed
+
+
+def vue_sav(fiche):
+    if fiche.get("statut") == "clos":
+        return None
+    ident = fiche.get("id")
+    return vue_boutons([
+        ("Répondre", "💬", f"bq:s:repondre:{ident}", discord.ButtonStyle.primary),
+        ("Clore", "🗂️", f"bq:s:clore:{ident}", discord.ButtonStyle.secondary),
+    ])
+
+
+def _sav_ou_404(ident):
+    fiche = sav_tout().get(str(ident or ""))
+    if not isinstance(fiche, dict):
+        raise web.HTTPNotFound(text="Demande d'assistance introuvable.")
+    return fiche
+
+
+async def api_boutique_sav(request):
+    payload = await request.json() if request.can_read_body else {}
+    identite = await identite_facultative(request)
+    champs, erreur = bq.valider_sav(payload, contact=bq.contact_depuis_identite(identite))
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    ident = bq.nouvel_identifiant("SV", set(sav_tout()))
+    fiche = sav_ecrire(bq.nouveau_sav(ident, champs, now().isoformat()))
+    message = await envoyer_au_salon(embed_sav(fiche), vue_sav(fiche))
+    if message is not None:
+        fiche["annonce"] = _annonce(message)
+        sav_ecrire(fiche)
+    dashboard_log("boutique_sav", None, fiche["discord"], ident)
+    return api_json({"ok": True, "id": ident}, request=request)
+
+
+# ── Ce que fait l'equipe — depuis le site comme depuis Discord ─────────
+# Une seule implementation par action : le bouton du salon et celui de
+# l'administration font exactement la meme chose.
+
+async def boutique_changer_statut(numero, statut, jours, par):
+    fiche = commandes_tout().get(str(numero or ""))
+    if not isinstance(fiche, dict):
+        raise web.HTTPNotFound(text="Commande introuvable.")
+    nouvelle, erreur = bq.appliquer_statut(fiche, statut, jours, par)
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    message = bq.message_statut(nouvelle)
+    envoye, raison = await ecrire_au_client(nouvelle, message["titre"], message["texte"],
+                                            couleur=COULEURS_STATUT.get(statut, 0x5865F2))
+    nouvelle["historique"][-1]["message"] = envoye
+    commande_ecrire(nouvelle)
+    await editer_annonce(nouvelle.get("annonce"), embed_commande(nouvelle), vue_commande(nouvelle))
+    return {"ok": True, "commande": commande_pour_admin(nouvelle),
+            "message_envoye": envoye, "raison": raison}
+
+
+async def boutique_proposer_prix(ident, prix_brut, message, par):
+    fiche = _devis_ou_404(ident)
+    centimes = bq.lire_prix_euros(prix_brut)
+    if centimes is None:
+        raise web.HTTPBadRequest(
+            text="Prix illisible : un montant entre 1 et 10 000 €, par exemple 120 ou 89,90.")
+    nouvelle, erreur = bq.proposer_prix(fiche, centimes, message, par, now().isoformat())
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    lien = lien_devis(nouvelle)
+    texte = bq.message_devis_prix(nouvelle, lien)
+    envoye, raison = await ecrire_au_client(nouvelle, texte["titre"], texte["texte"],
+                                            couleur=0xF1C40F, lien=lien)
+    nouvelle["historique"][-1]["message"] = envoye
+    devis_ecrire(nouvelle)
+    await editer_annonce(nouvelle.get("annonce"), embed_devis(nouvelle), vue_devis(nouvelle))
+    return {"ok": True, "devis": devis_pour_admin(nouvelle), "lien": lien,
+            "message_envoye": envoye, "raison": raison}
+
+
+async def boutique_clore_devis(ident, par):
+    nouvelle, erreur = bq.clore_devis(_devis_ou_404(ident), par, now().isoformat())
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    devis_ecrire(nouvelle)
+    await editer_annonce(nouvelle.get("annonce"), embed_devis(nouvelle), None)
+    return {"ok": True, "devis": devis_pour_admin(nouvelle)}
+
+
+async def boutique_repondre_sav(ident, texte, par):
+    nouvelle, erreur = bq.repondre_sav(_sav_ou_404(ident), texte, par, now().isoformat())
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    message = bq.message_reponse_sav(nouvelle)
+    envoye, raison = await ecrire_au_client(nouvelle, message["titre"], message["texte"],
+                                            couleur=0x3498DB)
+    nouvelle["reponses"][-1]["message"] = envoye
+    sav_ecrire(nouvelle)
+    await editer_annonce(nouvelle.get("annonce"), embed_sav(nouvelle), vue_sav(nouvelle))
+    return {"ok": True, "sav": sav_pour_admin(nouvelle),
+            "message_envoye": envoye, "raison": raison}
+
+
+async def boutique_clore_sav(ident, par):
+    nouvelle, erreur = bq.clore_sav(_sav_ou_404(ident), par, now().isoformat())
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    sav_ecrire(nouvelle)
+    await editer_annonce(nouvelle.get("annonce"), embed_sav(nouvelle), None)
+    return {"ok": True, "sav": sav_pour_admin(nouvelle)}
+
+
+# ── L'administration : la rubrique « Achats & paiements » ──────────────
+
+def commande_pour_admin(fiche):
+    return {**fiche, "statut_label": bq.libelle_statut(fiche),
+            "montant_label": bq.formater_prix(fiche.get("montant"))}
+
+
+def devis_pour_admin(fiche):
+    # La cle ne part jamais telle quelle : seulement dans le lien, et
+    # seulement quand il y a un prix a payer.
+    donnees = {k: v for k, v in fiche.items() if k != "cle"}
+    donnees["statut_label"] = bq.LIBELLES_DEVIS.get(fiche.get("statut"), "?")
+    donnees["categorie_label"] = bq.CATEGORIES_DEVIS.get(fiche.get("categorie"), "?")
+    donnees["prix_label"] = bq.formater_prix(fiche.get("prix")) if fiche.get("prix") else ""
+    if fiche.get("statut") == "propose":
+        donnees["lien"] = lien_devis(fiche)
+    return donnees
+
+
+def sav_pour_admin(fiche):
+    return {**fiche, "statut_label": bq.LIBELLES_SAV.get(fiche.get("statut"), "?"),
+            "sujet_label": bq.SUJETS_SAV.get(fiche.get("sujet"), "?")}
+
+
+def _recent(fiches, *champs):
+    def moment(fiche):
+        for champ in champs:
+            if fiche.get(champ):
+                return str(fiche[champ])
+        return ""
+    return sorted((f for f in fiches if isinstance(f, dict)), key=moment, reverse=True)
+
+
+async def api_admin_boutique(request):
+    await api_identity(request, admin_required=True)
+    return api_json({
+        "ok": True,
+        "commandes": [commande_pour_admin(f) for f in
+                      _recent(commandes_tout().values(), "payee_le", "creee_le")],
+        "devis": [devis_pour_admin(f) for f in _recent(devis_tout().values(), "creee_le")],
+        "sav": [sav_pour_admin(f) for f in _recent(sav_tout().values(), "creee_le")],
+    }, request=request)
+
+
+def _auteur(identity):
+    return clean_short_text(identity.get("username") or identity.get("user_id"), "", 80)
+
+
+async def _corps(request):
+    payload = await request.json() if request.can_read_body else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+async def api_admin_boutique_statut(request):
+    identity = await api_identity(request, admin_required=True)
+    payload = await _corps(request)
+    return api_json(await boutique_changer_statut(
+        request.match_info.get("numero"), str(payload.get("statut") or ""),
+        payload.get("jours"), _auteur(identity)), request=request)
+
+
+async def api_admin_boutique_devis_prix(request):
+    identity = await api_identity(request, admin_required=True)
+    payload = await _corps(request)
+    return api_json(await boutique_proposer_prix(
+        request.match_info.get("devis_id"), payload.get("prix"),
+        payload.get("message") or "", _auteur(identity)), request=request)
+
+
+async def api_admin_boutique_devis_clore(request):
+    identity = await api_identity(request, admin_required=True)
+    return api_json(await boutique_clore_devis(
+        request.match_info.get("devis_id"), _auteur(identity)), request=request)
+
+
+async def api_admin_boutique_sav_reponse(request):
+    identity = await api_identity(request, admin_required=True)
+    payload = await _corps(request)
+    return api_json(await boutique_repondre_sav(
+        request.match_info.get("sav_id"), payload.get("texte") or "",
+        _auteur(identity)), request=request)
+
+
+async def api_admin_boutique_sav_clore(request):
+    identity = await api_identity(request, admin_required=True)
+    return api_json(await boutique_clore_sav(
+        request.match_info.get("sav_id"), _auteur(identity)), request=request)
+
+
+# ── Les boutons et fenetres du salon des paiements ─────────────────────
+
+def valeurs_fenetre(donnees):
+    """
+    Les valeurs saisies dans une fenetre Discord, par custom_id.
+
+    Parcours recursif : Discord range les champs dans des rangees, ou —
+    depuis les nouveaux composants — dans des « labels » qui portent un
+    seul `component`. Les deux formes se lisent pareil.
+    """
+    valeurs = {}
+
+    def parcourir(noeud):
+        if isinstance(noeud, list):
+            for element in noeud:
+                parcourir(element)
+        elif isinstance(noeud, dict):
+            if noeud.get("custom_id") and "value" in noeud:
+                valeurs[str(noeud["custom_id"])] = str(noeud.get("value") or "")
+            parcourir(noeud.get("components"))
+            parcourir(noeud.get("component"))
+
+    parcourir((donnees or {}).get("components"))
+    return valeurs
+
+
+def fenetre_boutique(titre, custom_id, champs):
+    fenetre = discord.ui.Modal(title=titre[:45], custom_id=custom_id[:100], timeout=900)
+    for cle, libelle, indication, longueur, requis, style in champs:
+        fenetre.add_item(discord.ui.TextInput(
+            label=libelle[:45], custom_id=cle, placeholder=indication[:100],
+            max_length=longueur, required=requis, style=style))
+    return fenetre
+
+
+FAITS_BOUTIQUE = {
+    "en_cours": "Commande passée « en cours de création ».",
+    "planifiee": "Début de la commande programmé.",
+    "attente": "Commande mise sur liste d'attente.",
+    "livree": "Commande marquée livrée.",
+    "prix": "Prix envoyé.",
+    "repondre": "Réponse envoyée.",
+    "clore": "Demande close.",
+}
+
+
+def compte_rendu_boutique(resultat, fait):
+    lignes = [f"✅ {fait}"]
+    if "message_envoye" in resultat:
+        lignes.append("Message privé envoyé au client." if resultat.get("message_envoye")
+                      else f"⚠️ Le message privé n'est pas parti : {resultat.get('raison')}.")
+    if resultat.get("lien"):
+        lignes.append(f"Lien de paiement, à transmettre si besoin : {resultat['lien']}")
+    return "\n".join(lignes)[:1900]
+
+
+async def _repondre_boutique(interaction, texte):
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(texte, ephemeral=True)
+        else:
+            await interaction.response.send_message(texte, ephemeral=True)
+    except Exception as erreur:
+        print(f"boutique: reponse a l'interaction impossible : {erreur}")
+
+
+async def boutique_interaction(interaction):
+    """
+    Les boutons « bq:… » des annonces de la boutique, et leurs fenetres.
+
+    Ecoutes ici, par leur custom_id, plutot que par une vue enregistree :
+    une annonce d'il y a trois semaines doit repondre comme celle du jour,
+    redemarrage ou pas. Reserves aux administrateurs du bot.
+    """
+    donnees = interaction.data or {}
+    custom_id = str(donnees.get("custom_id") or "")
+    if not custom_id.startswith("bq:"):
+        return
+    morceaux = custom_id.split(":", 3)
+    if len(morceaux) != 4:
+        return
+    _, genre, action, ident = morceaux
+    if not est_admin(str(getattr(interaction.user, "id", ""))):
+        await _repondre_boutique(interaction, "🔒 Réservé à l'équipe ModBot.")
+        return
+    par = getattr(interaction.user, "name", "") or str(interaction.user.id)
+    court, long_ = discord.TextStyle.short, discord.TextStyle.paragraph
+    try:
+        if interaction.type == discord.InteractionType.component:
+            # Ce qui demande une saisie ouvre une fenetre ; le reste agit
+            # tout de suite.
+            if genre == "c" and action == "planifiee":
+                await interaction.response.send_modal(fenetre_boutique(
+                    f"Commence dans… ({ident})", f"bq:m:planifiee:{ident}",
+                    [("jours", "Dans combien de jours ?", "Ex. : 3", 3, True, court)]))
+                return
+            if genre == "d" and action == "prix":
+                await interaction.response.send_modal(fenetre_boutique(
+                    f"Prix pour {ident}", f"bq:m:prix:{ident}",
+                    [("prix", "Prix en euros", "Ex. : 120 ou 89,90", 12, True, court),
+                     ("message", "Message au client (facultatif)",
+                      "Ce qui est compris, le délai…", 1000, False, long_)]))
+                return
+            if genre == "s" and action == "repondre":
+                await interaction.response.send_modal(fenetre_boutique(
+                    f"Réponse à {ident}", f"bq:m:repondre:{ident}",
+                    [("texte", "Ta réponse", "Ce que le client doit faire…",
+                      bq.REPONSE_MAX, True, long_)]))
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            if genre == "c" and action in bq.ACTIONS_STATUT:
+                resultat = await boutique_changer_statut(ident, action, None, par)
+            elif genre == "d" and action == "clore":
+                resultat = await boutique_clore_devis(ident, par)
+            elif genre == "s" and action == "clore":
+                resultat = await boutique_clore_sav(ident, par)
+            else:
+                await _repondre_boutique(interaction, "Action inconnue.")
+                return
+            await _repondre_boutique(interaction, compte_rendu_boutique(
+                resultat, FAITS_BOUTIQUE.get(action, "Fait.")))
+            return
+
+        if interaction.type == discord.InteractionType.modal_submit and genre == "m":
+            valeurs = valeurs_fenetre(donnees)
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            if action == "planifiee":
+                resultat = await boutique_changer_statut(ident, "planifiee",
+                                                         valeurs.get("jours"), par)
+            elif action == "prix":
+                resultat = await boutique_proposer_prix(ident, valeurs.get("prix"),
+                                                        valeurs.get("message", ""), par)
+            elif action == "repondre":
+                resultat = await boutique_repondre_sav(ident, valeurs.get("texte"), par)
+            else:
+                await _repondre_boutique(interaction, "Action inconnue.")
+                return
+            await _repondre_boutique(interaction, compte_rendu_boutique(
+                resultat, FAITS_BOUTIQUE.get(action, "Fait.")))
+    except web.HTTPException as ex:
+        await _repondre_boutique(interaction, f"⚠️ {ex.text or 'Action impossible.'}")
+    except Exception as ex:
+        print(f"boutique: interaction {custom_id} : {type(ex).__name__}: {ex}")
+        traceback.print_exc()
+        await _repondre_boutique(interaction, "⚠️ Erreur inattendue : regarde le journal du bot.")
+
+
+bot.add_listener(boutique_interaction, "on_interaction")
 
 
 async def api_stripe_webhook(request):
@@ -10509,6 +11163,16 @@ async def start_dashboard_api():
     # de compte ModBot — et paiement confirme par le meme webhook Stripe.
     app.router.add_get("/api/boutique/offres", api_boutique_offres)
     app.router.add_post("/api/boutique/commande", api_boutique_commande)
+    app.router.add_post("/api/boutique/devis", api_boutique_devis)
+    app.router.add_get("/api/boutique/devis/{devis_id}", api_boutique_devis_lire)
+    app.router.add_post("/api/boutique/devis/{devis_id}/payer", api_boutique_devis_payer)
+    app.router.add_post("/api/boutique/sav", api_boutique_sav)
+    app.router.add_get("/api/admin/boutique", api_admin_boutique)
+    app.router.add_post("/api/admin/boutique/commandes/{numero}/statut", api_admin_boutique_statut)
+    app.router.add_post("/api/admin/boutique/devis/{devis_id}/prix", api_admin_boutique_devis_prix)
+    app.router.add_post("/api/admin/boutique/devis/{devis_id}/clore", api_admin_boutique_devis_clore)
+    app.router.add_post("/api/admin/boutique/sav/{sav_id}/reponse", api_admin_boutique_sav_reponse)
+    app.router.add_post("/api/admin/boutique/sav/{sav_id}/clore", api_admin_boutique_sav_clore)
     app.router.add_get("/api/admin/premium", api_admin_premium_list)
     app.router.add_post("/api/admin/premium", api_admin_premium_grant)
     app.router.add_delete("/api/admin/premium/{guild_id}", api_admin_premium_revoke)
