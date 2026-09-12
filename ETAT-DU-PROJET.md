@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **12 septembre 2026** (voir §72 pour le dernier lot livré).
+> Dernière mise à jour : **12 septembre 2026** (voir §73 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -5374,3 +5374,47 @@ dans les quatre langues), `test_noms`, `test_premium` 58/58,
 `test_selecteurs` 105/105, `test_derives`, `test_declarations`,
 `test_bienvenue` 24/24. Les quatre commandes nouvelles sont documentées
 dans le wiki — `test_api` croise les deux dépôts et l'exige.
+
+## 73. Livré le 12 septembre 2026 — trois guides de fond, pour être trouvé
+
+Demande : « tout le 5 sauf le portfolio » — le dernier point restant était
+les articles de fond pour le référencement.
+
+Un serveur Discord n'apparaît pas dans les moteurs de recherche ; une page
+oui. Trois guides, écrits pour régler un problème du début à la fin :
+
+- `article-proteger-serveur-discord.html` — reconnaître un raid, la
+  vérification qui l'arrête, le niveau de vérification de Discord, les
+  permissions à couper, la réaction automatique, et l'après ;
+- `article-permissions-discord.html` — les trois règles (elles
+  s'additionnent, le refus l'emporte dans un salon, « Administrateur »
+  ignore tout le reste), la hiérarchie, le piège d'`@everyone`, un
+  contrôle en cinq minutes ;
+- `article-bot-ou-site.html` — ce que chacun fait mieux, quand il faut les
+  deux, ce que ça coûte vraiment.
+
+`articles.html` les rassemble, et le pied de l'accueil y renvoie.
+
+### Deux décisions à ne pas défaire
+
+**Les balises héritées sont retirées.** Les pages sont générées depuis le
+squelette de `conditions.html` : sans retrait, chaque article aurait
+annoncé l'adresse canonique des conditions d'utilisation, et les moteurs
+auraient indexé celle-là à la place de l'article. Le générateur
+(`scratchpad/articles.pl`) échoue bruyamment si le bloc hérité n'est plus
+là où il l'attend.
+
+**Ces pages ne sont pas dans `test_i18n.PAGES`, et c'est écrit dans le
+test.** Un article de fond s'écrit pour les recherches d'une langue ; le
+traduire mot à mot dans cinq donnerait quatre pages que personne ne
+cherche. Elles portent `lang="fr"` et aucun `data-i18n`. Le jour où un
+article anglais est souhaité, il s'écrit — il ne se traduit pas.
+
+### État de la demande du 12 septembre
+
+Tout ce qui avait été demandé est livré, sauf ce qui a été explicitement
+retiré en cours de route : l'export comptable CSV, le médiateur de la
+consommation, le portfolio, les tests automatisés du parcours de paiement,
+et — décidé par le propriétaire — l'acompte (paiement complet à la
+commande) ainsi que le SIRET et l'adresse postale, qui ne figurent nulle
+part faute d'immatriculation.
