@@ -10221,7 +10221,7 @@ async def api_boutique_promo(request):
     promo, raison = promo_lisible(payload.get("code"))
     if promo is None:
         raise web.HTTPNotFound(text=raison)
-    options = bq.lire_options(payload.get("options"))
+    options = bq.lire_options(payload.get("options"), article["categorie"])
     brut = article["prix"] + bq.prix_options(options)
     return api_json({"ok": True, **bq.promo_public(promo, brut), "avant": brut},
                     request=request)

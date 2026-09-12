@@ -192,7 +192,7 @@ def valider_commande(donnees, contact=None):
         return None, "Il faut accepter les conditions de la boutique."
     return {"article": clef, "moyen": moyen,
             "projet": nettoyer_projet(donnees.get("projet")),
-            "options": lire_options(donnees.get("options")),
+            "options": lire_options(donnees.get("options"), ARTICLES[clef]["categorie"]),
             "code_promo": nettoyer_code(donnees.get("promo")),
             **_champs_contact(contact)}, None
 
@@ -227,7 +227,7 @@ def nouvelle_commande(numero, commande, maintenant_iso, promo=None):
     clefs — jamais un montant, jamais une remise.
     """
     article = ARTICLES[commande["article"]]
-    options = lire_options(commande.get("options"))
+    options = lire_options(commande.get("options"), article["categorie"])
     brut = article["prix"] + prix_options(options)
     return {
         "numero": numero,
@@ -1090,34 +1090,48 @@ def message_facture(facture):
 # Elles s'ajoutent a une commande du catalogue. Leur prix vit ici, comme
 # celui des articles : le navigateur n'envoie que des clefs.
 
+# « pour » dit sur quels articles l'option a un sens : proposer
+# « une page de plus » sur un bot Discord serait une erreur de catalogue,
+# et une facture impossible a justifier.
 OPTIONS = {
     "express": {
         "libelle": "Livraison express",
         "prix": 1900,
         "detail": "Ton projet passe devant les autres : le délai annoncé est divisé par deux.",
+        "pour": ("bot", "site", "pack"),
     },
     "page_extra": {
         "libelle": "Une page de plus",
         "prix": 1500,
         "detail": "Une page supplémentaire sur ton site, écrite et soignée comme les autres.",
+        "pour": ("site", "pack"),
     },
     "hebergement": {
         "libelle": "Hébergement un an",
         "prix": 2900,
         "detail": "Mise en ligne, nom de domaine branché et hébergement pendant douze mois.",
+        "pour": ("site", "pack"),
     },
 }
 # Trois options existent ; en accepter cinquante ferait une facture illisible.
 OPTIONS_MAX = 3
 
 
-def lire_options(brut):
-    """Les options valides, sans doublon, dans l'ordre du catalogue."""
-    demandees = brut if isinstance(brut, (list, tuple)) else []
+def lire_options(brut, categorie=None):
+    """
+    Les options valides, sans doublon, dans l'ordre du catalogue.
+
+    Avec une categorie, celles qui n'ont pas de sens pour elle tombent :
+    un bot Discord n'a pas de page en plus, ni d'hebergement.
+    """
+    demandees = [str(x) for x in (brut if isinstance(brut, (list, tuple)) else [])]
     clefs = []
-    for clef in OPTIONS:
-        if clef in [str(x) for x in demandees] and clef not in clefs:
-            clefs.append(clef)
+    for clef, option in OPTIONS.items():
+        if clef not in demandees or clef in clefs:
+            continue
+        if categorie and categorie not in option["pour"]:
+            continue
+        clefs.append(clef)
     return clefs[:OPTIONS_MAX]
 
 
@@ -1132,7 +1146,8 @@ def libelle_options(clefs):
 
 def options_publiques():
     return [{"key": c, "libelle": o["libelle"], "prix": o["prix"],
-             "prix_label": formater_prix(o["prix"]), "detail": o["detail"]}
+             "prix_label": formater_prix(o["prix"]), "detail": o["detail"],
+             "pour": list(o["pour"])}
             for c, o in OPTIONS.items()]
 
 

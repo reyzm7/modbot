@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **12 septembre 2026** (voir §69 pour le dernier lot livré).
+> Dernière mise à jour : **12 septembre 2026** (voir §70 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -5155,4 +5155,76 @@ deux contrôles de retard. `test_cloison.py`
 35/35, `test_bout_en_bout.py` 45/45, `test_noms.py` 13/13,
 `test_premium.py` 58/58, `test_notes.py` 23/23. Site : `test_selecteurs`
 105/105, `test_bienvenue` 24/24, `test_i18n`, `test_derives`,
+`test_declarations` passés.
+
+## 70. Livré le 12 septembre 2026 — factures, options, codes promo, abonnement
+
+Demande : « tout le 1 », « tout le 2 sauf l'export comptable », « tout le 3
+sauf le médiateur », puis, sur les informations légales : nom **GimsKh /
+Buffle**, micro-entreprise, **pas de SIRET**, contact = le serveur Discord,
+maintenance à **10 €/mois**, **aucun acompte** — paiement complet à la
+commande. Le SIRET et l'adresse postale ne sont donc écrits nulle part :
+« ne mets pas les 2 points alors ».
+
+### La facture
+
+`boutique.VENDEUR` porte l'identité en un seul endroit : nom, statut,
+SIRET (vide), contact, mention `TVA non applicable — article 293 B du CGI`.
+`identite_vendeur()` saute les lignes vides — tant qu'il n'y a pas de
+SIRET, la ligne n'existe pas, plutôt qu'un numéro inventé.
+
+Chaque commande payée donne une facture, **une seule** : `facture_de()`
+rend celle qui existe déjà si on la redemande. Le numéro suit une suite
+continue par année (`F-2026-0001`), et `rang_suivant()` repart du **plus
+grand rang attribué**, jamais du nombre de factures — une facture effacée
+à la main ne doit pas faire revivre un numéro.
+
+`devis_pdf.facture_pdf()` dessine le document ; l'assemblage du fichier
+PDF, commun au devis et à la facture, est sorti dans `_fichier()`. La
+facture part en message privé dès le paiement, et se retéléchargera depuis
+l'administration, bouton « Facture (PDF) » sur chaque commande.
+
+### Les options payantes
+
+`boutique.OPTIONS` : livraison express 19 €, une page de plus 15 €,
+hébergement un an 29 €. Chaque option dit **à quoi elle s'applique**
+(`pour`) : proposer « une page de plus » sur un bot Discord serait une
+erreur de catalogue. `lire_options(brut, categorie)` filtre des deux
+côtés, et `test_derives` compare prix **et** portée entre `boutique.py` et
+`BOUTIQUE_OPTIONS` du site.
+
+### Les codes promo
+
+Un vrai code : une remise en pourcentage, une limite d'utilisations, une
+date de fin, et un compteur qui monte **au paiement** — un panier
+abandonné n'use pas un code que quelqu'un d'autre aurait pu avoir. Le code
+est vérifié avant d'ouvrir la caisse : expiré ou épuisé, aucune session
+Stripe moins chère n'est créée. Le site ne reçoit jamais ni la limite ni le
+compteur, seulement la remise et le nouveau prix. La rubrique 04 de
+l'administration crée et retire les codes.
+
+### L'abonnement maintenance
+
+10 € par mois, souscription Stripe (`mode=subscription`,
+`recurring[interval]=month`), réservée aux visiteurs connectés avec
+Discord — un abonnement qui revient chaque mois doit savoir à qui écrire.
+Le webhook reconnaît l'abonnement à sa métadonnée, ou, pour les factures
+de renouvellement où Stripe ne la répète pas, à l'abonnement déjà
+enregistré. Résilié, il **reste servi jusqu'au terme déjà payé**.
+
+### Côté site
+
+La fenêtre de commande porte les options (cases à cocher filtrées par
+catégorie), le champ de code promo et un total qui se recalcule, avec le
+prix d'avant barré. La formule de remise est la même qu'au bot, au centime
+près. Une section « Maintenance et évolutions » présente l'abonnement, et
+son prix vient du bot — jamais du HTML.
+
+### Vérifications
+
+`test_boutique.py` : 407 vérifications (79 nouvelles). Deux mutations
+contrôlées : `rang_suivant` qui compterait les factures au lieu de prendre
+le plus grand rang, et une remise sans plancher, font tomber les contrôles
+prévus. Côté site, `test_derives` attrape une option dont le prix aurait
+dérivé. `test_selecteurs` 105/105, `test_i18n`, `test_bienvenue` 24/24,
 `test_declarations` passés.

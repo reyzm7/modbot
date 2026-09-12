@@ -1401,6 +1401,13 @@ verifier("les options inconnues et les doublons sont ecartes",
          == ["express", "hebergement"], str(bq.lire_options(["express", "chocolat"])))
 verifier("une liste illisible ne donne aucune option",
          bq.lire_options("express") == [] and bq.lire_options(None) == [])
+verifier("un bot ne se voit proposer ni page en plus ni hebergement",
+         bq.lire_options(["express", "page_extra", "hebergement"], "bot") == ["express"],
+         str(bq.lire_options(["express", "page_extra", "hebergement"], "bot")))
+verifier("un site, lui, les garde toutes",
+         len(bq.lire_options(["express", "page_extra", "hebergement"], "site")) == 3)
+verifier("chaque option dit a quels articles elle s'applique",
+         all(o["pour"] for o in bq.options_publiques()))
 verifier("le prix des options est celui du catalogue",
          bq.prix_options(["express", "hebergement"])
          == bq.OPTIONS["express"]["prix"] + bq.OPTIONS["hebergement"]["prix"])
@@ -1410,13 +1417,13 @@ verifier("les options se lisent en clair",
 verifier("le catalogue public des options porte un prix lisible",
          all(o["prix_label"] and o["detail"] for o in bq.options_publiques()))
 
-commande_options = {"article": "bot_avance", "moyen": "carte", "projet": "",
+commande_options = {"article": "site_complet", "moyen": "carte", "projet": "",
                     "options": ["express", "hebergement"], "code_promo": "",
                     "discord": "client", "discord_type": "pseudo",
                     "discord_nom": "", "discord_id": ""}
 avec = bq.nouvelle_commande("CMD-260912-OPTS", commande_options, INSTANT.isoformat())
 verifier("les options s'ajoutent au prix de l'article",
-         avec["montant"] == bq.ARTICLES["bot_avance"]["prix"]
+         avec["montant"] == bq.ARTICLES["site_complet"]["prix"]
          + bq.prix_options(["express", "hebergement"]), str(avec["montant"]))
 verifier("le libelle de la commande dit ce qui a ete ajoute",
          bq.OPTIONS["express"]["libelle"] in avec["libelle"], avec["libelle"])
@@ -1470,7 +1477,7 @@ verifier("ce que le site voit d'un code : la remise et le prix, rien d'autre",
 commande_promo = {**commande_options, "options": [], "code_promo": "NOEL-2026"}
 remisee = bq.nouvelle_commande("CMD-260912-PROM", commande_promo, INSTANT.isoformat(), promo)
 verifier("un code promo fait vraiment baisser le montant",
-         remisee["montant"] == bq.remise_promo(promo, bq.ARTICLES["bot_avance"]["prix"])
+         remisee["montant"] == bq.remise_promo(promo, bq.ARTICLES["site_complet"]["prix"])
          and remisee["montant"] < remisee["montant_brut"], str(remisee["montant"]))
 verifier("la commande garde le code utilise", remisee["promo"] == "NOEL-2026")
 
