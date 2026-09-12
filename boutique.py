@@ -18,6 +18,7 @@ Trois regles gouvernent le reste :
   * UN CLIENT PREVENU EST UN CLIENT QUI PATIENTE. Chaque changement de
     statut a son message, avec le numero de commande.
 """
+import hashlib
 import re
 import secrets
 from datetime import date, datetime, timedelta, timezone
@@ -364,6 +365,10 @@ def appliquer_statut(fiche, statut, jours=None, par="", maintenant=None):
         return None, "Statut inconnu."
     if (fiche or {}).get("statut") not in STATUTS_EN_COURS:
         return None, "Cette commande n'est pas payée, ou elle est déjà terminée."
+    prevu = lire_jours(jours) if statut == "planifiee" else None
+    if _trop_tot(fiche.get("historique"), maintenant,
+                 lambda e: e.get("statut") == statut and e.get("jours") == prevu):
+        return None, "C'est déjà fait : le client vient d'être prévenu."
     nouvelle = dict(fiche)
     entree = {"date": maintenant.isoformat(), "statut": statut,
               "par": str(par or "")[:80]}
@@ -494,6 +499,10 @@ def proposer_prix(devis, centimes, message="", par="", maintenant_iso=""):
         return None, "Cette demande est déjà payée ou close."
     if not isinstance(centimes, int) or not PRIX_MIN <= centimes <= PRIX_MAX:
         return None, "Prix invalide : entre 1 € et 10 000 €."
+    maintenant = _date(maintenant_iso) or datetime.now(timezone.utc)
+    if _trop_tot(devis.get("historique"), maintenant,
+                 lambda e: e.get("statut") == "propose" and e.get("prix") == centimes):
+        return None, "C'est déjà fait : le client vient de recevoir ce prix."
     nouvelle = dict(devis)
     nouvelle.update(statut="propose", prix=centimes,
                     message_prix=nettoyer_texte(message, 1000))
@@ -621,6 +630,9 @@ def repondre_sav(sav, texte, par="", maintenant_iso=""):
     texte = nettoyer_texte(texte, REPONSE_MAX)
     if not texte:
         return None, "Écris une réponse."
+    maintenant = _date(maintenant_iso) or datetime.now(timezone.utc)
+    if _trop_tot(sav.get("reponses"), maintenant, lambda e: e.get("texte") == texte):
+        return None, "C'est déjà fait : cette réponse vient de partir."
     nouvelle = dict(sav)
     nouvelle["statut"] = "repondu"
     nouvelle["reponses"] = list(sav.get("reponses") or []) + [
@@ -646,3 +658,290 @@ def clore_sav(sav, par="", maintenant_iso=""):
     nouvelle["historique"] = list(sav.get("historique") or []) + [
         {"date": maintenant_iso, "statut": "clos", "par": str(par or "")[:80]}]
     return nouvelle, None
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §7. Les dossiers oublies, et le message qui part deux fois
+# ══════════════════════════════════════════════════════════════════════
+#
+# Deux ennemis silencieux. Le dossier qu'on laisse dormir : le client, lui,
+# ne dort pas — il va voir ailleurs. Et le message qui part deux fois,
+# parce qu'un bouton a ete clique deux fois ou que la meme action est
+# arrivee du site et de Discord en meme temps : deux « c'est en cours » a
+# la suite, et le client se demande qui pilote.
+#
+# Ici on decide seulement quoi rappeler, quoi relancer, quoi refuser.
+# Envoyer appartient au bot.
+
+# Sans reponse de notre part passe ce delai, un dossier est en retard.
+RAPPEL_COMMANDE = timedelta(hours=24)
+RAPPEL_DEVIS = timedelta(hours=24)
+RAPPEL_SAV = timedelta(hours=12)
+# On ne rappelle pas le meme dossier plus souvent : un rappel toutes les
+# quinze minutes ne se lit plus, il se ferme.
+RAPPEL_REPETITION = timedelta(hours=24)
+# Deux fois la meme action en moins de ca : c'est un double-clic, pas une
+# volonte. On refuse la seconde plutot que d'ecrire deux fois au client.
+ANTI_DOUBLON = timedelta(seconds=45)
+# Une absence du bot plus courte n'est qu'un redemarrage ordinaire :
+# l'annoncer a chaque mise en ligne rendrait l'alerte invisible.
+COUPURE_MIN = timedelta(minutes=5)
+# Un panier laisse en plan : on relance une fois, jamais deux.
+RELANCE_PANIER = timedelta(hours=6)
+# Un devis chiffre reste sans reponse : une relance a J+3, on classe a J+30.
+RELANCE_DEVIS = timedelta(days=3)
+CLOTURE_DEVIS = timedelta(days=30)
+
+
+def duree_lisible(ecart):
+    """« 40 min », « 3 h », « 2 jours » — pour un humain, pas pour un journal."""
+    if not isinstance(ecart, timedelta):
+        return ""
+    minutes = int(ecart.total_seconds() // 60)
+    if minutes < 1:
+        return "à l'instant"
+    if minutes < 60:
+        return f"{minutes} min"
+    if minutes < 48 * 60:
+        return f"{minutes // 60} h"
+    return f"{minutes // (60 * 24)} jours"
+
+
+def _derniere_trace(fiche, *clefs):
+    """La date de la derniere chose qui soit arrivee a ce dossier."""
+    dates = [_date(entree.get("date"))
+             for entree in ((fiche or {}).get("historique") or [])
+             if isinstance(entree, dict)]
+    dates += [_date(entree.get("date"))
+              for entree in ((fiche or {}).get("reponses") or [])
+              if isinstance(entree, dict)]
+    dates += [_date((fiche or {}).get(clef)) for clef in clefs]
+    connues = [moment for moment in dates if moment]
+    return max(connues) if connues else None
+
+
+def _trop_tot(entrees, maintenant, pareil):
+    """
+    Vrai si la derniere entree est la meme action, et toute fraiche.
+
+    `pareil` recoit cette derniere entree et dit si elle vaut l'action
+    demandee. Sans date lisible on ne bloque rien : mieux vaut un message
+    en double qu'une boutique qui refuse de travailler.
+    """
+    entrees = [e for e in (entrees or []) if isinstance(e, dict)]
+    if not entrees or not pareil(entrees[-1]):
+        return False
+    moment = _date(entrees[-1].get("date"))
+    return moment is not None and timedelta(0) <= maintenant - moment < ANTI_DOUBLON
+
+
+def marquer_rappel(fiche, maintenant=None):
+    """Note qu'on vient de rappeler ce dossier : pas deux fois le meme jour."""
+    nouvelle = dict(fiche or {})
+    nouvelle["rappel_le"] = (maintenant or datetime.now(timezone.utc)).isoformat()
+    return nouvelle
+
+
+def marquer_relance(fiche, maintenant=None):
+    """Note qu'on vient d'ecrire au client : une relance suffit."""
+    nouvelle = dict(fiche or {})
+    nouvelle["relance_le"] = (maintenant or datetime.now(timezone.utc)).isoformat()
+    return nouvelle
+
+
+def _rappelable(fiche, maintenant):
+    dernier = _date((fiche or {}).get("rappel_le"))
+    return dernier is None or maintenant - dernier >= RAPPEL_REPETITION
+
+
+def dossiers_en_retard(commandes=None, devis=None, sav=None, maintenant=None):
+    """
+    Ce qui attend l'equipe depuis trop longtemps, du plus vieux au plus recent.
+
+    Un client qui a paye et n'a aucune nouvelle depuis un jour entier est un
+    remboursement en preparation. Mieux vaut un rappel de trop.
+    """
+    maintenant = maintenant or datetime.now(timezone.utc)
+    retard = []
+
+    for numero, fiche in sorted((commandes or {}).items()):
+        if not isinstance(fiche, dict) or not _rappelable(fiche, maintenant):
+            continue
+        statut = fiche.get("statut")
+        libelle = fiche.get("libelle") or "?"
+        if statut == "payee":
+            vu = _derniere_trace(fiche, "payee_le", "creee_le")
+            attente = maintenant - vu if vu else None
+            if attente is not None and attente >= RAPPEL_COMMANDE:
+                retard.append({
+                    "genre": "commande", "id": numero, "attente": attente,
+                    "texte": (f"Commande {numero} · {libelle} — payée depuis "
+                              f"{duree_lisible(attente)}, aucun suivi envoyé.")})
+        elif statut == "planifiee":
+            debut = _date(fiche.get("debut_prevu"))
+            if debut is not None and maintenant - debut >= timedelta(days=1):
+                attente = maintenant - debut
+                retard.append({
+                    "genre": "commande", "id": numero, "attente": attente,
+                    "texte": (f"Commande {numero} · {libelle} — le début annoncé "
+                              f"est dépassé de {duree_lisible(attente)}.")})
+
+    for ident, fiche in sorted((devis or {}).items()):
+        if not isinstance(fiche, dict) or not _rappelable(fiche, maintenant):
+            continue
+        if fiche.get("statut") != "nouveau":
+            continue
+        vu = _derniere_trace(fiche, "creee_le")
+        attente = maintenant - vu if vu else None
+        if attente is not None and attente >= RAPPEL_DEVIS:
+            retard.append({
+                "genre": "devis", "id": ident, "attente": attente,
+                "texte": (f"Devis {ident} · {libelle_categorie(fiche.get('categorie'))}"
+                          f" — à chiffrer depuis {duree_lisible(attente)}.")})
+
+    for ident, fiche in sorted((sav or {}).items()):
+        if not isinstance(fiche, dict) or not _rappelable(fiche, maintenant):
+            continue
+        if fiche.get("statut") != "ouvert":
+            continue
+        vu = _derniere_trace(fiche, "creee_le")
+        attente = maintenant - vu if vu else None
+        if attente is not None and attente >= RAPPEL_SAV:
+            sujet = SUJETS_SAV.get(fiche.get("sujet"), "Aide")
+            retard.append({
+                "genre": "sav", "id": ident, "attente": attente,
+                "texte": (f"Aide {ident} · {sujet} — sans réponse depuis "
+                          f"{duree_lisible(attente)}.")})
+
+    retard.sort(key=lambda dossier: dossier["attente"], reverse=True)
+    return retard
+
+
+def message_rappel(dossiers):
+    """
+    Un seul message pour tout ce qui traine.
+
+    Dix notifications separees, on les balaye ; une liste, on la lit.
+    """
+    lignes = [d.get("texte") or "" for d in (dossiers or []) if d.get("texte")]
+    if not lignes:
+        return ""
+    titre = ("1 dossier attend une réponse" if len(lignes) == 1
+             else f"{len(lignes)} dossiers attendent une réponse")
+    corps = "\n".join(f"• {ligne}" for ligne in lignes[:20])
+    if len(lignes) > 20:
+        corps += f"\n• … et {len(lignes) - 20} autres."
+    return f"{titre}\n\n{corps}"
+
+
+def relances_client(commandes=None, devis=None, maintenant=None):
+    """
+    Ce qu'on peut dire au client lui-meme, sans jamais le harceler.
+
+    Trois listes : les paniers laisses en plan, les devis chiffres restes
+    sans reponse, et ceux qu'il est temps de classer. Un client sans
+    identifiant Discord n'est pas relance : on ne saurait pas lui ecrire.
+    """
+    maintenant = maintenant or datetime.now(timezone.utc)
+    paniers, a_relancer, a_clore = [], [], []
+
+    for numero, fiche in sorted((commandes or {}).items()):
+        if not isinstance(fiche, dict) or fiche.get("statut") != "en_attente":
+            continue
+        if not fiche.get("discord_id") or fiche.get("relance_le"):
+            continue
+        creee = _date(fiche.get("creee_le"))
+        if creee is not None and maintenant - creee >= RELANCE_PANIER:
+            paniers.append(numero)
+
+    for ident, fiche in sorted((devis or {}).items()):
+        if not isinstance(fiche, dict):
+            continue
+        if fiche.get("statut") not in ("nouveau", "propose"):
+            continue
+        creee = _date(fiche.get("creee_le"))
+        if creee is not None and maintenant - creee >= CLOTURE_DEVIS:
+            a_clore.append(ident)
+            continue
+        if fiche.get("statut") != "propose" or not fiche.get("discord_id"):
+            continue
+        if fiche.get("relance_le"):
+            continue
+        propose = _derniere_trace(fiche, "creee_le")
+        if propose is not None and maintenant - propose >= RELANCE_DEVIS:
+            a_relancer.append(ident)
+
+    return {"paniers": paniers, "devis": a_relancer, "clore": a_clore}
+
+
+def message_panier(commande, lien=""):
+    """La commande commencee, jamais payee — dite sans reproche."""
+    libelle = (commande or {}).get("libelle") or "ta commande"
+    numero = (commande or {}).get("numero") or "?"
+    texte = (f"Tu as commencé une commande **{libelle}** (n° {numero}), mais le "
+             "paiement n'a pas été finalisé. Rien n'est perdu : elle t'attend "
+             "encore.")
+    if lien:
+        texte += f"\n\nPour la terminer : {lien}"
+    texte += ("\n\nUne question avant de payer ? Réponds simplement à ce message. "
+              "Et si tu as changé d'avis, ignore-le : la commande s'effacera seule.")
+    return "Ta commande t'attend", texte
+
+
+def message_relance_devis(devis, lien=""):
+    """Le devis chiffre, reste sans reponse : on rouvre la conversation."""
+    prix = formater_prix(int((devis or {}).get("prix") or 0))
+    ident = (devis or {}).get("id") or "?"
+    texte = (f"Ton devis n° {ident} est prêt depuis quelques jours : **{prix}**, "
+             "et il reste valable.\n\nUne question sur le contenu, le délai ou le "
+             "prix ? Réponds à ce message : un devis, ça se discute.")
+    if lien:
+        texte += f"\n\nLe revoir et le régler : {lien}"
+    return "Ton devis t'attend", texte
+
+
+def message_cloture_devis(devis):
+    """Le devis qu'on classe apres un mois : poli, et la porte reste ouverte."""
+    ident = (devis or {}).get("id") or "?"
+    return ("Devis classé",
+            f"Ton devis n° {ident} est resté sans suite depuis "
+            f"{CLOTURE_DEVIS.days} jours : on le classe pour garder la liste "
+            "propre.\n\nCe n'est pas un refus — redemandes-en un quand tu veux, "
+            "on repart de ta description.")
+
+
+def duree_hors_ligne(battement, maintenant=None):
+    """
+    Combien de temps le bot est-il reste muet ? None si c'est negligeable.
+
+    Le bot ecrit l'heure quelque part, regulierement. Au demarrage, l'ecart
+    entre cette heure et maintenant dit ce qu'on a manque — et un
+    redemarrage de quelques secondes ne merite pas une alerte.
+    """
+    dernier = _date(battement)
+    if dernier is None:
+        return None
+    ecart = (maintenant or datetime.now(timezone.utc)) - dernier
+    return ecart if ecart >= COUPURE_MIN else None
+
+
+def empreinte(commandes=None, devis=None, sav=None):
+    """
+    Une courte signature de l'etat de la boutique.
+
+    Le site la redemande toutes les quelques secondes : si elle a change,
+    il se rafraichit tout seul — traiter un dossier sur Discord le met a
+    jour sur le site, et l'inverse. Elle ne revele rien : ni nom, ni texte,
+    seulement des statuts et des comptes.
+    """
+    morceaux = []
+    for nom, table in (("c", commandes), ("d", devis), ("s", sav)):
+        for clef, fiche in sorted((table or {}).items()):
+            if not isinstance(fiche, dict):
+                continue
+            morceaux.append("%s:%s:%s:%d:%d" % (
+                nom, clef, fiche.get("statut") or "",
+                len(fiche.get("historique") or []),
+                len(fiche.get("reponses") or [])))
+    signature = "|".join(morceaux).encode("utf-8")
+    return hashlib.sha1(signature).hexdigest()[:16]

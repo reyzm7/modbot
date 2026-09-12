@@ -305,6 +305,9 @@ F_LICENCES = chemin_donnees("licences.json")
 F_COMMANDES = chemin_donnees("commandes.json")
 F_DEVIS = chemin_donnees("devis.json")
 F_SAV = chemin_donnees("sav.json")
+# Le pouls du bot : une heure reecrite chaque minute. C'est la seule trace
+# d'une coupure — l'hebergeur, lui, ne previent personne.
+F_BATTEMENT = chemin_donnees("battement.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -5422,6 +5425,10 @@ RATE_LIMITS = [
     # salon de l'equipe : cinq par tranche de dix minutes.
     ("/api/boutique/devis", (5, 600)),
     ("/api/boutique/sav", (5, 600)),
+    # Le panneau demande l'empreinte de la boutique toutes les trois
+    # secondes tant qu'il est ouvert : c'est la seule route faite pour
+    # etre appelee souvent, et elle ne rend que seize caracteres.
+    ("/api/admin/boutique/version", (60, 60)),
     ("/api/admin/", (30, 60)),
     ("/api/", (120, 60)),
 ]
@@ -9278,6 +9285,12 @@ async def boutique_paiement_recu(session_stripe):
     numero = str(meta.get("commande") or "")
     if not bq.numero_valide(numero):
         print(f"boutique: numero de commande illisible ({numero!r})")
+        await alerter_equipe(
+            "Un paiement sans numéro de commande",
+            f"Stripe a confirmé un paiement dont le numéro de commande est "
+            f"illisible (`{str(numero)[:60]}`). L'argent est encaissé : il faut "
+            "retrouver le paiement dans le tableau de bord Stripe et créer la "
+            "commande à la main.")
         return None
     # « Terminee » ne veut pas dire « payee » pour un moyen de paiement
     # differe : on attend alors checkout.session.async_payment_succeeded.
@@ -9899,6 +9912,171 @@ async def api_admin_boutique_sav_clore(request):
         request.match_info.get("sav_id"), _auteur(identity)), request=request)
 
 
+async def api_admin_boutique_version(request):
+    """
+    L'empreinte de l'etat de la boutique, et rien d'autre.
+
+    Le panneau la redemande toutes les trois secondes tant qu'il est
+    ouvert : c'est la reponse la plus courte possible a « est-ce que
+    quelque chose a bouge ? ». Traiter un dossier depuis Discord met donc
+    le site a jour tout seul — l'inverse etait deja vrai.
+    """
+    await api_identity(request, admin_required=True)
+    return api_json({"ok": True, "version": bq.empreinte(
+        commandes_tout(), devis_tout(), sav_tout())}, request=request)
+
+
+# ── Quand quelque chose se passe mal, quelqu'un doit l'apprendre ───────
+
+async def alerter_equipe(titre, texte, couleur=0xED4245):
+    """
+    Un message prive a chaque administrateur du bot ; rend le nombre d'envois.
+
+    Sert aux pannes : un webhook Stripe qui echoue, un retour de coupure,
+    des dossiers laisses sans reponse. Chaque envoi est tente a part — un
+    administrateur qui a ferme ses MP ne doit pas priver les autres de
+    l'alerte.
+    """
+    envoyes = 0
+    for admin in sorted(DASHBOARD_ADMIN_IDS):
+        if not str(admin).isdigit():
+            continue
+        try:
+            utilisateur = bot.get_user(int(admin)) or await bot.fetch_user(int(admin))
+            await utilisateur.send(embed=E(titre, str(texte)[:4000], couleur))
+            envoyes += 1
+        except Exception as erreur:
+            print(f"alerte equipe: {admin} injoignable : {erreur}")
+    return envoyes
+
+
+# ── Le pouls du bot ────────────────────────────────────────────────────
+
+def battement_lire():
+    donnees = jload(F_BATTEMENT)
+    return str(donnees.get("le") or "") if isinstance(donnees, dict) else ""
+
+
+def battement_ecrire():
+    jsave(F_BATTEMENT, {"le": now().isoformat()})
+
+
+async def battement_loop():
+    """
+    Ecrit l'heure chaque minute, et raconte la coupure au retour.
+
+    L'hebergeur ne previent personne quand il redemarre ou perd le bot :
+    cette heure sur le disque est la seule trace. Un redemarrage de
+    quelques secondes ne dit rien — au-dela, l'equipe l'apprend, sinon
+    personne ne comprendrait pourquoi une commande payee est restee sans
+    reponse toute la nuit.
+    """
+    await bot.wait_until_ready()
+    try:
+        coupure = bq.duree_hors_ligne(battement_lire(), now())
+        if coupure is not None:
+            await alerter_equipe(
+                "ModBot est revenu",
+                f"Le bot n'a pas répondu pendant **{bq.duree_lisible(coupure)}**.\n\n"
+                "Les paiements de cette période ne sont pas perdus : Stripe "
+                "réessaie ses notifications tout seul. Si cette alerte revient "
+                "souvent, c'est l'hébergement qu'il faut regarder.",
+                0xFAA61A)
+    except Exception as erreur:
+        print(f"battement: retour de coupure non annonce : {erreur}")
+    while not bot.is_closed():
+        try:
+            battement_ecrire()
+        except Exception as erreur:
+            print(f"battement: {erreur}")
+        await asyncio.sleep(60)
+
+
+# ── Les rappels : ce qui traine, et ce qu'on peut relancer ─────────────
+
+async def passer_les_rappels(maintenant=None):
+    """
+    Un tour de rappels ; rend ce qui a ete fait.
+
+    Trois gestes, dans cet ordre : prevenir l'equipe de ce qui attend,
+    relancer une fois — jamais deux — les clients qu'on peut relancer, et
+    classer les devis qu'un mois a rendu caducs.
+    """
+    maintenant = maintenant or now()
+    commandes, devis, sav = commandes_tout(), devis_tout(), sav_tout()
+    bilan = {"equipe": 0, "paniers": 0, "devis": 0, "clos": 0}
+
+    tables = {"commande": (commandes, commande_ecrire),
+              "devis": (devis, devis_ecrire), "sav": (sav, sav_ecrire)}
+    retard = bq.dossiers_en_retard(commandes, devis, sav, maintenant)
+    if retard and await alerter_equipe("Des dossiers attendent",
+                                       bq.message_rappel(retard), 0xFAA61A):
+        bilan["equipe"] = len(retard)
+        for dossier in retard:
+            table, ecrire = tables[dossier["genre"]]
+            fiche = table.get(dossier["id"])
+            if fiche:
+                ecrire(bq.marquer_rappel(fiche, maintenant))
+
+    a_faire = bq.relances_client(commandes, devis, maintenant)
+
+    for numero in a_faire["paniers"]:
+        fiche = commandes.get(numero)
+        if not fiche:
+            continue
+        titre, texte = bq.message_panier(fiche, f"{site_racine()}/boutique.html")
+        envoye, raison = await ecrire_au_client(fiche, titre, texte, 0x5865F2)
+        # Marque dans tous les cas : un client injoignable le restera, et
+        # relancer toutes les quinze minutes serait pire que se taire.
+        commande_ecrire(bq.marquer_relance(fiche, maintenant))
+        bilan["paniers"] += 1 if envoye else 0
+        if not envoye:
+            print(f"boutique: panier {numero} non relance ({raison})")
+
+    for ident in a_faire["devis"]:
+        fiche = devis.get(ident)
+        if not fiche:
+            continue
+        titre, texte = bq.message_relance_devis(fiche, lien_devis(fiche))
+        envoye, raison = await ecrire_au_client(fiche, titre, texte, 0x5865F2,
+                                                lien=lien_devis(fiche))
+        devis_ecrire(bq.marquer_relance(fiche, maintenant))
+        bilan["devis"] += 1 if envoye else 0
+        if not envoye:
+            print(f"boutique: devis {ident} non relance ({raison})")
+
+    for ident in a_faire["clore"]:
+        fiche = devis.get(ident)
+        if not fiche:
+            continue
+        close, erreur = bq.clore_devis(fiche, "ModBot", maintenant.isoformat())
+        if erreur:
+            continue
+        devis_ecrire(close)
+        await editer_annonce(close.get("annonce"), embed_devis(close), None)
+        titre, texte = bq.message_cloture_devis(close)
+        await ecrire_au_client(close, titre, texte, 0x747F8D)
+        bilan["clos"] += 1
+
+    return bilan
+
+
+async def rappels_boutique_loop():
+    """
+    Toutes les quinze minutes : ce qui traine, et ce qu'on peut relancer.
+
+    Un dossier oublie est un client perdu ; un panier abandonne est une
+    vente qui attend une phrase. Les deux se rattrapent ici, tout seuls.
+    """
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await passer_les_rappels()
+        except Exception as erreur:
+            print(f"rappels boutique: {erreur}")
+        await asyncio.sleep(900)
+
+
 # ── Les boutons et fenetres du salon des paiements ─────────────────────
 
 def valeurs_fenetre(donnees):
@@ -10084,7 +10262,21 @@ async def api_stripe_webhook(request):
     if meta.get("type") == "boutique":
         if type_evenement in ("checkout.session.completed",
                               "checkout.session.async_payment_succeeded"):
-            await boutique_paiement_recu(objet)
+            try:
+                await boutique_paiement_recu(objet)
+            except Exception as erreur:
+                # Le 500 est volontaire : Stripe reessaiera de lui-meme.
+                # Mais un paiement encaisse qui n'arrive pas jusqu'a
+                # l'equipe ne doit pas rester silencieux, meme dix minutes.
+                print(f"boutique: webhook en echec ({erreur})")
+                await alerter_equipe(
+                    "Un paiement n'a pas pu être enregistré",
+                    f"Commande **{meta.get('commande') or '?'}** — "
+                    f"`{type(erreur).__name__}: {erreur}`\n\n"
+                    "L'argent est bien encaissé chez Stripe, et Stripe va "
+                    "réessayer plusieurs fois. Si cette alerte revient, il faut "
+                    "traiter la commande à la main.")
+                raise
         return api_json({"ok": True, "received": type_evenement})
 
     if type_evenement == "checkout.session.completed" and uid:
@@ -11240,6 +11432,7 @@ async def start_dashboard_api():
     app.router.add_get("/api/admin/boutique/devis/{devis_id}/pdf", api_admin_boutique_devis_pdf)
     app.router.add_post("/api/boutique/sav", api_boutique_sav)
     app.router.add_get("/api/admin/boutique", api_admin_boutique)
+    app.router.add_get("/api/admin/boutique/version", api_admin_boutique_version)
     app.router.add_post("/api/admin/boutique/commandes/{numero}/statut", api_admin_boutique_statut)
     app.router.add_post("/api/admin/boutique/devis/{devis_id}/prix", api_admin_boutique_devis_prix)
     app.router.add_post("/api/admin/boutique/devis/{devis_id}/clore", api_admin_boutique_devis_clore)
@@ -14947,6 +15140,8 @@ _security_task = None
 _autobackup_task = None
 _giveaway_task = None
 _sauvegarde_task = None
+_battement_task = None
+_rappels_task = None
 _presence_task = None
 # Cache des objets supprimes pour la restauration automatique anti-nuke
 _deleted_cache: dict = {}
@@ -18127,6 +18322,7 @@ async def presence_loop():
 async def on_ready():
     global _dashboard_recurring_task, _dashboard_social_task, _compteurs_task
     global _security_task, _autobackup_task, _giveaway_task, _sauvegarde_task
+    global _battement_task, _rappels_task
     global _licences_task
     global _presence_task
     global _sauvegarde_a_faire
@@ -18192,6 +18388,10 @@ async def on_ready():
         _giveaway_task = asyncio.create_task(giveaway_loop())
     if not _sauvegarde_task or _sauvegarde_task.done():
         _sauvegarde_task = asyncio.create_task(sauvegarde_discord_loop())
+    if not _battement_task or _battement_task.done():
+        _battement_task = asyncio.create_task(battement_loop())
+    if not _rappels_task or _rappels_task.done():
+        _rappels_task = asyncio.create_task(rappels_boutique_loop())
     try:
         # Les descriptions des commandes, dans chaque langue de Discord.
         # Discord ne connait qu'une liste de commandes pour tous les

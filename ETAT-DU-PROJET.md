@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **11 septembre 2026** (voir §68 pour le dernier lot livré).
+> Dernière mise à jour : **12 septembre 2026** (voir §69 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -5065,3 +5065,94 @@ du haut ; sur Carte bancaire, mets un logo Mastercard ou autre ».
 - **Cartes acceptées** : badges Visa et Mastercard (symboles `i-visa` et
   `i-mastercard` du sprite) sur le bouton « Carte bancaire », dans les
   cartes de la boutique comme dans « Ton devis ».
+
+## 69. Livré le 12 septembre 2026 — le direct, les rappels, le pouls, l'anti-double-clic
+
+Demande : « quand un dossier ou une assistance est traité côté site, ça le
+règle aussi côté Discord immédiatement, et inversement », puis le lot
+« robustesse » — alerte si un webhook Stripe échoue, surveillance du bot,
+anti double-clic côté serveur — et les relances qui rapportent.
+
+### Le direct dans les deux sens
+
+Le site vers Discord était déjà immédiat : chaque action du panneau édite
+l'annonce du salon des paiements. L'autre sens manquait.
+
+`boutique.empreinte(commandes, devis, sav)` rend seize caractères : les
+identifiants, les statuts et le nombre d'entrées d'historique, triés,
+hachés. Rien de nominatif, rien de lisible.
+`GET /api/admin/boutique/version` la sert, et le panneau la redemande
+**toutes les trois secondes** tant qu'il est ouvert et que l'onglet est au
+premier plan. Quand elle change, le panneau se recharge tout seul.
+
+Ce qui est en train d'être écrit ne disparaît pas : avant de repeindre, le
+panneau garde la valeur de chaque champ (`btqClefChamp` : `DV-7K2M|btqPrix`)
+et la position du curseur, puis les remet. Un témoin « En direct » — une
+pastille verte qui bat — apparaît quand le bot répond, et s'efface dès qu'il
+ne répond plus : un voyant vert qui ment serait pire que pas de voyant.
+
+Cadence : `("/api/admin/boutique/version", (60, 60))`, posée **avant**
+`/api/admin/` dans `RATE_LIMITS`, sinon les trente appels par minute de la
+règle générale auraient coupé le direct au bout de quatre-vingt-dix
+secondes.
+
+### L'anti-double-clic, côté serveur
+
+Deux fois la même action en moins de **45 secondes** (`bq.ANTI_DOUBLON`),
+c'est un double-clic ou la même décision arrivée du site et de Discord —
+pas une volonté. `_trop_tot(entrées, maintenant, pareil)` regarde la
+dernière entrée de l'historique : même statut et mêmes jours
+(`appliquer_statut`), même prix (`proposer_prix`), même texte
+(`repondre_sav`). Si c'est le cas, l'action est refusée avec « C'est déjà
+fait : le client vient d'être prévenu. » Le client ne reçoit jamais deux
+fois le même message privé.
+
+Sans date lisible, rien n'est bloqué : mieux vaut un message en double
+qu'une boutique qui refuse de travailler.
+
+### Le pouls du bot
+
+`battement.json` (jamais commité, jamais sauvegardé dans Discord) porte une
+heure réécrite **chaque minute** par `battement_loop`. Au démarrage,
+`bq.duree_hors_ligne` compare cette heure à maintenant : au-delà de cinq
+minutes (`COUPURE_MIN`), chaque administrateur reçoit « ModBot est revenu —
+le bot n'a pas répondu pendant 3 h ». En dessous, rien : un redéploiement
+ordinaire ne doit pas rendre l'alerte invisible à force de crier.
+
+La sauvegarde Discord ne reprend pas ce fichier — une heure restaurée
+d'hier annoncerait une coupure imaginaire.
+
+### Le webhook Stripe qui échoue
+
+`await boutique_paiement_recu(objet)` est maintenant dans un `try`. En cas
+d'erreur, l'équipe reçoit en privé le numéro de commande et le type
+d'erreur, **et l'exception est relancée** : le 500 est volontaire, c'est lui
+qui fait réessayer Stripe. Un paiement dont le numéro est illisible déclenche
+la même alerte — l'argent est encaissé, il faut le retrouver à la main.
+
+### Les rappels et les relances
+
+`rappels_boutique_loop` passe toutes les **quinze minutes**.
+
+- **À l'équipe**, un seul message privé qui liste tout ce qui traîne
+  (`dossiers_en_retard` + `message_rappel`) : commande payée sans suivi
+  depuis 24 h, date de début dépassée, devis à chiffrer depuis 24 h,
+  demande d'aide sans réponse depuis 12 h. Chaque dossier rappelé est
+  estampillé `rappel_le` : pas deux rappels du même dossier avant 24 h.
+- **Au client**, une fois et jamais deux (`relance_le`) : panier abandonné
+  après 6 h (« ta commande t'attend »), devis chiffré resté sans réponse
+  après 3 jours. Un client sans identifiant Discord n'est pas relancé — on
+  ne saurait pas lui écrire.
+- **Classement automatique** des devis restés sans suite 30 jours, avec un
+  message poli qui laisse la porte ouverte.
+
+### Vérifications
+
+`test_boutique.py` : 328 vérifications (42 nouvelles pour ce lot), toutes
+passées ; deux mutations vérifiées — `ANTI_DOUBLON` à zéro fait tomber les
+quatre contrôles d'anti-double-clic, `RAPPEL_SAV` à 99 h fait tomber les
+deux contrôles de retard. `test_cloison.py`
+35/35, `test_bout_en_bout.py` 45/45, `test_noms.py` 13/13,
+`test_premium.py` 58/58, `test_notes.py` 23/23. Site : `test_selecteurs`
+105/105, `test_bienvenue` 24/24, `test_i18n`, `test_derives`,
+`test_declarations` passés.

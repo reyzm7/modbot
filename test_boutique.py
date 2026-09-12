@@ -1093,6 +1093,250 @@ verifier("les commandes font partie des sauvegardes",
 if os.path.exists(bot_mod.F_COMMANDES):
     os.remove(bot_mod.F_COMMANDES)
 
+
+# ══════════════════════════════════════════════════════════════════════
+print("\n--- Le direct, l'anti-double-clic, les rappels ---")
+
+T0 = datetime(2026, 9, 12, 10, 0, tzinfo=timezone.utc)
+MAINT = T0 + timedelta(days=2)
+iso = lambda ecart: (MAINT - ecart).isoformat()  # noqa: E731
+
+verifier("une duree se lit comme on la dirait",
+         [bq.duree_lisible(timedelta(seconds=20)), bq.duree_lisible(timedelta(minutes=40)),
+          bq.duree_lisible(timedelta(hours=3)), bq.duree_lisible(timedelta(days=3))]
+         == ["à l'instant", "40 min", "3 h", "3 jours"],
+         str([bq.duree_lisible(timedelta(hours=3)), bq.duree_lisible(timedelta(days=3))]))
+verifier("une duree illisible ne rend rien plutot qu'un mensonge",
+         bq.duree_lisible("trois heures") == "")
+
+# ── Deux clics ne font pas deux messages ───────────────────────────────
+
+commande = {"numero": "CMD-260912-AAAA", "statut": "payee", "historique": []}
+une, _ = bq.appliquer_statut(commande, "en_cours", par="moi", maintenant=T0)
+deux, erreur = bq.appliquer_statut(une, "en_cours", par="moi",
+                                   maintenant=T0 + timedelta(seconds=10))
+verifier("le meme statut deux fois de suite est refuse",
+         deux is None and "déjà fait" in (erreur or ""), str(erreur))
+trois, _ = bq.appliquer_statut(une, "attente", par="moi",
+                               maintenant=T0 + timedelta(seconds=10))
+verifier("un AUTRE statut passe tout de suite", trois is not None)
+quatre, _ = bq.appliquer_statut(une, "en_cours", par="moi",
+                                maintenant=T0 + timedelta(seconds=60))
+verifier("le meme statut repasse une minute plus tard", quatre is not None)
+
+plan, _ = bq.appliquer_statut(commande, "planifiee", jours=3, maintenant=T0)
+rejoue, erreur = bq.appliquer_statut(plan, "planifiee", jours=3,
+                                     maintenant=T0 + timedelta(seconds=5))
+verifier("reprogrammer au meme jour est refuse", rejoue is None, str(erreur))
+change, _ = bq.appliquer_statut(plan, "planifiee", jours=7,
+                                maintenant=T0 + timedelta(seconds=5))
+verifier("reprogrammer a un AUTRE jour passe", change is not None)
+
+devis_zero = {"id": "DV-260912-AAAA", "statut": "nouveau", "historique": []}
+prix1, _ = bq.proposer_prix(devis_zero, 4900, "Voilà.", "moi", T0.isoformat())
+prix2, erreur = bq.proposer_prix(prix1, 4900, "Voilà.", "moi",
+                                 (T0 + timedelta(seconds=10)).isoformat())
+verifier("le meme prix deux fois de suite est refuse",
+         prix2 is None and "déjà fait" in (erreur or ""), str(erreur))
+prix3, _ = bq.proposer_prix(prix1, 5900, "Corrigé.", "moi",
+                            (T0 + timedelta(seconds=10)).isoformat())
+verifier("un prix corrige part tout de suite", prix3 is not None)
+
+sav_zero = {"id": "SA-260912-AAAA", "statut": "ouvert", "reponses": []}
+rep1, _ = bq.repondre_sav(sav_zero, "On regarde ça.", "moi", T0.isoformat())
+rep2, erreur = bq.repondre_sav(rep1, "On regarde ça.", "moi",
+                               (T0 + timedelta(seconds=5)).isoformat())
+verifier("la meme reponse deux fois de suite est refusee",
+         rep2 is None and "déjà fait" in (erreur or ""), str(erreur))
+rep3, _ = bq.repondre_sav(rep1, "C'est réglé.", "moi",
+                          (T0 + timedelta(seconds=5)).isoformat())
+verifier("une autre reponse part tout de suite", rep3 is not None)
+
+# ── Ce qui attend l'equipe ─────────────────────────────────────────────
+
+commandes_r = {
+    "CMD-A": {"numero": "CMD-A", "statut": "payee", "libelle": "Bot Pro",
+              "payee_le": iso(timedelta(hours=30)), "historique": []},
+    "CMD-B": {"numero": "CMD-B", "statut": "payee", "libelle": "Bot",
+              "payee_le": iso(timedelta(hours=2)), "historique": []},
+    "CMD-C": {"numero": "CMD-C", "statut": "payee", "libelle": "Bot",
+              "payee_le": iso(timedelta(hours=30)), "historique": [],
+              "rappel_le": iso(timedelta(hours=1))},
+    "CMD-D": {"numero": "CMD-D", "statut": "planifiee", "libelle": "Site",
+              "debut_prevu": (MAINT - timedelta(days=3)).date().isoformat(),
+              "historique": []},
+    "CMD-E": {"numero": "CMD-E", "statut": "livree", "libelle": "Site",
+              "payee_le": iso(timedelta(days=9)), "historique": []},
+}
+devis_r = {
+    "DV-A": {"id": "DV-A", "statut": "nouveau", "categorie": "les_deux",
+             "creee_le": iso(timedelta(hours=30)), "historique": []},
+    "DV-B": {"id": "DV-B", "statut": "propose", "categorie": "bot", "prix": 4900,
+             "creee_le": iso(timedelta(hours=30)), "historique": []},
+}
+sav_r = {
+    "SA-A": {"id": "SA-A", "statut": "ouvert", "sujet": "probleme",
+             "creee_le": iso(timedelta(hours=13)), "reponses": []},
+    "SA-B": {"id": "SA-B", "statut": "repondu", "sujet": "probleme",
+             "creee_le": iso(timedelta(days=4)), "reponses": []},
+}
+retard = bq.dossiers_en_retard(commandes_r, devis_r, sav_r, MAINT)
+vus = [(d["genre"], d["id"]) for d in retard]
+verifier("seuls les dossiers vraiment en retard remontent",
+         sorted(vus) == [("commande", "CMD-A"), ("commande", "CMD-D"),
+                         ("devis", "DV-A"), ("sav", "SA-A")], str(sorted(vus)))
+verifier("le plus vieux dossier est cite en premier",
+         retard[0]["id"] == "CMD-D", retard[0]["id"])
+verifier("un dossier deja rappele il y a une heure ne l'est pas deux fois",
+         all(d["id"] != "CMD-C" for d in retard))
+digest = bq.message_rappel(retard)
+verifier("un seul message porte tout ce qui traine",
+         digest.startswith("4 dossiers") and digest.count("• ") == 4, digest[:60])
+verifier("le message cite la commande et son libelle",
+         "CMD-A" in digest and "Bot Pro" in digest)
+verifier("rien a rappeler ne fabrique pas de message", bq.message_rappel([]) == "")
+verifier("un rappel laisse une trace datee",
+         bq.marquer_rappel({"id": "X"}, MAINT)["rappel_le"] == MAINT.isoformat())
+
+# ── Ce qu'on peut dire au client, une fois ─────────────────────────────
+
+commandes_c = {
+    "C1": {"numero": "C1", "statut": "en_attente", "libelle": "Bot Essentiel",
+           "discord_id": "111111111111111111", "creee_le": iso(timedelta(hours=7))},
+    "C2": {"numero": "C2", "statut": "en_attente", "libelle": "Bot",
+           "discord_id": "", "creee_le": iso(timedelta(hours=7))},
+    "C3": {"numero": "C3", "statut": "en_attente", "libelle": "Bot",
+           "discord_id": "111111111111111111", "creee_le": iso(timedelta(hours=7)),
+           "relance_le": iso(timedelta(hours=1))},
+    "C4": {"numero": "C4", "statut": "en_attente", "libelle": "Bot",
+           "discord_id": "111111111111111111", "creee_le": iso(timedelta(hours=1))},
+    "C5": {"numero": "C5", "statut": "payee", "libelle": "Bot",
+           "discord_id": "111111111111111111", "creee_le": iso(timedelta(days=5))},
+}
+devis_c = {
+    "D1": {"id": "D1", "statut": "propose", "prix": 4900, "categorie": "bot",
+           "discord_id": "111111111111111111", "creee_le": iso(timedelta(days=4)),
+           "historique": [{"date": iso(timedelta(days=4)), "statut": "propose"}]},
+    "D2": {"id": "D2", "statut": "propose", "prix": 4900, "categorie": "bot",
+           "discord_id": "111111111111111111", "creee_le": iso(timedelta(days=1)),
+           "historique": [{"date": iso(timedelta(days=1)), "statut": "propose"}]},
+    "D3": {"id": "D3", "statut": "nouveau", "categorie": "bot",
+           "discord_id": "111111111111111111", "creee_le": iso(timedelta(days=40)),
+           "historique": []},
+    "D4": {"id": "D4", "statut": "payee", "prix": 4900, "categorie": "bot",
+           "discord_id": "111111111111111111", "creee_le": iso(timedelta(days=40)),
+           "historique": []},
+}
+relances = bq.relances_client(commandes_c, devis_c, MAINT)
+verifier("un seul panier est relance : celui qui peut l'etre",
+         relances["paniers"] == ["C1"], str(relances["paniers"]))
+verifier("un devis chiffre sans reponse depuis trois jours est relance",
+         relances["devis"] == ["D1"], str(relances["devis"]))
+verifier("un devis reste sans suite un mois est classe",
+         relances["clore"] == ["D3"], str(relances["clore"]))
+titre, texte = bq.message_panier(commandes_c["C1"], "https://site/boutique.html")
+verifier("la relance du panier cite l'article, le numero et le lien",
+         "Bot Essentiel" in texte and "C1" in texte and "https://site/boutique.html" in texte)
+titre, texte = bq.message_relance_devis(devis_c["D1"], "https://site/devis")
+verifier("la relance du devis rappelle le prix et rouvre la discussion",
+         "49 €" in texte and "https://site/devis" in texte, texte[:80])
+verifier("un devis classe est annonce sans reproche",
+         "30 jours" in bq.message_cloture_devis(devis_c["D3"])[1])
+verifier("une relance laisse une trace datee",
+         bq.marquer_relance({"id": "X"}, MAINT)["relance_le"] == MAINT.isoformat())
+
+# ── Le pouls, et l'empreinte du direct ─────────────────────────────────
+
+verifier("un redemarrage de deux minutes ne merite pas d'alerte",
+         bq.duree_hors_ligne(iso(timedelta(minutes=2)), MAINT) is None)
+verifier("une coupure de trois heures est annoncee",
+         bq.duree_lisible(bq.duree_hors_ligne(iso(timedelta(hours=3)), MAINT)) == "3 h")
+verifier("sans pouls enregistre, on n'invente pas de coupure",
+         bq.duree_hors_ligne("", MAINT) is None
+         and bq.duree_hors_ligne("hier soir", MAINT) is None)
+
+signature = bq.empreinte(commandes_r, devis_r, sav_r)
+verifier("l'empreinte est courte et stable",
+         len(signature) == 16 and signature == bq.empreinte(commandes_r, devis_r, sav_r),
+         signature)
+bouge = {**commandes_r, "CMD-A": {**commandes_r["CMD-A"], "statut": "en_cours"}}
+verifier("un statut qui change change l'empreinte",
+         bq.empreinte(bouge, devis_r, sav_r) != signature)
+verifier("une commande de plus change l'empreinte",
+         bq.empreinte({**commandes_r, "CMD-Z": {"statut": "payee"}}, devis_r, sav_r)
+         != signature)
+verifier("l'empreinte ne laisse filtrer aucun texte",
+         "Bot Pro" not in signature and "CMD-A" not in signature)
+verifier("une boutique vide a quand meme une empreinte",
+         len(bq.empreinte()) == 16)
+
+# ── Cote bot : la route du direct, les alertes, un tour de rappels ─────
+
+premier = next(p for p, _ in bot_mod.RATE_LIMITS
+               if "/api/admin/boutique/version".startswith(p))
+verifier("le direct a son propre quota, avant la regle des admins",
+         premier == "/api/admin/boutique/version", premier)
+verifier("le pouls du bot n'est pas sauvegarde dans Discord",
+         "battement.json" not in bot_mod.FICHIERS_SAUVEGARDES)
+
+source_a = open("bot.py", encoding="utf-8").read()
+verifier("la route du direct est branchee",
+         'add_get("/api/admin/boutique/version", api_admin_boutique_version)' in source_a)
+verifier("un webhook de boutique en echec alerte puis laisse Stripe reessayer",
+         "alerter_equipe(" in source_a.split("boutique_paiement_recu(objet)")[1][:900]
+         and "raise" in source_a.split("boutique_paiement_recu(objet)")[1][:900])
+
+
+async def scenario_rappels():
+    bot_mod.F_COMMANDES = os.path.join(bot_mod.BASE_DIR, "commandes.test.json")
+    bot_mod.F_DEVIS = os.path.join(bot_mod.BASE_DIR, "devis.test.json")
+    bot_mod.F_SAV = os.path.join(bot_mod.BASE_DIR, "sav.test.json")
+    for chemin in (bot_mod.F_COMMANDES, bot_mod.F_DEVIS, bot_mod.F_SAV):
+        if os.path.exists(chemin):
+            os.remove(chemin)
+    bot_mod.jsave(bot_mod.F_COMMANDES, {**commandes_r, **commandes_c})
+    bot_mod.jsave(bot_mod.F_DEVIS, {**devis_r, **devis_c})
+    bot_mod.jsave(bot_mod.F_SAV, sav_r)
+
+    alertes, prives = [], []
+
+    async def fausse_alerte(titre, texte, couleur=0):
+        alertes.append((titre, texte))
+        return 1
+
+    async def faux_prive(fiche, titre, texte, couleur=0, lien=None, fichier=None):
+        prives.append((fiche.get("numero") or fiche.get("id"), titre))
+        return True, ""
+
+    vraie_alerte, vrai_prive = bot_mod.alerter_equipe, bot_mod.ecrire_au_client
+    bot_mod.alerter_equipe, bot_mod.ecrire_au_client = fausse_alerte, faux_prive
+    try:
+        bilan = await bot_mod.passer_les_rappels(MAINT)
+    finally:
+        bot_mod.alerter_equipe, bot_mod.ecrire_au_client = vraie_alerte, vrai_prive
+
+    verifier("un tour de rappels ecrit une seule fois a l'equipe",
+             len(alertes) == 1, str(len(alertes)))
+    verifier("l'equipe recoit la liste des dossiers en retard",
+             "CMD-A" in alertes[0][1] and "DV-A" in alertes[0][1])
+    verifier("le panier et le devis sont relances, une fois chacun",
+             (bilan["paniers"], bilan["devis"], bilan["clos"]) == (1, 1, 1), str(bilan))
+    verifier("le client du panier abandonne a bien recu un message",
+             ("C1", "Ta commande t'attend") in prives, str(prives))
+
+    encore = await bot_mod.passer_les_rappels(MAINT + timedelta(minutes=15))
+    verifier("le tour suivant ne relance personne deux fois",
+             (encore["paniers"], encore["devis"], encore["clos"], encore["equipe"])
+             == (0, 0, 0, 0), str(encore))
+
+    for chemin in (bot_mod.F_COMMANDES, bot_mod.F_DEVIS, bot_mod.F_SAV):
+        if os.path.exists(chemin):
+            os.remove(chemin)
+
+
+asyncio.run(scenario_rappels())
+
+
 echecs = [r for r in resultats if not r[1]]
 print(f"\n{len(resultats) - len(echecs)}/{len(resultats)} verifications reussies")
 sys.exit(1 if echecs else 0)
