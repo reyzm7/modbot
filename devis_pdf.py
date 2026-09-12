@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Le devis en PDF : un vrai document, avec le logo, le numero, le client, le
-projet, le prix et le lien pour payer.
+Les documents en PDF : le devis avant la vente, la facture apres.
+
+Le devis porte le logo, le numero, le client, le projet, le prix et le
+lien pour payer. La facture porte l'identite du vendeur, le numero de la
+suite legale, le detail, le total et la mention de TVA.
 
 Ecrit a la main, sans aucune dependance : une page PDF n'a besoin que de
 quelques objets. Les polices sont celles que tout lecteur PDF connait
@@ -331,7 +334,18 @@ def devis_pdf(devis, *, lien, categorie, prix_label, logo=None, maintenant=None,
     for i, ligne in enumerate(borner(couper(pied, 8, utile), 2)):
         page.texte(MARGE, 36 - i * 10, ligne, 8, COULEURS["gris"])
 
-    # ── Les objets du fichier ────────────────────────────────────────
+    return _fichier(page, logo, image, f"Devis {ident}", maintenant)
+
+
+def _fichier(page, logo, image, titre_pdf, maintenant):
+    """
+    Les objets du PDF, assembles : catalogue, pages, page, polices, image,
+    contenu, liens, informations.
+
+    Le devis et la facture dessinent des choses differentes mais
+    produisent le meme genre de fichier : cette part-la n'a aucune raison
+    d'exister en deux exemplaires.
+    """
     objets = [None, None, None]         # 1 catalogue, 2 pages, 3 page
     polices = []
     for nom_police in ("Helvetica", "Helvetica-Bold"):
@@ -355,7 +369,7 @@ def devis_pdf(devis, *, lien, categorie, prix_label, logo=None, maintenant=None,
                       f"/Border [0 0 0] /A << /S /URI /URI ".encode() + uri + b" >> >>")
         annotations.append(f"{len(objets)} 0 R")
     horodatage = maintenant.strftime("D:%Y%m%d%H%M%SZ")
-    objets.append(b"<< /Title " + _chaine(texte_winansi(f"Devis {ident}")) +
+    objets.append(b"<< /Title " + _chaine(texte_winansi(titre_pdf)) +
                   b" /Author (ModBot) /Producer (ModBot) /CreationDate " +
                   _chaine(horodatage.encode()) + b" >>")
     objets[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
@@ -364,3 +378,131 @@ def devis_pdf(devis, *, lien, categorie, prix_label, logo=None, maintenant=None,
                  f"/Resources << {ressources} >> /Contents {contenu} 0 R "
                  f"/Annots [{' '.join(annotations)}] >>").encode()
     return _assembler(objets)
+
+
+def _logo_lisible(logo):
+    """Les dimensions du JPEG, ou None si ce n'en est pas un."""
+    if not logo:
+        return None
+    try:
+        return dimensions_jpeg(logo)
+    except ValueError:
+        return None
+
+
+def nom_fichier_facture(facture):
+    return f"facture-{(facture or {}).get('numero') or 'modbot'}.pdf"
+
+
+def facture_pdf(facture, *, identite, tva, logo=None, maintenant=None,
+                site="modbot-website.vercel.app"):
+    """
+    La facture `facture` en PDF (octets).
+
+    `identite` est la liste des lignes du vendeur, deja redigees, et `tva`
+    la mention de franchise : ce module dessine, il ne decide de rien — et
+    surtout pas de ce qu'on a le droit d'ecrire sur une facture.
+    """
+    maintenant = maintenant or datetime.now(timezone.utc)
+    facture = facture or {}
+    page = _Page()
+    utile = LARGEUR - 2 * MARGE
+    numero = str(facture.get("numero") or "")
+    image = _logo_lisible(logo)
+
+    # ── L'en-tete : la marque a gauche, « FACTURE » a droite ─────────
+    page.rect(0, HAUTEUR - 120, LARGEUR, 120, COULEURS["nuit"])
+    page.rect(0, HAUTEUR - 124, LARGEUR, 4, COULEURS["or"])
+    x_marque = MARGE
+    if image:
+        page.image("Logo", MARGE, HAUTEUR - 96, 64, 64)
+        x_marque = MARGE + 78
+    page.texte(x_marque, HAUTEUR - 62, "ModBot", 24, COULEURS["blanc"], gras=True)
+    page.texte(x_marque, HAUTEUR - 82, "Bots Discord et sites web sur mesure", 10,
+               COULEURS["clair"])
+    page.texte(LARGEUR - MARGE, HAUTEUR - 60, "FACTURE", 26, COULEURS["or"],
+               gras=True, droite=True)
+    page.texte(LARGEUR - MARGE, HAUTEUR - 80, f"N° {numero}", 11, COULEURS["blanc"],
+               droite=True)
+    page.texte(LARGEUR - MARGE, HAUTEUR - 96,
+               f"Émise le {_date_fr(facture.get('emise_le'), maintenant)}", 10,
+               COULEURS["clair"], droite=True)
+
+    # ── Qui vend, qui achete ─────────────────────────────────────────
+    y = HAUTEUR - 158
+    colonne = LARGEUR / 2 + 10
+    page.texte(MARGE, y, "VENDEUR", 8.5, COULEURS["gris"], gras=True)
+    page.texte(colonne, y, "CLIENT", 8.5, COULEURS["gris"], gras=True)
+    lignes = borner([str(l) for l in (identite or []) if str(l).strip()], 6)
+    for i, ligne in enumerate(lignes):
+        page.texte(MARGE, y - 16 - i * 13, ligne, 11 if i == 0 else 9.5,
+                   COULEURS["encre"] if i == 0 else COULEURS["gris"], gras=(i == 0))
+    client = str(facture.get("client") or "—")
+    page.texte(colonne, y - 16, client[:48], 11, gras=True)
+    identifiant = str(facture.get("client_id") or "")
+    page.texte(colonne, y - 29,
+               f"Discord : {identifiant}" if identifiant else "Discord : pseudo communiqué",
+               9.5, COULEURS["gris"])
+    courriel = str(facture.get("email") or "")
+    if courriel:
+        page.texte(colonne, y - 42, courriel[:48], 9.5, COULEURS["gris"])
+
+    # ── Le detail ────────────────────────────────────────────────────
+    y -= 16 + 13 * max(len(lignes), 4) + 16
+    page.rect(MARGE, y - 6, utile, 24, COULEURS["fond"])
+    page.texte(MARGE + 10, y + 2, "Désignation", 9.5, COULEURS["gris"], gras=True)
+    page.texte(LARGEUR - MARGE - 10, y + 2, "Montant", 9.5, COULEURS["gris"],
+               gras=True, droite=True)
+    y -= 26
+    # Huit lignes au plus : une facture qui deborde de la page ne se lit
+    # pas, et « borner » ne sait couper que du texte.
+    for element in list(facture.get("lignes") or [])[:8]:
+        if not isinstance(element, dict):
+            continue
+        titres = borner(couper(element.get("libelle"), 11, utile - 150), 2)
+        for i, ligne in enumerate(titres):
+            page.texte(MARGE + 10, y - i * 14, ligne, 11)
+        page.texte(LARGEUR - MARGE - 10, y,
+                   _prix(element.get("montant")), 11, droite=True)
+        y -= 14 * max(len(titres), 1) + 6
+
+    y -= 4
+    page.trait(MARGE, y, LARGEUR - MARGE, y, COULEURS["clair"])
+    y -= 22
+    page.texte(LARGEUR - MARGE - 150, y, "Total TTC", 12, gras=True)
+    page.texte(LARGEUR - MARGE - 10, y, _prix(facture.get("montant")), 15,
+               COULEURS["or_fonce"], gras=True, droite=True)
+    y -= 15
+    page.texte(LARGEUR - MARGE - 10, y, tva, 8.5, COULEURS["gris"], droite=True)
+
+    # ── Le paiement, deja fait ───────────────────────────────────────
+    y -= 34
+    hauteur_boite = 62
+    y = max(y - hauteur_boite, 96)
+    page.rect(MARGE, y, utile, hauteur_boite, COULEURS["creme"])
+    page.rect(MARGE, y, 4, hauteur_boite, COULEURS["or"])
+    haut = y + hauteur_boite
+    page.texte(MARGE + 16, haut - 20, "Payée", 11.5, gras=True)
+    page.texte(MARGE + 16, haut - 36,
+               f"Le {_date_fr(facture.get('payee_le'), maintenant)} "
+               f"par {facture.get('moyen') or 'carte bancaire'}.", 9.5, COULEURS["gris"])
+    page.texte(MARGE + 16, haut - 50,
+               f"Commande n° {facture.get('commande') or '—'}", 9.5, COULEURS["gris"])
+
+    # ── Le pied ──────────────────────────────────────────────────────
+    page.trait(MARGE, 62, LARGEUR - MARGE, 62, COULEURS["clair"])
+    page.texte(MARGE, 48, f"ModBot — {site}", 8.5, COULEURS["gris"], gras=True)
+    pied = ("Facture acquittée, à conserver. Conditions de vente et droit de "
+            f"rétractation : {site}/conditions.html#boutique — mentions légales : "
+            f"{site}/mentions.html")
+    for i, ligne in enumerate(borner(couper(pied, 8, utile), 2)):
+        page.texte(MARGE, 36 - i * 10, ligne, 8, COULEURS["gris"])
+
+    return _fichier(page, logo, image, f"Facture {numero}", maintenant)
+
+
+def _prix(centimes):
+    """3900 → « 39 € », 399 → « 3,99 € ». Le meme rendu que la boutique."""
+    centimes = int(centimes or 0)
+    euros, reste = divmod(centimes, 100)
+    return f"{euros} €" if not reste else f"{euros},{reste:02d} €"

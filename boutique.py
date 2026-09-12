@@ -192,6 +192,8 @@ def valider_commande(donnees, contact=None):
         return None, "Il faut accepter les conditions de la boutique."
     return {"article": clef, "moyen": moyen,
             "projet": nettoyer_projet(donnees.get("projet")),
+            "options": lire_options(donnees.get("options")),
+            "code_promo": nettoyer_code(donnees.get("promo")),
             **_champs_contact(contact)}, None
 
 
@@ -216,13 +218,26 @@ def numero_valide(numero):
     return identifiant_valide("MB", numero)
 
 
-def nouvelle_commande(numero, commande, maintenant_iso):
+def nouvelle_commande(numero, commande, maintenant_iso, promo=None):
+    """
+    La fiche d'une commande du catalogue.
+
+    Le montant se calcule ICI : l'article, plus les options choisies,
+    moins la remise du code promo. Le navigateur n'a envoye que des
+    clefs — jamais un montant, jamais une remise.
+    """
     article = ARTICLES[commande["article"]]
+    options = lire_options(commande.get("options"))
+    brut = article["prix"] + prix_options(options)
     return {
         "numero": numero,
         "article": commande["article"],
-        "libelle": article["libelle"],
-        "montant": article["prix"],
+        "libelle": (f"{article['libelle']} + {libelle_options(options)}"
+                    if options else article["libelle"]),
+        "montant": remise_promo(promo, brut) if promo else brut,
+        "montant_brut": brut,
+        "options": options,
+        "promo": str((promo or {}).get("code") or ""),
         "devise": DEVISE,
         "moyen": commande["moyen"],
         "discord": commande["discord"],
@@ -254,6 +269,11 @@ def metadonnees_stripe(numero, commande):
     }
     if commande.get("devis"):
         meta["devis"] = commande["devis"]
+    if commande.get("options"):
+        meta["options"] = ",".join(commande["options"])[:400]
+    promo = commande.get("promo") or commande.get("code_promo")
+    if promo:
+        meta["promo"] = str(promo)[:40]
     return meta
 
 
@@ -271,8 +291,11 @@ def commande_depuis_stripe(numero, meta, maintenant_iso):
         "type": "pseudo", "valeur": str(meta.get("discord") or "?")[:40]}
     moyen = str(meta.get("moyen") or "")
     devis = str(meta.get("devis") or "")
+    options = lire_options(str(meta.get("options") or "").split(","))
     return {
         "numero": numero,
+        "options": options,
+        "promo": str(meta.get("promo") or "")[:40],
         "article": clef,
         "libelle": article.get("libelle") or ("Création sur mesure" if devis else clef or "?"),
         "montant": article.get("prix", 0),
@@ -945,3 +968,319 @@ def empreinte(commandes=None, devis=None, sav=None):
                 len(fiche.get("reponses") or [])))
     signature = "|".join(morceaux).encode("utf-8")
     return hashlib.sha1(signature).hexdigest()[:16]
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §8. La facture, les options, les codes promo, l'abonnement
+# ══════════════════════════════════════════════════════════════════════
+#
+# Une vente laisse trois traces : un document que le client garde, un
+# numero qui ne saute jamais, et une somme qu'on peut refaire a la main.
+# Tout se decide ici ; le PDF n'est qu'un dessin, et Stripe n'est qu'une
+# caisse.
+
+# Qui vend. Une seule source : une facture et des mentions legales qui se
+# contredisent ne valent rien. Le SIRET manque encore — il se remplit ici
+# le jour de l'immatriculation, et il apparait partout d'un coup.
+VENDEUR = {
+    "nom": "GimsKh / Buffle",
+    "statut": "Micro-entreprise",
+    "siret": "",
+    "contact": "Serveur Discord ModBot",
+    "email": "",
+    # Franchise en base de TVA : rien n'est facture, et la mention est
+    # obligatoire sur chaque facture.
+    "tva": "TVA non applicable — article 293 B du Code général des impôts",
+}
+
+PREFIXE_FACTURE = "F"
+
+
+def identite_vendeur():
+    """
+    Les lignes d'identite a afficher, dans l'ordre, sans ligne vide.
+
+    Ce qui manque ne s'invente pas : tant qu'il n'y a pas de SIRET, la
+    ligne n'existe simplement pas — mieux vaut une mention absente qu'une
+    mention fausse.
+    """
+    lignes = [VENDEUR["nom"], VENDEUR["statut"]]
+    if VENDEUR.get("siret"):
+        lignes.append(f"SIRET {VENDEUR['siret']}")
+    if VENDEUR.get("contact"):
+        lignes.append(f"Contact : {VENDEUR['contact']}")
+    if VENDEUR.get("email"):
+        lignes.append(VENDEUR["email"])
+    return lignes
+
+
+def numero_facture(annee, rang):
+    """« F-2026-0007 » : l'annee, puis le rang, sur quatre chiffres."""
+    return f"{PREFIXE_FACTURE}-{int(annee)}-{int(rang):04d}"
+
+
+def rang_suivant(factures, annee):
+    """
+    Le rang suivant pour cette annee.
+
+    La loi demande une suite chronologique et continue. On repart donc du
+    plus grand rang deja attribue, jamais du nombre de factures : une
+    facture effacee a la main ne doit pas faire reculer le compteur et
+    donner deux fois le meme numero.
+    """
+    rangs = [int(f.get("rang") or 0) for f in (factures or {}).values()
+             if isinstance(f, dict) and str(f.get("annee") or "") == str(annee)]
+    return (max(rangs) if rangs else 0) + 1
+
+
+def facture_de(commande, factures=None, maintenant=None):
+    """
+    (facture, None) si elle peut etre etablie, (None, message) sinon.
+
+    Une commande payee, une facture, et une seule : rappeler la meme
+    commande rend la facture deja etablie, avec son numero d'origine.
+    """
+    commande = commande or {}
+    factures = factures or {}
+    numero = str(commande.get("numero") or "")
+    if not numero:
+        return None, "Commande sans numéro."
+    if commande.get("statut") in (None, "", "en_attente"):
+        return None, "Une facture ne s'établit que sur une commande payée."
+    deja = factures.get(numero)
+    if isinstance(deja, dict) and deja.get("numero"):
+        return deja, None
+    maintenant = maintenant or datetime.now(timezone.utc)
+    paye_le = _date(commande.get("payee_le")) or maintenant
+    annee = paye_le.year
+    rang = rang_suivant(factures, annee)
+    lignes = [{"libelle": commande.get("libelle") or "Création sur mesure",
+               "montant": int(commande.get("montant") or 0)}]
+    return {
+        "numero": numero_facture(annee, rang),
+        "annee": annee,
+        "rang": rang,
+        "commande": numero,
+        "emise_le": maintenant.isoformat(),
+        "payee_le": paye_le.isoformat(),
+        "montant": int(commande.get("montant") or 0),
+        "lignes": lignes,
+        "client": str(commande.get("discord_nom") or commande.get("discord") or ""),
+        "client_id": str(commande.get("discord_id") or ""),
+        "email": str(commande.get("email") or ""),
+        "moyen": LIBELLES_MOYENS.get(commande.get("moyen"), "Carte bancaire"),
+    }, None
+
+
+def nom_facture(facture):
+    return f"facture-{(facture or {}).get('numero') or 'modbot'}.pdf"
+
+
+def message_facture(facture):
+    """Le mot qui accompagne la facture, en message prive."""
+    return ("Ta facture", (
+        f"Voici la facture **n° {(facture or {}).get('numero') or '?'}** de ta "
+        f"commande {(facture or {}).get('commande') or '?'}, en pièce jointe.\n\n"
+        "Garde-la : c'est elle qui prouve ton achat. Tu peux la redemander à "
+        "tout moment, elle ne changera pas."))
+
+
+# ── Les options payantes ───────────────────────────────────────────────
+#
+# Elles s'ajoutent a une commande du catalogue. Leur prix vit ici, comme
+# celui des articles : le navigateur n'envoie que des clefs.
+
+OPTIONS = {
+    "express": {
+        "libelle": "Livraison express",
+        "prix": 1900,
+        "detail": "Ton projet passe devant les autres : le délai annoncé est divisé par deux.",
+    },
+    "page_extra": {
+        "libelle": "Une page de plus",
+        "prix": 1500,
+        "detail": "Une page supplémentaire sur ton site, écrite et soignée comme les autres.",
+    },
+    "hebergement": {
+        "libelle": "Hébergement un an",
+        "prix": 2900,
+        "detail": "Mise en ligne, nom de domaine branché et hébergement pendant douze mois.",
+    },
+}
+# Trois options existent ; en accepter cinquante ferait une facture illisible.
+OPTIONS_MAX = 3
+
+
+def lire_options(brut):
+    """Les options valides, sans doublon, dans l'ordre du catalogue."""
+    demandees = brut if isinstance(brut, (list, tuple)) else []
+    clefs = []
+    for clef in OPTIONS:
+        if clef in [str(x) for x in demandees] and clef not in clefs:
+            clefs.append(clef)
+    return clefs[:OPTIONS_MAX]
+
+
+def prix_options(clefs):
+    return sum(OPTIONS[c]["prix"] for c in (clefs or []) if c in OPTIONS)
+
+
+def libelle_options(clefs):
+    """« Livraison express + Hébergement un an », ou une chaine vide."""
+    return " + ".join(OPTIONS[c]["libelle"] for c in (clefs or []) if c in OPTIONS)
+
+
+def options_publiques():
+    return [{"key": c, "libelle": o["libelle"], "prix": o["prix"],
+             "prix_label": formater_prix(o["prix"]), "detail": o["detail"]}
+            for c, o in OPTIONS.items()]
+
+
+# ── Les codes promo ────────────────────────────────────────────────────
+#
+# Un vrai code : une remise, une limite d'utilisations, une date de fin, et
+# un compteur qui monte pour de bon. Pas un faux prix barre.
+
+_CODE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,19}$")
+REMISE_MIN, REMISE_MAX = 1, 80
+UTILISATIONS_MAX = 10_000
+PROMO_JOURS_MAX = 365
+
+
+def nettoyer_code(brut):
+    """« -bienvenue10 » → « BIENVENUE10 », ou une chaine vide."""
+    texte = re.sub(r"[^A-Za-z0-9-]", "", str(brut or "")).upper().strip("-")
+    return texte if _CODE.match(texte) else ""
+
+
+def valider_promo(donnees, maintenant=None):
+    """(code promo, None) si la création tient debout, (None, message) sinon."""
+    donnees = donnees if isinstance(donnees, dict) else {}
+    code = nettoyer_code(donnees.get("code"))
+    if not code:
+        return None, "Un code de 3 à 20 caractères : lettres, chiffres et tirets."
+    try:
+        remise = int(donnees.get("remise"))
+    except (TypeError, ValueError):
+        return None, f"Une remise entre {REMISE_MIN} et {REMISE_MAX} %."
+    if not REMISE_MIN <= remise <= REMISE_MAX:
+        return None, f"Une remise entre {REMISE_MIN} et {REMISE_MAX} %."
+    try:
+        limite = int(donnees.get("limite") or 0)
+    except (TypeError, ValueError):
+        return None, "Un nombre d'utilisations, ou 0 pour illimité."
+    if not 0 <= limite <= UTILISATIONS_MAX:
+        return None, f"Au plus {UTILISATIONS_MAX} utilisations."
+    try:
+        jours = int(donnees.get("jours") or 0)
+    except (TypeError, ValueError):
+        return None, "Une durée en jours, ou 0 pour sans limite."
+    if not 0 <= jours <= PROMO_JOURS_MAX:
+        return None, f"Au plus {PROMO_JOURS_MAX} jours."
+    maintenant = maintenant or datetime.now(timezone.utc)
+    fin = (maintenant + timedelta(days=jours)).isoformat() if jours else ""
+    return {"code": code, "remise": remise, "limite": limite, "utilisations": 0,
+            "creee_le": maintenant.isoformat(), "fin": fin, "actif": True}, None
+
+
+def promo_utilisable(promo, maintenant=None):
+    """(True, "") si le code peut servir maintenant, (False, raison) sinon."""
+    promo = promo if isinstance(promo, dict) else None
+    if not promo or not promo.get("actif", True):
+        return False, "Ce code n'existe pas ou n'est plus valable."
+    limite = int(promo.get("limite") or 0)
+    if limite and int(promo.get("utilisations") or 0) >= limite:
+        return False, "Ce code a déjà servi le nombre de fois prévu."
+    fin = _date(promo.get("fin"))
+    if fin is not None and (maintenant or datetime.now(timezone.utc)) > fin:
+        return False, "Ce code a expiré."
+    return True, ""
+
+
+def remise_promo(promo, montant):
+    """
+    Le montant apres remise, jamais sous 1 € : Stripe refuse en dessous, et
+    une commande a zero euro n'aurait plus de paiement pour la confirmer.
+    """
+    montant = int(montant or 0)
+    remise = int((promo or {}).get("remise") or 0)
+    apres = montant - (montant * remise) // 100
+    return max(apres, PRIX_MIN)
+
+
+def consommer_promo(promo):
+    """Une utilisation de plus. C'est le paiement qui l'appelle, pas le clic."""
+    nouvelle = dict(promo or {})
+    nouvelle["utilisations"] = int(nouvelle.get("utilisations") or 0) + 1
+    return nouvelle
+
+
+def promo_public(promo, montant=0):
+    """Ce que le site a le droit d'afficher d'un code : ni limite, ni compteur."""
+    return {"code": (promo or {}).get("code") or "", "remise": int((promo or {}).get("remise") or 0),
+            "montant": remise_promo(promo, montant),
+            "montant_label": formater_prix(remise_promo(promo, montant))}
+
+
+# ── L'abonnement maintenance ───────────────────────────────────────────
+#
+# Le seul revenu qui revient tout seul. Il ne se vend qu'apres une
+# creation : entretenir ce qu'on n'a pas fait n'aurait pas de sens.
+
+ABONNEMENT = {
+    "clef": "maintenance",
+    "libelle": "Maintenance et évolutions",
+    "prix": 1000,
+    "periode": "par mois",
+    "detail": "Les corrections, les mises à jour et les petits ajouts, tous les mois.",
+    "avantages": [
+        "Les bugs corrigés en priorité, sans rien payer de plus",
+        "Les mises à jour de Discord et des hébergeurs suivies pour toi",
+        "Les petits ajouts du mois inclus (une commande, une page, un réglage)",
+        "Sans engagement : résiliable en un clic, la période payée reste servie",
+    ],
+}
+
+
+def abonnement_public():
+    return {"key": ABONNEMENT["clef"], "libelle": ABONNEMENT["libelle"],
+            "prix": ABONNEMENT["prix"], "prix_label": formater_prix(ABONNEMENT["prix"]),
+            "periode": ABONNEMENT["periode"], "detail": ABONNEMENT["detail"],
+            "avantages": list(ABONNEMENT["avantages"])}
+
+
+def nouvel_abonnement(uid, contact, maintenant_iso, session=""):
+    return {"discord_id": str(uid), "statut": "en_attente",
+            "creee_le": maintenant_iso, "session": str(session),
+            "abonnement": "", "depuis": "", "jusqu_au": "",
+            "resilie": False, **_champs_contact(contact)}
+
+
+LIBELLES_ABONNEMENT = {"en_attente": "Paiement non finalisé", "actif": "Actif",
+                       "resilie": "Résilié — servi jusqu'au terme",
+                       "termine": "Terminé"}
+
+
+def abonnement_actif(fiche, maintenant=None):
+    """Un abonnement resilie reste actif jusqu'au terme deja paye."""
+    if (fiche or {}).get("statut") not in ("actif", "resilie"):
+        return False
+    fin = _date(fiche.get("jusqu_au"))
+    if fin is None:
+        return fiche.get("statut") == "actif"
+    return (maintenant or datetime.now(timezone.utc)) <= fin
+
+
+def message_abonnement(fiche, actif=True):
+    if actif:
+        return ("Maintenance activée", (
+            "Ton abonnement **maintenance et évolutions** est actif.\n\n"
+            "À partir de maintenant, les corrections sont prioritaires et les "
+            "petits ajouts du mois sont inclus. Écris simplement ici quand tu "
+            "as besoin de quelque chose.\n\nSans engagement : tu peux arrêter "
+            "quand tu veux, et le mois déjà payé reste servi."))
+    return ("Maintenance arrêtée", (
+        "Ton abonnement maintenance ne sera plus prélevé.\n\n"
+        "Le mois déjà payé reste servi jusqu'à son terme"
+        + (f" ({str((fiche or {}).get('jusqu_au') or '')[:10]})" if (fiche or {}).get("jusqu_au") else "")
+        + ". Tu peux le reprendre quand tu veux, au même prix."))

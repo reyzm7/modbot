@@ -308,6 +308,11 @@ F_SAV = chemin_donnees("sav.json")
 # Le pouls du bot : une heure reecrite chaque minute. C'est la seule trace
 # d'une coupure — l'hebergeur, lui, ne previent personne.
 F_BATTEMENT = chemin_donnees("battement.json")
+# Les factures : une suite legale, continue, qu'on ne refait pas. Les
+# perdre serait perdre la preuve de chaque vente.
+F_FACTURES = chemin_donnees("factures.json")
+F_PROMOS = chemin_donnees("promos.json")
+F_ABONNEMENTS = chemin_donnees("abonnements.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -422,6 +427,11 @@ FICHIERS_SAUVEGARDES = (
     # Les commandes de la boutique : qui a paye quoi, et comment le
     # recontacter. Les perdre, ce serait perdre un client qui a paye.
     "commandes.json",
+    # Une facture perdue ne se refabrique pas : son numero appartient a
+    # une suite continue, et un trou dans cette suite ne se repare pas.
+    "factures.json",
+    "promos.json",
+    "abonnements.json",
     # Les demandes sur mesure et d'assistance : ce que le client a demande,
     # et le prix qu'on lui a propose.
     "devis.json",
@@ -5418,6 +5428,10 @@ RATE_LIMITS = [
     # tranche de dix minutes suffisent a quelqu'un qui hesite, pas a
     # quelqu'un qui voudrait en fabriquer par milliers.
     ("/api/boutique/commande", (6, 600)),
+    # Essayer un code promo ne coute rien au serveur, mais les essayer
+    # tous a la suite, si : vingt tentatives par tranche de dix minutes.
+    ("/api/boutique/promo", (20, 600)),
+    ("/api/boutique/abonnement", (5, 600)),
     # Le lien d'un devis s'ouvre et se paie : large, mais borne — payer
     # ouvre une session chez Stripe.
     ("/api/boutique/devis/", (20, 600)),
@@ -9192,6 +9206,8 @@ def commande_ecrire(fiche):
 async def api_boutique_offres(request):
     """Le catalogue, et si la caisse est ouverte. Aucune donnee nominative."""
     return api_json({"ok": True, "articles": bq.catalogue_public(),
+                     "options": bq.options_publiques(),
+                     "abonnement": bq.abonnement_public(),
                      "checkout_available": bool(STRIPE_SECRET_KEY)}, request=request)
 
 
@@ -9263,14 +9279,21 @@ async def api_boutique_commande(request):
     commande, erreur = bq.valider_commande(payload, contact=bq.contact_depuis_identite(identite))
     if erreur:
         raise web.HTTPBadRequest(text=erreur)
-    article = bq.ARTICLES[commande["article"]]
+    # Le code promo est verifie ICI, avant d'ouvrir la caisse : un code
+    # expire ou epuise ne doit jamais produire une session Stripe moins
+    # chere. Il n'est consomme qu'au paiement.
+    promo = None
+    if commande.get("code_promo"):
+        promo, raison = promo_lisible(commande["code_promo"])
+        if promo is None:
+            raise web.HTTPBadRequest(text=raison)
     numero = bq.nouveau_numero(set(commandes_tout()))
-    fiche = bq.nouvelle_commande(numero, commande, now().isoformat())
-    corps = await ouvrir_paiement(numero, commande, article["libelle"], article["prix"])
+    fiche = bq.nouvelle_commande(numero, commande, now().isoformat(), promo)
+    corps = await ouvrir_paiement(numero, commande, fiche["libelle"], fiche["montant"])
     fiche["session"] = str(corps.get("id") or "")
     commande_ecrire(fiche)
     dashboard_log("boutique_commande", None, commande["discord"],
-                  f"{numero} — {article['libelle']}")
+                  f"{numero} — {fiche['libelle']}")
     return api_json({"ok": True, "url": corps.get("url", ""), "numero": numero},
                     request=request)
 
@@ -9315,6 +9338,14 @@ async def boutique_paiement_recu(session_stripe):
         {"date": fiche["payee_le"], "statut": "payee", "par": "Stripe"}]
     commande_ecrire(fiche)
 
+    # Un code promo se consomme au paiement, jamais au clic : un panier
+    # abandonne ne doit pas user une utilisation que quelqu'un d'autre
+    # aurait pu avoir.
+    if fiche.get("promo"):
+        promo = promos_tout().get(fiche["promo"])
+        if promo:
+            promo_ecrire(bq.consommer_promo(promo))
+
     # Un devis paye est un devis termine : il devient cette commande.
     if fiche.get("devis"):
         devis = devis_tout().get(fiche["devis"])
@@ -9326,6 +9357,7 @@ async def boutique_paiement_recu(session_stripe):
     print(f"boutique: {numero} payee ({fiche.get('libelle')}, "
           f"{bq.formater_prix(fiche['montant'])})")
     await annoncer_commande(fiche)
+    await envoyer_la_facture(fiche)
     return fiche
 
 
@@ -10077,6 +10109,272 @@ async def rappels_boutique_loop():
         await asyncio.sleep(900)
 
 
+# ── La facture : un document, un numero, une suite sans trou ──────────
+
+def reponse_fichier_pdf(paire, request):
+    """Un PDF deja fabrique, servi tel quel. Sans lui, une page blanche."""
+    if not paire:
+        raise web.HTTPConflict(text="Le PDF n'a pas pu etre fabrique.")
+    nom, octets = paire
+    reponse = web.Response(body=octets, content_type="application/pdf",
+                           headers={"Content-Disposition": f'inline; filename="{nom}"',
+                                    "Cache-Control": "no-store"})
+    return apply_cors(reponse, request)
+
+
+def factures_tout():
+    return _collection(F_FACTURES)
+
+
+def facture_ecrire(fiche):
+    donnees = dict(factures_tout())
+    donnees[fiche["commande"]] = fiche
+    jsave(F_FACTURES, donnees)
+    return fiche
+
+
+def facture_de_commande(fiche):
+    """
+    La facture d'une commande payee, creee au besoin.
+
+    Elle n'est calculee qu'une fois : rappeler la meme commande rend le
+    meme numero, parce qu'une facture qui changerait de numero ne prouve
+    plus rien.
+    """
+    facture, erreur = bq.facture_de(fiche, factures_tout(), now())
+    if erreur:
+        return None, erreur
+    if facture.get("commande") not in factures_tout():
+        facture_ecrire(facture)
+        print(f"boutique: facture {facture['numero']} pour {facture['commande']}")
+    return facture, None
+
+
+def pdf_de_facture(facture):
+    """(nom, octets), ou None si le PDF n'a pas pu etre fabrique."""
+    try:
+        return (dp.nom_fichier_facture(facture),
+                dp.facture_pdf(facture, identite=bq.identite_vendeur(),
+                               tva=bq.VENDEUR["tva"], logo=logo_devis(), maintenant=now()))
+    except Exception as erreur:
+        print(f"boutique: facture {facture.get('numero')} sans PDF : {erreur}")
+        return None
+
+
+async def envoyer_la_facture(fiche):
+    """Joint la facture au client, en prive. Une commande payee, un document."""
+    facture, erreur = facture_de_commande(fiche)
+    if erreur:
+        return
+    titre, texte = bq.message_facture(facture)
+    await ecrire_au_client(fiche, titre, texte, 0x5865F2, fichier=pdf_de_facture(facture))
+
+
+async def api_admin_boutique_facture_pdf(request):
+    await api_identity(request, admin_required=True)
+    numero = str(request.match_info.get("numero") or "")
+    fiche = commandes_tout().get(numero)
+    if not fiche:
+        raise web.HTTPNotFound(text="Commande inconnue.")
+    facture, erreur = facture_de_commande(fiche)
+    if erreur:
+        raise web.HTTPConflict(text=erreur)
+    return reponse_fichier_pdf(pdf_de_facture(facture), request)
+
+
+# ── Les codes promo : une vraie remise, un vrai compteur ──────────────
+
+def promos_tout():
+    return _collection(F_PROMOS)
+
+
+def promo_ecrire(fiche):
+    donnees = dict(promos_tout())
+    donnees[fiche["code"]] = fiche
+    jsave(F_PROMOS, donnees)
+    return fiche
+
+
+def promo_lisible(code):
+    """Le code promo utilisable maintenant, ou (None, raison)."""
+    propre = bq.nettoyer_code(code)
+    if not propre:
+        return None, "Ce code n'existe pas ou n'est plus valable."
+    promo = promos_tout().get(propre)
+    utilisable, raison = bq.promo_utilisable(promo, now())
+    return (promo, "") if utilisable else (None, raison)
+
+
+async def api_boutique_promo(request):
+    """
+    Le prix d'un article une fois le code applique.
+
+    On ne rend jamais la fiche du code : ni sa limite, ni son compteur. Le
+    navigateur n'a besoin que du nouveau prix — et c'est de toute facon le
+    bot qui le recalcule au moment de payer.
+    """
+    payload = await request.json() if request.can_read_body else {}
+    payload = payload if isinstance(payload, dict) else {}
+    article = bq.ARTICLES.get(str(payload.get("article") or ""))
+    if not article:
+        raise web.HTTPBadRequest(text="Cet article n'existe pas dans la boutique.")
+    promo, raison = promo_lisible(payload.get("code"))
+    if promo is None:
+        raise web.HTTPNotFound(text=raison)
+    options = bq.lire_options(payload.get("options"))
+    brut = article["prix"] + bq.prix_options(options)
+    return api_json({"ok": True, **bq.promo_public(promo, brut), "avant": brut},
+                    request=request)
+
+
+def promo_pour_admin(promo):
+    restant = int(promo.get("limite") or 0) - int(promo.get("utilisations") or 0)
+    return {**promo, "restant": max(restant, 0) if promo.get("limite") else None,
+            "utilisable": bq.promo_utilisable(promo, now())[0]}
+
+
+async def api_admin_boutique_promos(request):
+    """Liste les codes (GET) ou en cree un (POST)."""
+    identity = await api_identity(request, admin_required=True)
+    if request.method == "GET":
+        return api_json({"ok": True, "promos": [
+            promo_pour_admin(p) for p in sorted(
+                promos_tout().values(), key=lambda p: str(p.get("creee_le") or ""),
+                reverse=True)]}, request=request)
+    payload = await _corps(request)
+    promo, erreur = bq.valider_promo(payload, now())
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    if promo["code"] in promos_tout():
+        raise web.HTTPConflict(text="Ce code existe déjà.")
+    promo["par"] = _auteur(identity)
+    promo_ecrire(promo)
+    dashboard_log("boutique_promo", None, identity.get("username"),
+                  f"{promo['code']} — {promo['remise']} %")
+    return api_json({"ok": True, "promo": promo_pour_admin(promo)}, request=request)
+
+
+async def api_admin_boutique_promo_retirer(request):
+    """Un code retire ne sert plus, mais son compteur reste lisible."""
+    await api_identity(request, admin_required=True)
+    code = bq.nettoyer_code(request.match_info.get("code"))
+    promo = promos_tout().get(code)
+    if not promo:
+        raise web.HTTPNotFound(text="Code inconnu.")
+    promo_ecrire({**promo, "actif": False})
+    return api_json({"ok": True}, request=request)
+
+
+# ── L'abonnement maintenance : le seul revenu qui revient tout seul ───
+
+def abonnements_tout():
+    return _collection(F_ABONNEMENTS)
+
+
+def abonnement_ecrire(fiche):
+    donnees = dict(abonnements_tout())
+    donnees[fiche["discord_id"]] = fiche
+    jsave(F_ABONNEMENTS, donnees)
+    return fiche
+
+
+def abonnement_par_stripe(identifiant):
+    """La fiche d'abonnement que Stripe designe, ou None."""
+    if not identifiant:
+        return None
+    for fiche in abonnements_tout().values():
+        if isinstance(fiche, dict) and fiche.get("abonnement") == identifiant:
+            return fiche
+    return None
+
+
+async def api_boutique_abonnement(request):
+    """
+    Ouvre la page de paiement de l'abonnement maintenance.
+
+    Il faut etre connecte avec Discord : un abonnement qui revient chaque
+    mois doit savoir a qui ecrire, et un pseudo tape a la main ne suffit
+    pas pour ca.
+    """
+    identite = await api_identity(request)
+    contact = bq.contact_depuis_identite(identite)
+    if contact is None:
+        raise web.HTTPUnauthorized(text="Connecte-toi avec Discord d'abord.")
+    deja = abonnements_tout().get(contact["valeur"])
+    if deja and bq.abonnement_actif(deja, now()) and not deja.get("resilie"):
+        raise web.HTTPConflict(text="Ton abonnement maintenance est déjà actif.")
+
+    site = site_racine()
+    offre = bq.ABONNEMENT
+    donnees = {
+        "mode": "subscription",
+        "line_items[0][quantity]": "1",
+        "line_items[0][price_data][currency]": bq.DEVISE,
+        "line_items[0][price_data][unit_amount]": str(offre["prix"]),
+        "line_items[0][price_data][recurring][interval]": "month",
+        "line_items[0][price_data][product_data][name]": offre["libelle"],
+        "line_items[0][price_data][product_data][description]": offre["detail"],
+        "success_url": f"{site}/boutique.html?abonnement=reussi",
+        "cancel_url": f"{site}/boutique.html?abonnement=annule",
+        "client_reference_id": contact["valeur"],
+        "metadata[type]": "boutique_abonnement",
+        "metadata[discord]": contact["valeur"],
+        "subscription_data[metadata][type]": "boutique_abonnement",
+        "subscription_data[metadata][discord]": contact["valeur"],
+    }
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        corps = await stripe_appel(session, "POST", "/checkout/sessions", donnees)
+    fiche = bq.nouvel_abonnement(contact["valeur"], contact, now().isoformat(),
+                                 str(corps.get("id") or ""))
+    abonnement_ecrire(fiche)
+    return api_json({"ok": True, "url": corps.get("url", "")}, request=request)
+
+
+async def boutique_abonnement_paye(session_stripe):
+    """Stripe confirme le premier prelevement : l'abonnement demarre."""
+    meta = session_stripe.get("metadata") or {}
+    uid = str(meta.get("discord") or "")
+    if not uid.isdigit():
+        return None
+    fiche = abonnements_tout().get(uid) or bq.nouvel_abonnement(
+        uid, {"type": "id", "valeur": uid}, now().isoformat())
+    fiche.update(statut="actif", resilie=False,
+                 abonnement=str(session_stripe.get("subscription") or ""),
+                 client=str(session_stripe.get("customer") or ""),
+                 depuis=fiche.get("depuis") or now().isoformat(),
+                 jusqu_au=(now() + timedelta(days=31)).isoformat())
+    abonnement_ecrire(fiche)
+    titre, texte = bq.message_abonnement(fiche, True)
+    await ecrire_au_client(fiche, titre, texte, 0x43B581)
+    await alerter_equipe("Un abonnement maintenance de plus",
+                         f"<@{uid}> vient de souscrire la maintenance "
+                         f"({bq.formater_prix(bq.ABONNEMENT['prix'])} par mois).",
+                         0x43B581)
+    return fiche
+
+
+async def boutique_abonnement_change(objet, evenement):
+    """Renouvellement, resiliation : la fiche suit ce que Stripe raconte."""
+    identifiant = str(objet.get("subscription") or objet.get("id") or "")
+    fiche = abonnement_par_stripe(identifiant)
+    if fiche is None:
+        return None
+    if evenement == "invoice.paid":
+        fiche.update(statut="actif", jusqu_au=(now() + timedelta(days=31)).isoformat())
+        abonnement_ecrire(fiche)
+        return fiche
+    # Resilie : la periode payee reste servie jusqu'a son terme.
+    fiche.update(statut="resilie", resilie=True)
+    abonnement_ecrire(fiche)
+    titre, texte = bq.message_abonnement(fiche, False)
+    await ecrire_au_client(fiche, titre, texte, 0x747F8D)
+    await alerter_equipe("Un abonnement maintenance arrêté",
+                         f"<@{fiche.get('discord_id')}> ne sera plus prélevé. "
+                         "Le mois déjà payé reste servi.", 0xFAA61A)
+    return fiche
+
+
 # ── Les boutons et fenetres du salon des paiements ─────────────────────
 
 def valeurs_fenetre(donnees):
@@ -10277,6 +10575,19 @@ async def api_stripe_webhook(request):
                     "réessayer plusieurs fois. Si cette alerte revient, il faut "
                     "traiter la commande à la main.")
                 raise
+        return api_json({"ok": True, "received": type_evenement})
+
+    # L'abonnement maintenance se reconnait a sa metadonnee — ou, quand
+    # Stripe ne la repete pas (les factures de renouvellement), a
+    # l'abonnement qu'on a deja enregistre.
+    reference = str(objet.get("subscription") or objet.get("id") or "")
+    if (meta.get("type") == "boutique_abonnement"
+            or (type_evenement in ("invoice.paid", "customer.subscription.deleted")
+                and abonnement_par_stripe(reference))):
+        if type_evenement == "checkout.session.completed":
+            await boutique_abonnement_paye(objet)
+        elif type_evenement in ("invoice.paid", "customer.subscription.deleted"):
+            await boutique_abonnement_change(objet, type_evenement)
         return api_json({"ok": True, "received": type_evenement})
 
     if type_evenement == "checkout.session.completed" and uid:
@@ -11424,6 +11735,8 @@ async def start_dashboard_api():
     # La boutique : catalogue et commande publics — le client n'a pas besoin
     # de compte ModBot — et paiement confirme par le meme webhook Stripe.
     app.router.add_get("/api/boutique/offres", api_boutique_offres)
+    app.router.add_post("/api/boutique/promo", api_boutique_promo)
+    app.router.add_post("/api/boutique/abonnement", api_boutique_abonnement)
     app.router.add_post("/api/boutique/commande", api_boutique_commande)
     app.router.add_post("/api/boutique/devis", api_boutique_devis)
     app.router.add_get("/api/boutique/devis/{devis_id}", api_boutique_devis_lire)
@@ -11432,6 +11745,10 @@ async def start_dashboard_api():
     app.router.add_get("/api/admin/boutique/devis/{devis_id}/pdf", api_admin_boutique_devis_pdf)
     app.router.add_post("/api/boutique/sav", api_boutique_sav)
     app.router.add_get("/api/admin/boutique", api_admin_boutique)
+    app.router.add_get("/api/admin/boutique/promos", api_admin_boutique_promos)
+    app.router.add_post("/api/admin/boutique/promos", api_admin_boutique_promos)
+    app.router.add_post("/api/admin/boutique/promos/{code}/retirer", api_admin_boutique_promo_retirer)
+    app.router.add_get("/api/admin/boutique/commandes/{numero}/facture", api_admin_boutique_facture_pdf)
     app.router.add_get("/api/admin/boutique/version", api_admin_boutique_version)
     app.router.add_post("/api/admin/boutique/commandes/{numero}/statut", api_admin_boutique_statut)
     app.router.add_post("/api/admin/boutique/devis/{devis_id}/prix", api_admin_boutique_devis_prix)

@@ -40,6 +40,9 @@ licences.json
 commandes.json
 devis.json
 sav.json
+factures.json
+promos.json
+abonnements.json
 
 # Le pouls du bot, purement local
 battement.json

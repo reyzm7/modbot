@@ -1337,6 +1337,227 @@ async def scenario_rappels():
 asyncio.run(scenario_rappels())
 
 
+
+# ══════════════════════════════════════════════════════════════════════
+print("\n--- La facture, les options, les codes promo, l'abonnement ---")
+
+INSTANT = datetime(2026, 9, 12, 14, 30, tzinfo=timezone.utc)
+
+# ── Le vendeur, sans rien inventer ─────────────────────────────────────
+
+identite = bq.identite_vendeur()
+verifier("l'identite du vendeur ne porte aucune ligne vide",
+         all(str(ligne).strip() for ligne in identite), str(identite))
+verifier("le SIRET n'apparait que s'il existe",
+         ("SIRET" in " ".join(identite)) == bool(bq.VENDEUR.get("siret")),
+         str(identite))
+verifier("la mention de franchise de TVA est celle du code des impots",
+         "293 B" in bq.VENDEUR["tva"])
+
+# ── La facture : une suite continue, un numero qui ne bouge plus ───────
+
+verifier("un numero de facture se lit et se dicte",
+         bq.numero_facture(2026, 7) == "F-2026-0007", bq.numero_facture(2026, 7))
+verifier("la premiere facture de l'annee porte le rang 1",
+         bq.rang_suivant({}, 2026) == 1)
+deja = {"A": {"annee": 2026, "rang": 1}, "B": {"annee": 2026, "rang": 5},
+        "C": {"annee": 2025, "rang": 40}, "D": "cassee"}
+verifier("le compteur repart du plus grand rang, jamais du nombre de factures",
+         bq.rang_suivant(deja, 2026) == 6, str(bq.rang_suivant(deja, 2026)))
+verifier("chaque annee a sa propre suite", bq.rang_suivant(deja, 2027) == 1)
+
+impayee = {"numero": "CMD-260912-ZZZZ", "statut": "en_attente", "montant": 4900}
+verifier("une commande impayee n'a pas de facture",
+         bq.facture_de(impayee, {}, INSTANT)[0] is None)
+
+payee = {"numero": "CMD-260912-ABCD", "statut": "payee", "libelle": "Bot Avancé",
+         "montant": 4900, "moyen": "carte", "discord": "client",
+         "discord_nom": "Client", "discord_id": "111111111111111111",
+         "email": "client@example.com", "payee_le": INSTANT.isoformat()}
+facture, erreur = bq.facture_de(payee, {}, INSTANT)
+verifier("une commande payee donne une facture numerotee",
+         erreur is None and facture["numero"] == "F-2026-0001", str(erreur))
+verifier("la facture porte le montant, le client et la commande",
+         (facture["montant"], facture["client"], facture["commande"])
+         == (4900, "Client", "CMD-260912-ABCD"))
+verifier("la facture dit par quel moyen la commande a ete payee",
+         facture["moyen"] == bq.LIBELLES_MOYENS["carte"], facture["moyen"])
+memoire = {facture["commande"]: facture}
+rappel, _ = bq.facture_de(payee, memoire, INSTANT + timedelta(days=400))
+verifier("rappeler la meme commande rend la meme facture, au meme numero",
+         rappel["numero"] == facture["numero"])
+suivante, _ = bq.facture_de({**payee, "numero": "CMD-260912-EFGH"}, memoire, INSTANT)
+verifier("la facture suivante prend le rang suivant",
+         suivante["numero"] == "F-2026-0002", suivante["numero"])
+verifier("le nom du fichier porte le numero de la facture",
+         bq.nom_facture(facture) == "facture-F-2026-0001.pdf")
+verifier("le message qui accompagne la facture cite son numero",
+         "F-2026-0001" in bq.message_facture(facture)[1])
+
+# ── Les options payantes ───────────────────────────────────────────────
+
+verifier("les options inconnues et les doublons sont ecartes",
+         bq.lire_options(["express", "chocolat", "express", "hebergement"])
+         == ["express", "hebergement"], str(bq.lire_options(["express", "chocolat"])))
+verifier("une liste illisible ne donne aucune option",
+         bq.lire_options("express") == [] and bq.lire_options(None) == [])
+verifier("le prix des options est celui du catalogue",
+         bq.prix_options(["express", "hebergement"])
+         == bq.OPTIONS["express"]["prix"] + bq.OPTIONS["hebergement"]["prix"])
+verifier("une option inconnue ne coute rien", bq.prix_options(["chocolat"]) == 0)
+verifier("les options se lisent en clair",
+         bq.libelle_options(["express"]) == bq.OPTIONS["express"]["libelle"])
+verifier("le catalogue public des options porte un prix lisible",
+         all(o["prix_label"] and o["detail"] for o in bq.options_publiques()))
+
+commande_options = {"article": "bot_avance", "moyen": "carte", "projet": "",
+                    "options": ["express", "hebergement"], "code_promo": "",
+                    "discord": "client", "discord_type": "pseudo",
+                    "discord_nom": "", "discord_id": ""}
+avec = bq.nouvelle_commande("CMD-260912-OPTS", commande_options, INSTANT.isoformat())
+verifier("les options s'ajoutent au prix de l'article",
+         avec["montant"] == bq.ARTICLES["bot_avance"]["prix"]
+         + bq.prix_options(["express", "hebergement"]), str(avec["montant"]))
+verifier("le libelle de la commande dit ce qui a ete ajoute",
+         bq.OPTIONS["express"]["libelle"] in avec["libelle"], avec["libelle"])
+verifier("le montant avant remise est garde",
+         avec["montant_brut"] == avec["montant"])
+
+# ── Les codes promo ────────────────────────────────────────────────────
+
+verifier("un code se nettoie sans se deformer",
+         bq.nettoyer_code(" -bienvenue10 ") == "BIENVENUE10",
+         bq.nettoyer_code(" -bienvenue10 "))
+verifier("un code trop court ou vide est refuse",
+         bq.nettoyer_code("ab") == "" and bq.nettoyer_code("") == "")
+for mauvais, raison in (({"code": "OK"}, "trop court"),
+                        ({"code": "NOEL", "remise": 0}, "remise nulle"),
+                        ({"code": "NOEL", "remise": 90}, "remise trop forte"),
+                        ({"code": "NOEL", "remise": "beaucoup"}, "remise illisible"),
+                        ({"code": "NOEL", "remise": 10, "limite": 99999}, "limite absurde"),
+                        ({"code": "NOEL", "remise": 10, "jours": 4000}, "duree absurde")):
+    verifier(f"un code refuse : {raison}", bq.valider_promo(mauvais, INSTANT)[0] is None)
+
+promo, erreur = bq.valider_promo(
+    {"code": "noel-2026", "remise": 20, "limite": 3, "jours": 30}, INSTANT)
+verifier("un code valide est cree, a zero utilisation",
+         erreur is None and promo["code"] == "NOEL-2026" and promo["utilisations"] == 0,
+         str(erreur))
+verifier("un code sans duree n'expire pas",
+         bq.valider_promo({"code": "TOUJOURS", "remise": 5}, INSTANT)[0]["fin"] == "")
+verifier("un code neuf est utilisable", bq.promo_utilisable(promo, INSTANT)[0])
+verifier("un code expire ne l'est plus",
+         not bq.promo_utilisable(promo, INSTANT + timedelta(days=31))[0])
+verifier("un code retire ne l'est plus",
+         not bq.promo_utilisable({**promo, "actif": False}, INSTANT)[0])
+verifier("un code epuise ne l'est plus",
+         not bq.promo_utilisable({**promo, "utilisations": 3}, INSTANT)[0])
+verifier("un code sans limite ne s'epuise pas",
+         bq.promo_utilisable({**promo, "limite": 0, "utilisations": 9000}, INSTANT)[0])
+verifier("un code inexistant ne passe pas", not bq.promo_utilisable(None, INSTANT)[0])
+
+verifier("la remise s'applique au centime",
+         bq.remise_promo(promo, 4900) == 3920, str(bq.remise_promo(promo, 4900)))
+verifier("une remise ne descend jamais sous le minimum de Stripe",
+         bq.remise_promo({"remise": 80}, 100) == bq.PRIX_MIN)
+verifier("une utilisation de plus se compte",
+         bq.consommer_promo(promo)["utilisations"] == 1)
+public = bq.promo_public(promo, 4900)
+verifier("ce que le site voit d'un code : la remise et le prix, rien d'autre",
+         set(public) == {"code", "remise", "montant", "montant_label"}
+         and public["montant"] == 3920, str(sorted(public)))
+
+commande_promo = {**commande_options, "options": [], "code_promo": "NOEL-2026"}
+remisee = bq.nouvelle_commande("CMD-260912-PROM", commande_promo, INSTANT.isoformat(), promo)
+verifier("un code promo fait vraiment baisser le montant",
+         remisee["montant"] == bq.remise_promo(promo, bq.ARTICLES["bot_avance"]["prix"])
+         and remisee["montant"] < remisee["montant_brut"], str(remisee["montant"]))
+verifier("la commande garde le code utilise", remisee["promo"] == "NOEL-2026")
+
+meta = bq.metadonnees_stripe("CMD-260912-OPTS", commande_options)
+verifier("les options et le code voyagent avec le paiement",
+         meta.get("options") == "express,hebergement", str(meta.get("options")))
+refaite = bq.commande_depuis_stripe("CMD-260912-OPTS", meta, INSTANT.isoformat())
+verifier("une commande reconstituee depuis Stripe garde ses options",
+         refaite["options"] == ["express", "hebergement"], str(refaite["options"]))
+
+# ── L'abonnement maintenance ───────────────────────────────────────────
+
+offre = bq.abonnement_public()
+verifier("l'abonnement est annonce a son vrai prix",
+         offre["prix"] == bq.ABONNEMENT["prix"] and offre["prix_label"]
+         == bq.formater_prix(bq.ABONNEMENT["prix"]), offre["prix_label"])
+verifier("l'abonnement annonce ce qu'il comprend", len(offre["avantages"]) >= 3)
+neuf = bq.nouvel_abonnement("111111111111111111", {"type": "id", "valeur": "111111111111111111"},
+                            INSTANT.isoformat())
+verifier("un abonnement commence non paye", neuf["statut"] == "en_attente")
+verifier("un abonnement non paye n'est pas actif", not bq.abonnement_actif(neuf, INSTANT))
+actif = {**neuf, "statut": "actif", "jusqu_au": (INSTANT + timedelta(days=31)).isoformat()}
+verifier("un abonnement paye est actif", bq.abonnement_actif(actif, INSTANT))
+resilie = {**actif, "statut": "resilie", "resilie": True}
+verifier("un abonnement resilie reste servi jusqu'au terme paye",
+         bq.abonnement_actif(resilie, INSTANT + timedelta(days=10)))
+verifier("passe le terme, il ne l'est plus",
+         not bq.abonnement_actif(resilie, INSTANT + timedelta(days=40)))
+verifier("l'arret est annonce sans reproche, avec la date",
+         "terme" in bq.message_abonnement(resilie, False)[1])
+
+# ── La facture en PDF ──────────────────────────────────────────────────
+
+pdf_facture = dp.facture_pdf(facture, identite=bq.identite_vendeur(),
+                             tva=bq.VENDEUR["tva"], logo=FAUX_JPEG, maintenant=INSTANT)
+lue = lire_pdf(pdf_facture)
+verifier("la facture est un PDF bien forme (en-tete, table des positions, pied)",
+         lue["entete"] and lue["fin"] and lue["table"])
+verifier("elle porte son numero, le total et le mot FACTURE",
+         b"F-2026-0001" in lue["texte"] and b"Total TTC" in lue["texte"]
+         and b"FACTURE" in lue["texte"])
+verifier("elle porte l'identite du vendeur",
+         bq.VENDEUR["nom"].encode() in lue["texte"])
+verifier("elle porte la mention de TVA obligatoire", b"293 B" in lue["texte"])
+verifier("elle porte le numero de la commande et le moyen de paiement",
+         b"CMD-260912-ABCD" in lue["texte"] and b"Carte bancaire" in lue["texte"])
+verifier("le logo est integre a la facture",
+         b"/DCTDecode" in pdf_facture and b"/Width 3 /Height 2" in pdf_facture)
+sans = dp.facture_pdf(facture, identite=bq.identite_vendeur(), tva=bq.VENDEUR["tva"])
+verifier("sans logo, la facture reste un PDF complet",
+         lire_pdf(sans)["table"] and b"/DCTDecode" not in sans)
+enorme = dp.facture_pdf(
+    {**facture, "client": "Client 😀 " * 40,
+     "lignes": [{"libelle": "x" * 400, "montant": 100}] * 20},
+    identite=bq.identite_vendeur() + ["ligne " + "y" * 200] * 10, tva=bq.VENDEUR["tva"])
+verifier("une facture aux textes demesures ne casse pas le PDF",
+         lire_pdf(enorme)["table"] and lire_pdf(enorme)["fin"])
+verifier("le devis reste un PDF bien forme apres le partage du code",
+         lire_pdf(dp.devis_pdf(propose, lien=lien_test, categorie="1 · Bot Discord",
+                               prix_label="19 €"))["table"])
+
+# ── Cote bot : les routes, les sauvegardes, les cadences ───────────────
+
+source_b = open("bot.py", encoding="utf-8").read()
+for route in ('add_post("/api/boutique/promo", api_boutique_promo)',
+              'add_post("/api/boutique/abonnement", api_boutique_abonnement)',
+              'add_get("/api/admin/boutique/promos", api_admin_boutique_promos)',
+              'add_post("/api/admin/boutique/promos", api_admin_boutique_promos)',
+              'add_post("/api/admin/boutique/promos/{code}/retirer", api_admin_boutique_promo_retirer)',
+              'add_get("/api/admin/boutique/commandes/{numero}/facture", api_admin_boutique_facture_pdf)'):
+    verifier(f"route branchee : {route.split(',')[0]}", route in source_b)
+verifier("les factures, les codes et les abonnements sont sauvegardes",
+         {"factures.json", "promos.json", "abonnements.json"}
+         <= set(bot_mod.FICHIERS_SAUVEGARDES))
+premier_promo = next(p for p, _ in bot_mod.RATE_LIMITS
+                     if "/api/boutique/promo".startswith(p))
+verifier("essayer un code a son propre quota", premier_promo == "/api/boutique/promo")
+verifier("le webhook reconnait l'abonnement de la boutique",
+         'meta.get("type") == "boutique_abonnement"' in source_b
+         and "boutique_abonnement_paye(objet)" in source_b)
+verifier("la facture part au client des que la commande est payee",
+         "await envoyer_la_facture(fiche)" in source_b)
+verifier("un code promo n'est consomme qu'au paiement",
+         "promo_ecrire(bq.consommer_promo(promo))" in
+         source_b.split("async def boutique_paiement_recu")[1][:3000])
+
+
 echecs = [r for r in resultats if not r[1]]
 print(f"\n{len(resultats) - len(echecs)}/{len(resultats)} verifications reussies")
 sys.exit(1 if echecs else 0)
