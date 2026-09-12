@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **12 septembre 2026** (voir §71 pour le dernier lot livré).
+> Dernière mise à jour : **12 septembre 2026** (voir §72 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -5298,3 +5298,79 @@ main dans les quatre langues), `test_bout_en_bout` 45/45,
 `test_licences` 90/90, `test_premium` 58/58. Site : `test_selecteurs`
 105/105, `test_i18n`, `test_derives`, `test_declarations`,
 `test_bienvenue` 24/24.
+
+## 72. Livré le 12 septembre 2026 — la vie du serveur
+
+Demande : « tout le 4 » — salons vocaux temporaires, niveaux et classement
+XP, suggestions avec votes, anniversaires, rappels, starboard, captcha
+moderne (#14), alerte d'attaque en MP (#15), `/massdm` par rôle (#16).
+
+**Quatre étaient déjà là** : les salons vocaux temporaires (`vocal_cfg`),
+le captcha moderne (panneau, réponse éphémère, `captcha_pending.json`),
+l'alerte d'attaque en MP (`VueAlerteAttaque`,
+`administrateurs_du_serveur`) et `/massdm` avec paramètre `role`. Les
+cinq autres sont livrées ici.
+
+### Un module de plus : `communaute.py`
+
+Comme `boutique.py`, il ne connaît ni discord.py ni aiohttp : il décide —
+combien d'expérience, quel niveau, quand rappeler, quel message mérite le
+mur, qui a déjà voté — et se vérifie donc entièrement sans réseau.
+`test_communaute.py` : 57 vérifications.
+
+### Les niveaux
+
+Courbe de référence : `5/6 · n · (2n² + 27n + 91)`. Niveau 1 à 100 points,
+niveau 10 à 4 675. **Un niveau se déduit de l'expérience, il ne se stocke
+pas** : deux vérités sur le même chiffre finissent toujours par diverger.
+Un message vaut 15 à 25 points, une fois par minute au plus — écrire dix
+fois d'affilée ne vaut pas dix fois plus. `/niveau` et `/classement`
+répondent en privé.
+
+### Les anniversaires
+
+`/anniversaire 14/03`. **L'année n'est jamais demandée** : on souhaite un
+anniversaire, on ne tient pas un fichier d'âges. Le 29 février est souhaité
+le 28 les années ordinaires — personne n'attend quatre ans. Un seul message
+par serveur et par jour, pour tout le monde à la fois.
+
+### Les rappels
+
+`/rappel 1h30 sortir le chien`. Les durées s'additionnent (`1h 30min`),
+entre 30 secondes et un an, vingt en attente par personne au plus. Le
+rappel part dans le salon où il a été demandé, ou en privé si ce salon
+n'existe plus.
+
+### Le mur des meilleurs messages
+
+La réaction ⭐ décide, pas l'équipe. Au seuil (réglable de 2 à 50), le
+message est recopié dans le salon du mur avec un lien vers l'original ;
+ensuite, seul le compte d'étoiles change. Un message de bot n'y va jamais.
+
+### Les votes des suggestions
+
+Deux boutons sous chaque suggestion, **une voix par personne**. Recliquer
+sur le même bouton retire la voix. Trancher la suggestion retire tous les
+boutons, votes compris : une suggestion décidée ne se vote plus.
+
+### Réglages
+
+Une rubrique « Vie du serveur » dans le tableau de bord : activer les
+niveaux, le salon des passages de niveau, le salon des anniversaires, le
+salon du mur et son seuil. Comme partout, un salon d'un **autre** serveur
+est refusé.
+
+`xp.json` n'est **pas** repris par la sauvegarde Discord : il grossit avec
+chaque membre de chaque serveur et l'étranglerait. C'est un volume monté
+qui le protège. Les anniversaires, les rappels, le mur et les votes, eux,
+sont sauvegardés.
+
+### Vérifications
+
+`test_communaute.py` 57/57, `test_boutique.py` 467/467, `test_cloison`
+35/35, `test_langue` 64/64 (les 52 phrases nouvelles traduites à la main
+dans les quatre langues), `test_noms`, `test_premium` 58/58,
+`test_licences` 90/90, `test_bout_en_bout` 45/45. Site : `test_i18n`,
+`test_selecteurs` 105/105, `test_derives`, `test_declarations`,
+`test_bienvenue` 24/24. Les quatre commandes nouvelles sont documentées
+dans le wiki — `test_api` croise les deux dépôts et l'exige.

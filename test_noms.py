@@ -31,7 +31,7 @@ import sys
 
 FICHIERS = ("bot.py", "reseaux_sociaux.py", "premium_core.py",
             "security_core.py", "security_score.py", "langue_bot.py", "boutique.py",
-            "dictionnaire.py", "devis_pdf.py")
+            "dictionnaire.py", "devis_pdf.py", "communaute.py")
 
 resultats = []
 

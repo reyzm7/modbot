@@ -45,5 +45,12 @@ promos.json
 abonnements.json
 avis.json
 
+# La vie du serveur
+xp.json
+anniversaires.json
+rappels.json
+mur.json
+votes.json
+
 # Le pouls du bot, purement local
 battement.json

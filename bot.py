@@ -19,6 +19,7 @@ import compteurs as cpt
 import langue_bot as lb
 import boutique as bq
 import devis_pdf as dp
+import communaute as cm
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -316,6 +317,14 @@ F_ABONNEMENTS = chemin_donnees("abonnements.json")
 # Les avis : ils viennent de clients reels, et rien ne permet de les
 # refabriquer. Les perdre, c'est perdre la seule preuve sociale honnete.
 F_AVIS = chemin_donnees("avis.json")
+# La vie du serveur. xp.json n'est PAS sauvegarde dans Discord : il grossit
+# avec chaque membre de chaque serveur, et la sauvegarde s'y etranglerait.
+# C'est un volume monte qui le protege, pas le filet de secours.
+F_XP = chemin_donnees("xp.json")
+F_ANNIVERSAIRES = chemin_donnees("anniversaires.json")
+F_RAPPELS = chemin_donnees("rappels.json")
+F_MUR = chemin_donnees("mur.json")
+F_VOTES = chemin_donnees("votes.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -436,6 +445,12 @@ FICHIERS_SAUVEGARDES = (
     "promos.json",
     "abonnements.json",
     "avis.json",
+    # Un anniversaire donne une fois ne se redemande pas, et un rappel
+    # perdu ne sonne jamais.
+    "anniversaires.json",
+    "rappels.json",
+    "mur.json",
+    "votes.json",
     # Les demandes sur mesure et d'assistance : ce que le client a demande,
     # et le prix qu'on lui a propose.
     "devis.json",
@@ -3724,6 +3739,16 @@ class VueSuggestion(discord.ui.View):
     @discord.ui.button(label="❌ Refuser", style=discord.ButtonStyle.danger, custom_id="sug_no")
     async def no(self, i, b): await self._rep(i, False)
 
+    # Les membres votent, l'equipe tranche. Une decision retire tous les
+    # boutons (`clear_items`), donc les votes aussi : une suggestion
+    # tranchee ne se vote plus.
+    @discord.ui.button(label="Pour", emoji="👍", style=discord.ButtonStyle.secondary,
+                       custom_id="sug_pour", row=1)
+    async def pour(self, i, b): await voter_suggestion(i, self, cm.POUR)
+    @discord.ui.button(label="Contre", emoji="👎", style=discord.ButtonStyle.secondary,
+                       custom_id="sug_contre", row=1)
+    async def contre(self, i, b): await voter_suggestion(i, self, cm.CONTRE)
+
 # ════════════════════════════════════════════════
 #  VIEW — REPORTS (persistante ✅)
 # ════════════════════════════════════════════════
@@ -6247,6 +6272,13 @@ def serialize_dashboard_config(guild):
         "auto_roles": autoroles_cfg(gid),
         "ai": etat_ia_dashboard(gid),
         "voice": vocal_cfg(gid),
+        "communaute": {
+            "xp": bool(cfg.get("xp_enabled")),
+            "xp_salon": str(cfg.get("xp_salon") or ""),
+            "anniv_salon": str(cfg.get("anniv_salon") or ""),
+            "mur_salon": str(cfg.get("mur_salon") or ""),
+            "mur_seuil": cm.lire_seuil(cfg.get("mur_seuil")),
+        },
         "events": evenements_cfg(gid),
         "premium": {
             **premium_etat(gid),
@@ -6356,6 +6388,22 @@ async def apply_dashboard_config(guild, payload):
                   f"{channels.get(public_key)} refuse (autre serveur)")
         elif payload.get("clear_empty_channels"):
             cfg.pop(cfg_key, None)
+
+    # La vie du serveur : trois salons et un seuil. Un salon d'un AUTRE
+    # serveur est refuse ici comme ailleurs — le navigateur garde parfois
+    # les listes du serveur precedent.
+    vie = payload.get("communaute")
+    if isinstance(vie, dict):
+        cfg["xp_enabled"] = bool(vie.get("xp"))
+        cfg["mur_seuil"] = cm.lire_seuil(vie.get("mur_seuil"))
+        for clef in ("xp_salon", "anniv_salon", "mur_salon"):
+            parsed = id_salon_du_serveur(guild, vie.get(clef))
+            if parsed:
+                cfg[clef] = parsed
+            elif not str(vie.get(clef) or "").strip():
+                cfg.pop(clef, None)
+            else:
+                print(f"config {guild.id}: salon {clef} refuse (autre serveur)")
 
     tickets = payload.get("tickets") or {}
     if tickets:
@@ -15526,10 +15574,12 @@ async def handle_dashboard_reaction_role(payload, remove=False):
 @bot.event
 async def on_raw_reaction_add(payload):
     await handle_dashboard_reaction_role(payload, remove=False)
+    await mur_reaction(payload)
 
 @bot.event
 async def on_raw_reaction_remove(payload):
     await handle_dashboard_reaction_role(payload, remove=True)
+    await mur_reaction(payload)
 
 # ════════════════════════════════════════════════
 #  VOCAUX PERSONNALISES
@@ -18971,11 +19021,374 @@ async def presence_loop():
         await asyncio.sleep(150)
 
 
+# ════════════════════════════════════════════════
+#  LA VIE DU SERVEUR
+#
+#  L'experience et les niveaux, les anniversaires, les rappels, le mur
+#  des meilleurs messages et les votes des suggestions. Le calcul vit
+#  dans communaute.py ; ici, Discord : qui ecrit, qui reagit, qui clique.
+# ════════════════════════════════════════════════
+
+_anniversaires_task = None
+_rappels_membres_task = None
+
+
+def _par_serveur(chemin, gid):
+    donnees = jload(chemin)
+    table = donnees.get(str(gid)) if isinstance(donnees, dict) else None
+    return table if isinstance(table, dict) else {}
+
+
+def _ecrire_par_serveur(chemin, gid, table):
+    donnees = jload(chemin)
+    if not isinstance(donnees, dict):
+        donnees = {}
+    donnees[str(gid)] = table
+    jsave(chemin, donnees)
+
+
+# ── L'experience ──────────────────────────────────────────────────────
+
+def xp_du_serveur(gid):
+    return _par_serveur(F_XP, gid)
+
+
+def xp_ecrire(gid, uid, fiche):
+    table = xp_du_serveur(gid)
+    table[str(uid)] = fiche
+    _ecrire_par_serveur(F_XP, gid, table)
+    return fiche
+
+
+async def gagner_experience(message):
+    """
+    Un message vaut de 15 a 25 points, une fois par minute au plus.
+
+    Rien n'est annonce si le serveur n'a pas active l'experience : un
+    membre qui n'a rien demande ne doit pas voir un niveau apparaitre.
+    """
+    gid = str(message.guild.id)
+    cfg = get_cfg(gid)
+    if not cfg.get("xp_enabled"):
+        return
+    uid = str(message.author.id)
+    table = xp_du_serveur(gid)
+    fiche, monte = cm.gagner(table.get(uid), now(), random.randint(cm.XP_MIN, cm.XP_MAX))
+    if fiche == table.get(uid):
+        return
+    xp_ecrire(gid, uid, fiche)
+    if monte is None:
+        return
+    salon = salon_du_serveur(message.guild, cfg.get("xp_salon")) or message.channel
+    try:
+        await salon.send(cm.message_niveau(message.author.mention, monte))
+    except Exception as erreur:
+        print(f"xp: annonce de niveau impossible ({gid}) : {erreur}")
+
+
+@bot.tree.command(name="niveau", description="📈 Voir son niveau, ou celui de quelqu'un")
+@app_commands.describe(membre="La personne dont tu veux voir le niveau.")
+async def cmd_niveau(i: discord.Interaction, membre: discord.Member = None):
+    cible = membre or i.user
+    gid = str(i.guild.id)
+    if not get_cfg(gid).get("xp_enabled"):
+        return await safe_ephemeral(i, embed=E(
+            "Les niveaux ne sont pas activés",
+            "Un administrateur peut les activer depuis le tableau de bord, "
+            "rubrique « Vie du serveur ».", Palette.INFO))
+    table = xp_du_serveur(gid)
+    fiche = table.get(str(cible.id)) or {}
+    niveau, dedans, besoin = cm.progression(fiche.get("xp"))
+    rang = cm.rang_de(table, cible.id)
+    embed = E(f"Niveau {niveau}", f"{cible.mention} — **{int(fiche.get('xp') or 0)}** points",
+              Palette.INFO)
+    embed.add_field(name="Progression", value=f"{dedans} / {besoin} vers le niveau {niveau + 1}",
+                    inline=True)
+    embed.add_field(name="Messages comptés", value=str(int(fiche.get("messages") or 0)),
+                    inline=True)
+    if rang:
+        embed.add_field(name="Classement", value=f"#{rang}", inline=True)
+    await safe_ephemeral(i, embed=embed)
+
+
+@bot.tree.command(name="classement", description="🏆 Le classement du serveur")
+async def cmd_classement(i: discord.Interaction):
+    gid = str(i.guild.id)
+    if not get_cfg(gid).get("xp_enabled"):
+        return await safe_ephemeral(i, embed=E(
+            "Les niveaux ne sont pas activés",
+            "Un administrateur peut les activer depuis le tableau de bord.",
+            Palette.INFO))
+    lignes = cm.classement(xp_du_serveur(gid), 10)
+    if not lignes:
+        return await safe_ephemeral(i, embed=E(
+            "Classement vide", "Personne n'a encore gagné de point ici.", Palette.INFO))
+    medailles = {1: "🥇", 2: "🥈", 3: "🥉"}
+    rangs = []
+    for ligne in lignes:
+        marque = medailles.get(ligne["rang"]) or f"`#{ligne['rang']}`"
+        rangs.append(f"{marque} <@{ligne['id']}> — niveau **{ligne['niveau']}** "
+                     f"({ligne['xp']} points)")
+    await safe_ephemeral(i, embed=E("🏆 Classement", "\n".join(rangs), Palette.INFO))
+
+
+# ── Les anniversaires ─────────────────────────────────────────────────
+
+@bot.tree.command(name="anniversaire",
+                  description="🎂 Dire quand est ton anniversaire (jour et mois)")
+@app_commands.describe(date="Jour et mois, par exemple 14/03. Laisse vide pour retirer le tien.")
+async def cmd_anniversaire(i: discord.Interaction, date: str = ""):
+    gid = str(i.guild.id)
+    table = _par_serveur(F_ANNIVERSAIRES, gid)
+    uid = str(i.user.id)
+    if not str(date or "").strip():
+        table.pop(uid, None)
+        _ecrire_par_serveur(F_ANNIVERSAIRES, gid, table)
+        return await safe_ephemeral(i, embed=E(
+            "C'est retiré", "Ton anniversaire n'est plus enregistré ici.", Palette.INFO))
+    lu = cm.lire_anniversaire(date)
+    if lu is None:
+        return await safe_ephemeral(i, embed=E(
+            "Date illisible", "Écris le jour et le mois, comme `14/03`.", Palette.WARNING))
+    table[uid] = cm.ecrire_anniversaire(*lu)
+    _ecrire_par_serveur(F_ANNIVERSAIRES, gid, table)
+    await safe_ephemeral(i, embed=E(
+        "C'est noté 🎂",
+        f"Le **{table[uid]}**. On ne garde ni l'année, ni ton âge — seulement le jour.",
+        Palette.SUCCESS))
+
+
+async def souhaiter_les_anniversaires():
+    """Un seul message par serveur et par jour, jamais dix mentions separees."""
+    aujourdhui = now().date()
+    for guild in list(bot.guilds):
+        gid = str(guild.id)
+        cfg = get_cfg(gid)
+        salon = salon_du_serveur(guild, cfg.get("anniv_salon"))
+        if salon is None:
+            continue
+        if str(cfg.get("anniv_dernier") or "") == aujourdhui.isoformat():
+            continue
+        qui = cm.anniversaires_du_jour(_par_serveur(F_ANNIVERSAIRES, gid), aujourdhui)
+        update_cfg(gid, "anniv_dernier", aujourdhui.isoformat())
+        presents = [f"<@{uid}>" for uid in qui if guild.get_member(int(uid))]
+        if not presents:
+            continue
+        try:
+            await salon.send(cm.message_anniversaire(presents))
+        except Exception as erreur:
+            print(f"anniversaires: {gid} : {erreur}")
+
+
+async def anniversaires_loop():
+    """Un tour par heure : le message part au premier tour de la journee."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await souhaiter_les_anniversaires()
+        except Exception as erreur:
+            print(f"boucle anniversaires: {erreur}")
+        await asyncio.sleep(3600)
+
+
+# ── Les rappels ───────────────────────────────────────────────────────
+
+def rappels_tout():
+    donnees = jload(F_RAPPELS)
+    return donnees if isinstance(donnees, dict) else {}
+
+
+def rappels_ecrire(table):
+    jsave(F_RAPPELS, table)
+
+
+@bot.tree.command(name="rappel", description="⏰ Se faire rappeler quelque chose")
+@app_commands.describe(quand="Dans combien de temps : 10m, 2h, 1h30, 3j.",
+                       quoi="Ce dont il faut te souvenir.")
+async def cmd_rappel(i: discord.Interaction, quand: str, quoi: str):
+    duree = cm.lire_duree(quand)
+    if duree is None:
+        return await safe_ephemeral(i, embed=E(
+            "Durée illisible",
+            "Écris par exemple `10m`, `2h`, `1h30` ou `3j` — entre 30 secondes et un an.",
+            Palette.WARNING))
+    texte = clean_short_text(quoi, "", cm.RAPPEL_TEXTE_MAX)
+    if not texte:
+        return await safe_ephemeral(i, embed=E(
+            "Rappel vide", "Dis ce dont il faut te souvenir.", Palette.WARNING))
+    table = rappels_tout()
+    if cm.combien_de_rappels(table, i.user.id) >= cm.RAPPELS_PAR_PERSONNE:
+        return await safe_ephemeral(i, embed=E(
+            "Trop de rappels en attente",
+            f"Tu en as déjà {cm.RAPPELS_PAR_PERSONNE}. Attends qu'il en passe un.",
+            Palette.WARNING))
+    ident = secrets.token_hex(6)
+    quand_precis = now() + duree
+    table[ident] = cm.nouveau_rappel(ident, i.user.id, i.channel_id, texte,
+                                     quand_precis, now().isoformat())
+    rappels_ecrire(table)
+    await safe_ephemeral(i, embed=E(
+        "C'est noté ⏰",
+        f"Je te le rappelle <t:{int(quand_precis.timestamp())}:R>, ici même.\n\n> {texte}",
+        Palette.SUCCESS))
+
+
+async def delivrer_les_rappels():
+    """
+    Ce qui est du part maintenant, et disparait de la liste, remis ou pas.
+
+    Nom distinct de `passer_les_rappels` : celui-la previent l'equipe des
+    dossiers en retard, celui-ci sonne chez les membres. Deux fonctions du
+    meme nom, et la seconde effacait la premiere en silence.
+    """
+    table = rappels_tout()
+    dus = cm.rappels_dus(table, now())
+    if not dus:
+        return
+    for rappel in dus:
+        table.pop(str(rappel.get("id")), None)
+        salon = None
+        for guild in list(bot.guilds):
+            salon = salon_du_serveur(guild, rappel.get("salon"))
+            if salon is not None:
+                break
+        try:
+            if salon is not None:
+                await salon.send(f"<@{rappel.get('qui')}> {cm.message_rappel(rappel)}")
+            else:
+                utilisateur = bot.get_user(int(rappel.get("qui")))
+                if utilisateur:
+                    await utilisateur.send(cm.message_rappel(rappel))
+        except Exception as erreur:
+            print(f"rappel {rappel.get('id')} non delivre : {erreur}")
+    rappels_ecrire(table)
+
+
+async def rappels_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await delivrer_les_rappels()
+        except Exception as erreur:
+            print(f"boucle rappels: {erreur}")
+        await asyncio.sleep(30)
+
+
+# ── Le mur des meilleurs messages ─────────────────────────────────────
+
+async def mur_reaction(payload):
+    """
+    Une etoile de plus, ou de moins, sur un message.
+
+    Le mur appartient aux membres : c'est leur reaction qui decide, pas
+    l'equipe. Un message deja au mur voit seulement son compte change.
+    """
+    if str(getattr(payload.emoji, "name", "")) != cm.ETOILE or not payload.guild_id:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+    cfg = get_cfg(str(guild.id))
+    mur = salon_du_serveur(guild, cfg.get("mur_salon"))
+    source = salon_du_serveur(guild, payload.channel_id)
+    if mur is None or source is None or mur.id == source.id:
+        return
+    try:
+        message = await source.fetch_message(payload.message_id)
+    except Exception:
+        return
+    etoiles = next((r.count for r in message.reactions
+                    if str(getattr(r.emoji, "name", r.emoji)) == cm.ETOILE), 0)
+    table = _par_serveur(F_MUR, guild.id)
+    deja = str(table.get(str(message.id)) or "")
+    seuil = cm.lire_seuil(cfg.get("mur_seuil"))
+
+    if deja.isdigit():
+        try:
+            copie = await mur.fetch_message(int(deja))
+            await copie.edit(content=cm.entete_mur(etoiles, seuil))
+        except Exception:
+            table.pop(str(message.id), None)
+            _ecrire_par_serveur(F_MUR, guild.id, table)
+        return
+
+    droit, _ = cm.merite_le_mur(etoiles, seuil, message.author.bot, bool(deja))
+    if not droit:
+        return
+    embed = E(f"Message de {message.author.display_name}",
+              (message.content or "")[:2000] or "*(sans texte)*", Palette.INFO)
+    embed.add_field(name="Aller voir", value=f"[Le message]({message.jump_url})", inline=False)
+    if message.attachments and str(message.attachments[0].content_type or "").startswith("image"):
+        embed.set_image(url=message.attachments[0].url)
+    try:
+        pose = await mur.send(content=cm.entete_mur(etoiles, seuil), embed=embed)
+    except Exception as erreur:
+        print(f"mur: {guild.id} : {erreur}")
+        return
+    table[str(message.id)] = str(pose.id)
+    _ecrire_par_serveur(F_MUR, guild.id, table)
+
+
+# ── Les votes des suggestions ─────────────────────────────────────────
+
+# Le nom du champ des votes, ecrit une seule fois : c'est a lui qu'on
+# reconnait l'ancien champ pour le remplacer au lieu de l'empiler.
+NOM_VOTES = "🗳️ Votes"
+
+
+def votes_tout():
+    donnees = jload(F_VOTES)
+    return donnees if isinstance(donnees, dict) else {}
+
+
+def votes_ecrire(message_id, fiche):
+    table = votes_tout()
+    table[str(message_id)] = fiche
+    jsave(F_VOTES, table)
+    return fiche
+
+
+async def voter_suggestion(interaction, vue, sens):
+    """
+    Une voix par personne sur une suggestion, et la barre qui suit.
+
+    Recliquer sur le meme bouton retire la voix : c'est ainsi qu'on change
+    d'avis sans chercher un bouton « annuler » qui n'existerait pas.
+    """
+    message = interaction.message
+    fiche, erreur = cm.voter(votes_tout().get(str(message.id)), interaction.user.id, sens)
+    if erreur:
+        return await safe_ephemeral(interaction, embed=E("Vote refusé", erreur, Palette.WARNING))
+    votes_ecrire(message.id, fiche)
+    pour, contre, _ = cm.score(fiche)
+    try:
+        ancien = message.embeds[0] if message.embeds else None
+        if ancien is not None:
+            neuf = discord.Embed(title=ancien.title, description=ancien.description,
+                                 color=ancien.color, timestamp=now())
+            if ancien.author:
+                neuf.set_author(name=ancien.author.name, icon_url=ancien.author.icon_url)
+            for champ in ancien.fields:
+                if champ.name != NOM_VOTES:
+                    neuf.add_field(name=champ.name, value=champ.value, inline=champ.inline)
+            neuf.add_field(name=NOM_VOTES, value=cm.barre_de_vote(fiche), inline=False)
+            if ancien.footer and ancien.footer.text:
+                neuf.set_footer(text=ancien.footer.text)
+            await message.edit(embed=neuf, view=vue)
+    except Exception as souci:
+        print(f"votes: embed non mis a jour : {souci}")
+    await safe_ephemeral(interaction, embed=E(
+        "C'est compté", f"**{pour}** pour · **{contre}** contre.\n\n"
+        "Recliquer sur le même bouton retire ta voix.", Palette.SUCCESS))
+
+
+
 @bot.event
 async def on_ready():
     global _dashboard_recurring_task, _dashboard_social_task, _compteurs_task
     global _security_task, _autobackup_task, _giveaway_task, _sauvegarde_task
     global _battement_task, _rappels_task
+    global _anniversaires_task
     global _licences_task
     global _presence_task
     global _sauvegarde_a_faire
@@ -19045,6 +19458,10 @@ async def on_ready():
         _battement_task = asyncio.create_task(battement_loop())
     if not _rappels_task or _rappels_task.done():
         _rappels_task = asyncio.create_task(rappels_boutique_loop())
+    if not _anniversaires_task or _anniversaires_task.done():
+        _anniversaires_task = asyncio.create_task(anniversaires_loop())
+    if not _rappels_membres_task or _rappels_membres_task.done():
+        _rappels_membres_task = asyncio.create_task(rappels_loop())
     try:
         # Les descriptions des commandes, dans chaque langue de Discord.
         # Discord ne connait qu'une liste de commandes pour tous les
@@ -19152,6 +19569,7 @@ async def on_message(message):
 
         # Track message stats
         track_msg(uid, gid)
+        await gagner_experience(message)
 
         # La verification captcha ne passe plus par le salon : elle se fait
         # entierement dans une reponse ephemere (VueCaptchaPanel), donc aucun
