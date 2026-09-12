@@ -1299,3 +1299,316 @@ def message_abonnement(fiche, actif=True):
         "Le mois déjà payé reste servi jusqu'à son terme"
         + (f" ({str((fiche or {}).get('jusqu_au') or '')[:10]})" if (fiche or {}).get("jusqu_au") else "")
         + ". Tu peux le reprendre quand tu veux, au même prix."))
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §9. Les chiffres de la boutique
+# ══════════════════════════════════════════════════════════════════════
+#
+# Ce qu'on ne mesure pas, on l'imagine — et on l'imagine toujours en sa
+# faveur. Tout se calcule ici, a partir des seules fiches : aucune ligne
+# n'est tenue a jour a cote, donc aucun compteur ne peut mentir.
+#
+# Rien n'est arrondi vers le haut, rien n'est « estime ». Une boutique
+# vide rend des zeros, pas des tirets encourageants.
+
+MOIS_AFFICHES = 12
+
+
+def _mois(valeur):
+    """« 2026-09 » depuis une date ISO, ou None."""
+    moment = _date(valeur)
+    return f"{moment.year:04d}-{moment.month:02d}" if moment else None
+
+
+def _mois_precedents(maintenant, combien):
+    """Les `combien` derniers mois, du plus ancien au mois courant."""
+    annee, mois = maintenant.year, maintenant.month
+    suite = []
+    for _ in range(combien):
+        suite.append(f"{annee:04d}-{mois:02d}")
+        mois -= 1
+        if mois == 0:
+            annee, mois = annee - 1, 12
+    return list(reversed(suite))
+
+
+def _encaissees(commandes):
+    """Les commandes qui ont vraiment rapporte : payees, et pas annulees."""
+    return [f for f in (commandes or {}).values()
+            if isinstance(f, dict) and f.get("statut") not in
+            (None, "", "en_attente", "annulee")]
+
+
+def statistiques(commandes=None, devis=None, sav=None, maintenant=None):
+    """
+    Les chiffres de la boutique, tels qu'ils sont.
+
+    Montants en centimes, comme partout ailleurs : la mise en forme
+    appartient a celui qui affiche.
+    """
+    maintenant = maintenant or datetime.now(timezone.utc)
+    payees = _encaissees(commandes)
+    total = sum(int(f.get("montant") or 0) for f in payees)
+
+    par_mois = {clef: {"mois": clef, "total": 0, "commandes": 0}
+                for clef in _mois_precedents(maintenant, MOIS_AFFICHES)}
+    for fiche in payees:
+        clef = _mois(fiche.get("payee_le") or fiche.get("creee_le"))
+        if clef in par_mois:
+            par_mois[clef]["total"] += int(fiche.get("montant") or 0)
+            par_mois[clef]["commandes"] += 1
+
+    articles = {}
+    for fiche in payees:
+        clef = str(fiche.get("article") or "") or "sur_mesure"
+        ligne = articles.setdefault(clef, {
+            "article": clef, "commandes": 0, "total": 0,
+            "libelle": (ARTICLES.get(clef) or {}).get("libelle")
+            or str(fiche.get("libelle") or "Création sur mesure")})
+        ligne["commandes"] += 1
+        ligne["total"] += int(fiche.get("montant") or 0)
+
+    fiches_devis = [f for f in (devis or {}).values() if isinstance(f, dict)]
+    # Un devis « chiffre » est un devis pour lequel un prix est parti : c'est
+    # lui le denominateur honnete du taux de transformation. Les demandes
+    # jamais chiffrees ne disent rien du client, seulement de nous.
+    chiffres = [f for f in fiches_devis
+                if f.get("statut") in ("propose", "payee") or int(f.get("prix") or 0)]
+    payes = [f for f in fiches_devis if f.get("statut") == "payee"]
+
+    ouverts_sav = [f for f in (sav or {}).values()
+                   if isinstance(f, dict) and f.get("statut") == "ouvert"]
+
+    return {
+        "ca_total": total,
+        "commandes_payees": len(payees),
+        "panier_moyen": total // len(payees) if payees else 0,
+        "mois": [par_mois[clef] for clef in _mois_precedents(maintenant, MOIS_AFFICHES)],
+        "articles": sorted(articles.values(),
+                           key=lambda ligne: (-ligne["total"], ligne["article"])),
+        "devis": {
+            "recus": len(fiches_devis),
+            "chiffres": len(chiffres),
+            "payes": len(payes),
+            # En pour cent, arrondi au plus proche. Sans devis chiffre, zero :
+            # un taux calcule sur rien ne veut rien dire.
+            "taux": round(100 * len(payes) / len(chiffres)) if chiffres else 0,
+        },
+        "sav_ouverts": len(ouverts_sav),
+        "en_cours": len([f for f in payees if f.get("statut") in STATUTS_EN_COURS]),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §10. Le fil de production : ou en est la commande, et la livraison
+# ══════════════════════════════════════════════════════════════════════
+#
+# « Ou ça en est ? » est la question qu'un client pose quand il ne voit
+# rien. Une liste d'etapes cochees repond avant qu'il la pose, et un fil
+# prive par commande donne un endroit ou parler qui n'est ni le salon
+# public, ni des messages prives qui se perdent.
+
+# Les memes etapes pour tout le monde, dans l'ordre. Cinq : moins ne dit
+# rien, plus ne se lit pas.
+ETAPES = (
+    ("brief", "Ton projet est précisé"),
+    ("maquette", "La maquette ou le plan est prêt"),
+    ("creation", "La création avance"),
+    ("essai", "Tu l'essaies, tu dis ce qui cloche"),
+    ("livraison", "Livré, fichiers remis"),
+)
+CLEFS_ETAPES = tuple(clef for clef, _ in ETAPES)
+LIBELLES_ETAPES = dict(ETAPES)
+LIVRAISON_MAX = 8 * 1024 * 1024      # ce que Discord accepte sans premium
+NOM_FICHIER_MAX = 120
+
+
+def etapes_neuves():
+    """Une liste d'etapes toutes a faire, telle qu'une commande commence."""
+    return [{"clef": clef, "fait": False, "le": ""} for clef in CLEFS_ETAPES]
+
+
+def etapes_de(fiche):
+    """
+    Les etapes d'une commande, completees si le catalogue en a gagne.
+
+    Une commande passee avant l'ajout d'une etape doit pouvoir l'afficher
+    sans qu'on rejoue son histoire : ce qui manque est simplement a faire.
+    """
+    connues = {str(e.get("clef")): e for e in ((fiche or {}).get("etapes") or [])
+               if isinstance(e, dict)}
+    return [{"clef": clef, "fait": bool(connues.get(clef, {}).get("fait")),
+             "le": str(connues.get(clef, {}).get("le") or "")}
+            for clef in CLEFS_ETAPES]
+
+
+def basculer_etape(fiche, clef, maintenant_iso=""):
+    """(commande mise a jour, None) ou (None, message). Coche, ou decoche."""
+    if clef not in LIBELLES_ETAPES:
+        return None, "Étape inconnue."
+    if (fiche or {}).get("statut") in (None, "", "en_attente"):
+        return None, "Cette commande n'est pas payée."
+    etapes = etapes_de(fiche)
+    for etape in etapes:
+        if etape["clef"] != clef:
+            continue
+        etape["fait"] = not etape["fait"]
+        etape["le"] = maintenant_iso if etape["fait"] else ""
+    return {**(fiche or {}), "etapes": etapes}, None
+
+
+def avancement(fiche):
+    """(faites, total) — de quoi ecrire « 3 / 5 » sans recompter ailleurs."""
+    etapes = etapes_de(fiche)
+    return sum(1 for e in etapes if e["fait"]), len(etapes)
+
+
+def texte_checklist(fiche):
+    """La liste, telle qu'elle s'affiche dans le fil de la commande."""
+    lignes = [f"{'✅' if e['fait'] else '⬜'} {LIBELLES_ETAPES[e['clef']]}"
+              for e in etapes_de(fiche)]
+    faites, total = avancement(fiche)
+    return f"**{faites} / {total}**\n\n" + "\n".join(lignes)
+
+
+def message_avancement(fiche, clef):
+    """Le mot au client quand une etape vient d'etre cochee."""
+    faites, total = avancement(fiche)
+    return ("Ta commande avance", (
+        f"**{LIBELLES_ETAPES.get(clef, 'Étape')}** — c'est fait.\n\n"
+        f"Commande **{(fiche or {}).get('numero') or '?'}** : {faites} étape(s) "
+        f"sur {total}.\n\n{texte_checklist(fiche)}"))
+
+
+def nom_fichier_livrable(brut, defaut="livraison.zip"):
+    """
+    Un nom de fichier sans chemin ni piege.
+
+    Un nom venu d'un formulaire peut contenir « ../ » ou un separateur :
+    on n'en garde que le dernier morceau, et seulement des caracteres
+    ordinaires.
+    """
+    texte = str(brut or "").replace("\\", "/").split("/")[-1].strip()
+    texte = re.sub(r"[^A-Za-z0-9._-]+", "_", texte).strip("._")
+    return texte[:NOM_FICHIER_MAX] or defaut
+
+
+def valider_livraison(nom, octets, message=""):
+    """(livraison, None) si le fichier peut partir, (None, message) sinon."""
+    if not octets:
+        return None, "Aucun fichier reçu."
+    if len(octets) > LIVRAISON_MAX:
+        return None, f"Fichier trop lourd : {LIVRAISON_MAX // (1024 * 1024)} Mo au plus."
+    return {"nom": nom_fichier_livrable(nom),
+            "taille": len(octets),
+            "message": nettoyer_texte(message, 1000)}, None
+
+
+def message_livraison(fiche, livraison):
+    """Le mot qui accompagne les fichiers livres."""
+    mot = str((livraison or {}).get("message") or "").strip()
+    texte = (f"Voici les fichiers de ta commande **{(fiche or {}).get('numero') or '?'}** "
+             f"— {(fiche or {}).get('libelle') or 'ta création'}.\n\n")
+    texte += (mot + "\n\n") if mot else ""
+    texte += ("Ils sont à toi : tu peux les utiliser, les modifier et les héberger "
+              "où tu veux. Une question, un réglage à revoir ? Réponds ici.")
+    return "Ta création est livrée", texte
+
+
+def trace_livraison(fiche, livraison, par="", maintenant_iso=""):
+    """La commande, avec la livraison inscrite dans son histoire."""
+    livrees = list((fiche or {}).get("livraisons") or [])
+    livrees.append({"date": maintenant_iso, "par": str(par or "")[:80],
+                    "nom": (livraison or {}).get("nom") or "",
+                    "taille": int((livraison or {}).get("taille") or 0)})
+    return {**(fiche or {}), "livraisons": livrees}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §11. Les avis, et seulement ceux qu'on peut prouver
+# ══════════════════════════════════════════════════════════════════════
+#
+# Un avis invente ne vaut rien, et se voit. Ici un avis n'existe que
+# rattache a une commande LIVREE, et seule la personne qui l'a payee peut
+# l'ecrire : un client, une commande, un avis. Il n'y a pas de moderation
+# a prevoir — il y a une preuve d'achat.
+
+AVIS_TEXTE_MAX = 400
+NOTES = (1, 2, 3, 4, 5)
+AVIS_AFFICHES = 24
+
+
+def lire_note(brut):
+    """1 a 5, ou None. Une note hors de l'echelle n'est pas une note."""
+    try:
+        note = int(brut)
+    except (TypeError, ValueError):
+        return None
+    return note if note in NOTES else None
+
+
+def peut_donner_avis(commande, avis=None):
+    """(True, "") si cette commande peut recevoir un avis, (False, raison) sinon."""
+    if (commande or {}).get("statut") != "livree":
+        return False, "On demande un avis une fois la création livrée."
+    if str((commande or {}).get("numero") or "") in (avis or {}):
+        return False, "Tu as déjà laissé un avis pour cette commande."
+    return True, ""
+
+
+def nouvel_avis(commande, note, texte, maintenant_iso=""):
+    commande = commande or {}
+    return {
+        "commande": str(commande.get("numero") or ""),
+        "note": int(note),
+        "texte": nettoyer_texte(texte, AVIS_TEXTE_MAX),
+        "article": str(commande.get("article") or ""),
+        "libelle": str(commande.get("libelle") or ""),
+        "auteur": str(commande.get("discord_nom") or commande.get("discord") or "Client")[:40],
+        "discord_id": str(commande.get("discord_id") or ""),
+        "le": maintenant_iso,
+    }
+
+
+def avis_public(avis):
+    """Ce qu'un visiteur a le droit de voir : jamais l'identifiant Discord."""
+    avis = avis or {}
+    return {"note": int(avis.get("note") or 0),
+            "texte": str(avis.get("texte") or ""),
+            "libelle": str(avis.get("libelle") or ""),
+            "auteur": str(avis.get("auteur") or "Client")[:40],
+            "le": str(avis.get("le") or "")[:10]}
+
+
+def avis_publics(avis, maximum=AVIS_AFFICHES):
+    """
+    Les avis a montrer : ceux qui disent quelque chose, du plus recent au
+    plus ancien. Une note seule compte dans la moyenne, mais une carte
+    vide sur le site n'apprend rien a personne.
+    """
+    dits = [a for a in (avis or {}).values()
+            if isinstance(a, dict) and lire_note(a.get("note"))
+            and str(a.get("texte") or "").strip()]
+    dits.sort(key=lambda a: str(a.get("le") or ""), reverse=True)
+    return [avis_public(a) for a in dits[:maximum]]
+
+
+def note_moyenne(avis):
+    """(moyenne sur 5, nombre d'avis). Arrondie au dixieme, jamais vers le haut."""
+    notes = [lire_note(a.get("note")) for a in (avis or {}).values()
+             if isinstance(a, dict) and lire_note(a.get("note"))]
+    return (round(sum(notes) / len(notes), 1), len(notes)) if notes else (0.0, 0)
+
+
+def message_demande_avis(commande):
+    return ("Un avis, en dix secondes ?", (
+        f"Ta commande **{(commande or {}).get('numero') or '?'}** est livrée.\n\n"
+        "Si tu as un instant : une note, et un mot si tu veux. C'est ce qui "
+        "permet aux suivants de savoir à quoi s'attendre — et c'est le seul "
+        "avis qu'on affiche, celui de quelqu'un qui a vraiment acheté."))
+
+
+def message_merci_avis(note):
+    return ("Merci !", f"Ton avis est enregistré : **{note}/5**. "
+                       "Il aide plus que tu ne crois.")

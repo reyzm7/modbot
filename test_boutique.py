@@ -558,7 +558,7 @@ messages_prives = []
 joignable = [True]
 
 
-async def faux_ecrire(fiche, titre, texte, couleur=0, lien=None, fichier=None):
+async def faux_ecrire(fiche, titre, texte, couleur=0, lien=None, fichier=None, vue=None):
     messages_prives.append({"a": fiche.get("discord"), "titre": titre, "texte": texte,
                             "lien": lien, "fichier": fichier})
     if joignable[0]:
@@ -1304,7 +1304,7 @@ async def scenario_rappels():
         alertes.append((titre, texte))
         return 1
 
-    async def faux_prive(fiche, titre, texte, couleur=0, lien=None, fichier=None):
+    async def faux_prive(fiche, titre, texte, couleur=0, lien=None, fichier=None, vue=None):
         prives.append((fiche.get("numero") or fiche.get("id"), titre))
         return True, ""
 
@@ -1563,6 +1563,219 @@ verifier("la facture part au client des que la commande est payee",
 verifier("un code promo n'est consomme qu'au paiement",
          "promo_ecrire(bq.consommer_promo(promo))" in
          source_b.split("async def boutique_paiement_recu")[1][:3000])
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+print("\n--- Les chiffres, le fil de production, la livraison ---")
+
+JOUR = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
+
+vide = bq.statistiques({}, {}, {}, JOUR)
+verifier("une boutique vide rend des zeros, pas des tirets",
+         (vide["ca_total"], vide["commandes_payees"], vide["panier_moyen"]) == (0, 0, 0))
+verifier("douze mois sont toujours dessines, meme vides",
+         len(vide["mois"]) == 12 and vide["mois"][-1]["mois"] == "2026-09",
+         str([m["mois"] for m in vide["mois"][-2:]]))
+verifier("sans devis chiffre, le taux vaut zero et non l'infini",
+         vide["devis"]["taux"] == 0)
+
+ventes = {
+    "V1": {"numero": "V1", "statut": "livree", "article": "bot_avance", "montant": 4900,
+           "libelle": "Bot Avancé", "payee_le": "2026-09-02T10:00:00+00:00"},
+    "V2": {"numero": "V2", "statut": "en_cours", "article": "bot_avance", "montant": 4900,
+           "libelle": "Bot Avancé", "payee_le": "2026-09-08T10:00:00+00:00"},
+    "V3": {"numero": "V3", "statut": "livree", "article": "site_dashboard", "montant": 17900,
+           "libelle": "Site Dashboard", "payee_le": "2026-08-20T10:00:00+00:00"},
+    "V4": {"numero": "V4", "statut": "en_attente", "article": "bot_pro", "montant": 9900,
+           "libelle": "Bot Pro", "creee_le": "2026-09-11T10:00:00+00:00"},
+    "V5": {"numero": "V5", "statut": "annulee", "article": "bot_pro", "montant": 9900,
+           "libelle": "Bot Pro", "payee_le": "2026-09-01T10:00:00+00:00"},
+    "V6": {"numero": "V6", "statut": "livree", "article": "", "montant": 12000,
+           "libelle": "Création sur mesure", "payee_le": "2025-03-05T10:00:00+00:00"},
+}
+devis_stats = {
+    "Q1": {"statut": "payee", "prix": 12000},
+    "Q2": {"statut": "propose", "prix": 8000},
+    "Q3": {"statut": "clos", "prix": 0},
+    "Q4": {"statut": "nouveau"},
+}
+sav_stats = {"S1": {"statut": "ouvert"}, "S2": {"statut": "clos"}}
+chiffres = bq.statistiques(ventes, devis_stats, sav_stats, JOUR)
+
+verifier("le chiffre d'affaires ne compte ni l'impaye ni l'annule",
+         chiffres["ca_total"] == 4900 + 4900 + 17900 + 12000, str(chiffres["ca_total"]))
+verifier("quatre commandes ont vraiment rapporte", chiffres["commandes_payees"] == 4)
+verifier("le panier moyen est le vrai quotient",
+         chiffres["panier_moyen"] == (4900 + 4900 + 17900 + 12000) // 4,
+         str(chiffres["panier_moyen"]))
+mois = {m["mois"]: m for m in chiffres["mois"]}
+verifier("septembre porte ses deux ventes",
+         (mois["2026-09"]["total"], mois["2026-09"]["commandes"]) == (9800, 2),
+         str(mois["2026-09"]))
+verifier("aout porte la sienne", mois["2026-08"]["total"] == 17900)
+verifier("une vente plus vieille que douze mois compte au total mais pas sur la courbe",
+         "2025-03" not in mois
+         and chiffres["ca_total"] - sum(m["total"] for m in chiffres["mois"]) == 12000,
+         str(chiffres["ca_total"] - sum(m["total"] for m in chiffres["mois"])))
+verifier("l'article qui rapporte le plus vient en tete",
+         chiffres["articles"][0]["article"] == "site_dashboard",
+         str([a["article"] for a in chiffres["articles"]]))
+verifier("deux ventes du meme article se cumulent",
+         next(a for a in chiffres["articles"] if a["article"] == "bot_avance")["commandes"] == 2)
+verifier("une creation sur mesure garde un nom lisible",
+         next(a for a in chiffres["articles"] if a["article"] == "sur_mesure")["libelle"]
+         == "Création sur mesure")
+verifier("le taux ne compte que les devis qu'on a chiffres",
+         (chiffres["devis"]["chiffres"], chiffres["devis"]["payes"],
+          chiffres["devis"]["taux"]) == (2, 1, 50), str(chiffres["devis"]))
+verifier("les demandes d'aide ouvertes sont comptees",
+         chiffres["sav_ouverts"] == 1)
+verifier("ce qui reste a faire est compte a part", chiffres["en_cours"] == 1)
+
+# ── Le fil de production ───────────────────────────────────────────────
+
+neuves = bq.etapes_neuves()
+verifier("une commande commence avec cinq etapes, toutes a faire",
+         len(neuves) == 5 and not any(e["fait"] for e in neuves))
+vieille = {"numero": "V1", "statut": "payee", "etapes": [{"clef": "brief", "fait": True}]}
+verifier("une commande d'avant garde ses etapes et gagne les nouvelles",
+         [e["clef"] for e in bq.etapes_de(vieille)] == list(bq.CLEFS_ETAPES)
+         and bq.etapes_de(vieille)[0]["fait"] is True)
+verifier("une etape inconnue est refusee",
+         bq.basculer_etape(vieille, "cafe", "")[0] is None)
+verifier("une commande impayee n'a pas d'etapes a cocher",
+         bq.basculer_etape({"statut": "en_attente"}, "brief", "")[0] is None)
+cochee, erreur = bq.basculer_etape(vieille, "creation", JOUR.isoformat())
+verifier("cocher une etape la date", erreur is None
+         and next(e for e in bq.etapes_de(cochee) if e["clef"] == "creation")["le"]
+         == JOUR.isoformat())
+verifier("l'avancement se lit d'un coup", bq.avancement(cochee) == (2, 5),
+         str(bq.avancement(cochee)))
+decochee, _ = bq.basculer_etape(cochee, "creation", JOUR.isoformat())
+verifier("decocher efface la date aussi", bq.avancement(decochee) == (1, 5)
+         and next(e for e in bq.etapes_de(decochee) if e["clef"] == "creation")["le"] == "")
+liste = bq.texte_checklist(cochee)
+verifier("la checklist montre ce qui est fait et ce qui reste",
+         liste.startswith("**2 / 5**") and liste.count("✅") == 2 and liste.count("⬜") == 3,
+         liste[:30])
+verifier("le mot au client nomme l'etape et rappelle le numero",
+         "La création avance" in bq.message_avancement(cochee, "creation")[1]
+         and "V1" in bq.message_avancement(cochee, "creation")[1])
+
+# ── La livraison ───────────────────────────────────────────────────────
+
+verifier("un nom de fichier ne peut pas remonter d'un dossier",
+         bq.nom_fichier_livrable("../../etc/passwd") == "passwd",
+         bq.nom_fichier_livrable("../../etc/passwd"))
+verifier("un nom Windows est ramene a son dernier morceau",
+         bq.nom_fichier_livrable("C:\\Users\\moi\\mon bot.zip") == "mon_bot.zip",
+         bq.nom_fichier_livrable("C:\\Users\\moi\\mon bot.zip"))
+verifier("un nom vide prend un nom par defaut",
+         bq.nom_fichier_livrable("") == "livraison.zip")
+verifier("un nom demesure est borne",
+         len(bq.nom_fichier_livrable("x" * 400)) <= bq.NOM_FICHIER_MAX)
+verifier("une livraison sans fichier est refusee",
+         bq.valider_livraison("a.zip", b"")[0] is None)
+verifier("un fichier trop lourd est refuse",
+         bq.valider_livraison("a.zip", b"x" * (bq.LIVRAISON_MAX + 1))[0] is None)
+livrable, erreur = bq.valider_livraison("mon bot.zip", b"x" * 2048, "Voilà !")
+verifier("une livraison correcte passe, nom nettoye et taille connue",
+         erreur is None and livrable["nom"] == "mon_bot.zip" and livrable["taille"] == 2048,
+         str(erreur))
+verifier("le mot de livraison cite le numero et rend les fichiers au client",
+         "V1" in bq.message_livraison(vieille, livrable)[1]
+         and "Voilà !" in bq.message_livraison(vieille, livrable)[1])
+trace = bq.trace_livraison(vieille, livrable, "moi", JOUR.isoformat())
+verifier("la livraison laisse une trace datee et nommee",
+         trace["livraisons"][-1]["nom"] == "mon_bot.zip"
+         and trace["livraisons"][-1]["date"] == JOUR.isoformat())
+
+# ── Cote bot ───────────────────────────────────────────────────────────
+
+source_c = open("bot.py", encoding="utf-8").read()
+for route in ('add_get("/api/admin/boutique/stats", api_admin_boutique_stats)',
+              'add_post("/api/admin/boutique/commandes/{numero}/etape", api_admin_boutique_etape)',
+              'add_post("/api/admin/boutique/commandes/{numero}/livrer", api_admin_boutique_livrer)'):
+    verifier(f"route branchee : {route.split(',')[0]}", route in source_c)
+verifier("le fil s'ouvre des que la commande est annoncee",
+         "await ouvrir_fil(fiche)" in source_c)
+verifier("le fil se retrouve depuis le salon des paiements, jamais globalement",
+         "salon.get_thread(int(identifiant))" in source_c)
+verifier("le fichier livre ne touche jamais le disque",
+         "open(" not in source_c.split("async def api_admin_boutique_livrer")[1][:1500])
+verifier("l'administration voit l'avancement de chaque commande",
+         '"faites": faites, "etapes_total": total' in source_c)
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+print("\n--- Les avis, et seulement ceux qu'on peut prouver ---")
+
+livree = {"numero": "AV-1", "statut": "livree", "article": "bot_avance",
+          "libelle": "Bot Avancé", "discord_nom": "Kim",
+          "discord_id": "111111111111111111"}
+
+verifier("une note hors de l'echelle n'est pas une note",
+         [bq.lire_note(x) for x in (0, 6, "3", "trois", None, 5)]
+         == [None, None, 3, None, None, 5])
+verifier("on ne demande un avis qu'une fois la creation livree",
+         bq.peut_donner_avis({**livree, "statut": "en_cours"}, {})[0] is False)
+verifier("une commande livree peut recevoir un avis",
+         bq.peut_donner_avis(livree, {})[0] is True)
+verifier("un client n'a qu'un avis par commande",
+         bq.peut_donner_avis(livree, {"AV-1": {"note": 5}})[0] is False)
+
+avis_un = bq.nouvel_avis(livree, 5, "  Rapide et exactement ce que je voulais.  ",
+                         "2026-09-12T12:00:00+00:00")
+verifier("l'avis garde la note, le texte propre et la commande",
+         (avis_un["note"], avis_un["commande"], avis_un["texte"])
+         == (5, "AV-1", "Rapide et exactement ce que je voulais."))
+verifier("un texte demesure est borne",
+         len(bq.nouvel_avis(livree, 4, "x" * 5000, "")["texte"]) == bq.AVIS_TEXTE_MAX)
+
+public = bq.avis_public(avis_un)
+verifier("un avis public ne porte ni identifiant Discord ni numero de commande",
+         set(public) == {"note", "texte", "libelle", "auteur", "le"},
+         str(sorted(public)))
+verifier("la date publique s'arrete au jour", public["le"] == "2026-09-12")
+
+memoire = {
+    "AV-1": avis_un,
+    "AV-2": bq.nouvel_avis({**livree, "numero": "AV-2"}, 4, "Bien.",
+                           "2026-09-13T12:00:00+00:00"),
+    "AV-3": bq.nouvel_avis({**livree, "numero": "AV-3"}, 3, "   ",
+                           "2026-09-14T12:00:00+00:00"),
+    "AV-4": {"note": 9, "texte": "Faux", "le": "2026-09-15"},
+}
+montres = bq.avis_publics(memoire)
+verifier("seuls les avis qui disent quelque chose s'affichent",
+         [a["texte"] for a in montres] == ["Bien.", "Rapide et exactement ce que je voulais."],
+         str([a["texte"] for a in montres]))
+verifier("une note impossible n'entre ni dans la liste ni dans la moyenne",
+         all(a["note"] in bq.NOTES for a in montres))
+moyenne, combien = bq.note_moyenne(memoire)
+verifier("la moyenne compte toutes les vraies notes, meme sans texte",
+         (moyenne, combien) == (4.0, 3), f"{moyenne} sur {combien}")
+verifier("sans aucun avis, la moyenne vaut zero et non cinq",
+         bq.note_moyenne({}) == (0.0, 0))
+verifier("la demande d'avis dit pourquoi elle existe",
+         "vraiment acheté" in bq.message_demande_avis(livree)[1])
+verifier("le merci rappelle la note donnee", "4/5" in bq.message_merci_avis(4)[1])
+
+source_d = open("bot.py", encoding="utf-8").read()
+verifier("la route publique des avis est branchee",
+         'add_get("/api/boutique/avis", api_boutique_avis)' in source_d)
+verifier("les boutons d'avis sont ecoutes a part de ceux de l'equipe",
+         'bot.add_listener(avis_interaction, "on_interaction")' in source_d)
+verifier("un avis n'est accepte que du client de CETTE commande",
+         'str(fiche.get("discord_id") or "") != qui' in source_d)
+verifier("l'avis est demande quand la commande passe a livree",
+         "await demander_avis(nouvelle)" in source_d)
+verifier("les avis font partie des sauvegardes",
+         "avis.json" in bot_mod.FICHIERS_SAUVEGARDES)
+verifier("la route des avis est ouverte au site",
+         any("/api/boutique/avis".startswith(p) for p in bot_mod.CORS_PUBLIC_PATHS))
 
 
 echecs = [r for r in resultats if not r[1]]

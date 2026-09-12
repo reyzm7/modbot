@@ -4,7 +4,7 @@
 > continuer le développement sans rien perdre. Tout ce qui est écrit ici a été
 > vérifié sur le dépôt, pas reconstitué de mémoire.
 >
-> Dernière mise à jour : **12 septembre 2026** (voir §70 pour le dernier lot livré).
+> Dernière mise à jour : **12 septembre 2026** (voir §71 pour le dernier lot livré).
 
 ## 🚀 Reprendre le travail — à lire en premier
 
@@ -5228,3 +5228,73 @@ le plus grand rang, et une remise sans plancher, font tomber les contrôles
 prévus. Côté site, `test_derives` attrape une option dont le prix aurait
 dérivé. `test_selecteurs` 105/105, `test_i18n`, `test_bienvenue` 24/24,
 `test_declarations` passés.
+
+## 71. Livré le 12 septembre 2026 — les chiffres, le fil de production, la livraison, les avis
+
+### Les chiffres
+
+`boutique.statistiques()` rend, en centimes : le chiffre d'affaires depuis
+le début, le nombre de commandes payées, le panier moyen, douze mois de
+courbe, le classement des articles, et le taux de transformation des
+devis. Tout se recalcule **à la demande depuis les fiches** : aucun
+compteur n'est tenu à côté, donc aucun ne peut dériver.
+
+Deux choix de mesure, faits exprès :
+
+- une commande `en_attente` ou `annulee` n'entre **jamais** dans le chiffre
+  d'affaires — ce n'est pas de l'argent ;
+- le taux de transformation se calcule sur les devis **chiffrés**, pas sur
+  toutes les demandes reçues. Une demande jamais chiffrée ne dit rien du
+  client, seulement de nous.
+
+La rubrique 04 de l'administration affiche quatre compteurs, une courbe de
+douze mois faite de barres (sans bibliothèque, sans requête de plus) et le
+classement des articles. Route : `GET /api/admin/boutique/stats`.
+
+### Le fil de production, et la checklist
+
+Chaque commande payée reçoit **son fil**, accroché à son annonce dans le
+salon des paiements, et une checklist de cinq étapes : projet précisé,
+maquette prête, création en cours, essai, livraison. Le client est ajouté
+au fil quand Discord le permet — il faut qu'il puisse voir le salon
+parent, ce qui n'est pas le cas d'un salon d'équipe ; quand il ne peut
+pas, il reste prévenu en message privé, comme avant. Cocher une étape le
+prévient ; **décocher ne prévient personne** : c'est une correction
+interne, pas une nouvelle.
+
+Le fil se retrouve toujours **depuis** `SALON_PAIEMENTS`
+(`salon.get_thread(...)`), jamais par une recherche globale : un
+identifiant lu dans un fichier ne doit pas pouvoir désigner un salon de
+n'importe quel serveur. `test_cloison` continue de le vérifier.
+
+### La livraison des fichiers
+
+`POST /api/admin/boutique/commandes/{numero}/livrer` accepte un envoi
+multipart : le fichier passe de la requête à Discord **sans jamais toucher
+le disque**. Huit mégaoctets au plus — au-delà, Discord refuse. Le nom est
+nettoyé (`../../etc/passwd` devient `passwd`), la livraison est inscrite
+dans l'histoire de la commande, annoncée dans le fil, et la commande passe
+à « livrée ».
+
+### Les avis vérifiés
+
+Un avis n'existe que rattaché à une commande **livrée**, et seule la
+personne qui l'a payée peut l'écrire : le bot vérifie que l'identifiant
+Discord de celui qui clique est celui de la commande. Un client, une
+commande, un avis. À la livraison, le client reçoit cinq boutons en privé,
+puis une fenêtre pour un mot facultatif.
+
+Le site affiche les avis qui **disent quelque chose** ; une note seule
+compte dans la moyenne mais ne fait pas une carte vide. Tant qu'il n'y a
+aucun avis, la section n'existe pas — pas de faux témoignage, pas de
+moyenne inventée. Route publique : `GET /api/boutique/avis`, qui ne rend
+ni identifiant Discord ni numéro de commande.
+
+### Vérifications
+
+`test_boutique.py` : 467 vérifications (60 nouvelles). `test_cloison`
+35/35, `test_langue` 64/64 (les seize phrases nouvelles traduites à la
+main dans les quatre langues), `test_bout_en_bout` 45/45,
+`test_licences` 90/90, `test_premium` 58/58. Site : `test_selecteurs`
+105/105, `test_i18n`, `test_derives`, `test_declarations`,
+`test_bienvenue` 24/24.

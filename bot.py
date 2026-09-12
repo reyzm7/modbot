@@ -313,6 +313,9 @@ F_BATTEMENT = chemin_donnees("battement.json")
 F_FACTURES = chemin_donnees("factures.json")
 F_PROMOS = chemin_donnees("promos.json")
 F_ABONNEMENTS = chemin_donnees("abonnements.json")
+# Les avis : ils viennent de clients reels, et rien ne permet de les
+# refabriquer. Les perdre, c'est perdre la seule preuve sociale honnete.
+F_AVIS = chemin_donnees("avis.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -432,6 +435,7 @@ FICHIERS_SAUVEGARDES = (
     "factures.json",
     "promos.json",
     "abonnements.json",
+    "avis.json",
     # Les demandes sur mesure et d'assistance : ce que le client a demande,
     # et le prix qu'on lui a propose.
     "devis.json",
@@ -9357,6 +9361,7 @@ async def boutique_paiement_recu(session_stripe):
     print(f"boutique: {numero} payee ({fiche.get('libelle')}, "
           f"{bq.formater_prix(fiche['montant'])})")
     await annoncer_commande(fiche)
+    await ouvrir_fil(fiche)
     await envoyer_la_facture(fiche)
     return fiche
 
@@ -9387,7 +9392,8 @@ def trouver_client(fiche):
     return None
 
 
-async def ecrire_au_client(fiche, titre, texte, couleur=0x5865F2, lien=None, fichier=None):
+async def ecrire_au_client(fiche, titre, texte, couleur=0x5865F2, lien=None,
+                           fichier=None, vue=None):
     """
     (True, "") si le message prive part, (False, raison) sinon.
 
@@ -9405,8 +9411,10 @@ async def ecrire_au_client(fiche, titre, texte, couleur=0x5865F2, lien=None, fic
         embed.set_footer(text="ModBot Boutique")
         options = {"embed": embed}
         if lien:
-            vue = discord.ui.View(timeout=None)
-            vue.add_item(discord.ui.Button(label="Voir et payer", url=lien, emoji="💶"))
+            boutons = discord.ui.View(timeout=None)
+            boutons.add_item(discord.ui.Button(label="Voir et payer", url=lien, emoji="💶"))
+            options["view"] = boutons
+        elif vue is not None:
             options["view"] = vue
         if fichier:
             nom, octets = fichier
@@ -9798,6 +9806,10 @@ async def boutique_changer_statut(numero, statut, jours, par):
     nouvelle["historique"][-1]["message"] = envoye
     commande_ecrire(nouvelle)
     await editer_annonce(nouvelle.get("annonce"), embed_commande(nouvelle), vue_commande(nouvelle))
+    # Livree : c'est le seul moment ou un avis a du sens, et le seul ou
+    # on le demande — une fois, jamais deux.
+    if statut == "livree":
+        await demander_avis(nouvelle)
     return {"ok": True, "commande": commande_pour_admin(nouvelle),
             "message_envoye": envoye, "raison": raison}
 
@@ -9858,8 +9870,12 @@ async def boutique_clore_sav(ident, par):
 # ── L'administration : la rubrique « Achats & paiements » ──────────────
 
 def commande_pour_admin(fiche):
+    faites, total = bq.avancement(fiche)
     return {**fiche, "statut_label": bq.libelle_statut(fiche),
-            "montant_label": bq.formater_prix(fiche.get("montant"))}
+            "montant_label": bq.formater_prix(fiche.get("montant")),
+            "etapes": [{**etape, "libelle": bq.LIBELLES_ETAPES[etape["clef"]]}
+                       for etape in bq.etapes_de(fiche)],
+            "faites": faites, "etapes_total": total}
 
 
 def devis_pour_admin(fiche):
@@ -10375,6 +10391,321 @@ async def boutique_abonnement_change(objet, evenement):
     return fiche
 
 
+# ── Les avis : seulement ceux d'un client qui a vraiment paye ─────────
+
+def avis_tout():
+    return _collection(F_AVIS)
+
+
+def avis_ecrire(fiche):
+    donnees = dict(avis_tout())
+    donnees[fiche["commande"]] = fiche
+    jsave(F_AVIS, donnees)
+    return fiche
+
+
+class VueAvis(discord.ui.View):
+    """
+    Cinq etoiles, en message prive au client d'une commande livree.
+
+    Sans rappel de vue enregistree : c'est `avis_interaction` qui ecoute,
+    par le custom_id — les boutons marchent donc encore apres un
+    redemarrage, des semaines plus tard.
+    """
+
+    def __init__(self, numero):
+        super().__init__(timeout=None)
+        for note in bq.NOTES:
+            bouton = discord.ui.Button(
+                label="★" * note, style=discord.ButtonStyle.secondary,
+                custom_id=f"av:note:{numero}:{note}")
+            self.add_item(bouton)
+
+
+async def demander_avis(fiche):
+    """Demande son avis au client, une fois, quand la commande est livree."""
+    peut, _ = bq.peut_donner_avis(fiche, avis_tout())
+    if not peut:
+        return False
+    titre, texte = bq.message_demande_avis(fiche)
+    envoye, raison = await ecrire_au_client(fiche, titre, texte, 0xF1C40F,
+                                            vue=VueAvis(fiche.get("numero")))
+    if not envoye:
+        print(f"boutique: avis non demande pour {fiche.get('numero')} ({raison})")
+    return envoye
+
+
+async def avis_interaction(interaction):
+    """
+    Les boutons « av:… » : la note, puis la fenetre du commentaire.
+
+    Ouverts au CLIENT, pas a l'equipe — mais seulement au client de cette
+    commande-la : l'identifiant du bouton ne suffit pas, on verifie que
+    celui qui clique est bien celui qui a paye.
+    """
+    donnees = interaction.data or {}
+    custom_id = str(donnees.get("custom_id") or "")
+    if not custom_id.startswith("av:"):
+        return
+    morceaux = custom_id.split(":", 3)
+    if len(morceaux) != 4:
+        return
+    _, action, numero, valeur = morceaux
+    fiche = commandes_tout().get(numero)
+    qui = str(getattr(interaction.user, "id", ""))
+    if not isinstance(fiche, dict) or str(fiche.get("discord_id") or "") != qui:
+        await _repondre_boutique(interaction, "Cet avis ne t'appartient pas.")
+        return
+    peut, raison = bq.peut_donner_avis(fiche, avis_tout())
+    if not peut:
+        await _repondre_boutique(interaction, raison)
+        return
+    note = bq.lire_note(valeur)
+    if note is None:
+        return
+    try:
+        if interaction.type == discord.InteractionType.component and action == "note":
+            await interaction.response.send_modal(fenetre_boutique(
+                f"Ton avis ({note}/5)", f"av:mot:{numero}:{note}",
+                [("texte", "Un mot, si tu veux (facultatif)",
+                  "Ce qui t'a plu, ce qui pourrait être mieux…",
+                  bq.AVIS_TEXTE_MAX, False, discord.TextStyle.paragraph)]))
+            return
+        if interaction.type == discord.InteractionType.modal_submit and action == "mot":
+            valeurs = valeurs_fenetre(donnees)
+            avis_ecrire(bq.nouvel_avis(fiche, note, valeurs.get("texte", ""),
+                                       now().isoformat()))
+            titre, texte = bq.message_merci_avis(note)
+            await _repondre_boutique(interaction, f"**{titre}** {texte}")
+            moyenne, combien = bq.note_moyenne(avis_tout())
+            await alerter_equipe(
+                "Un avis de plus",
+                f"**{note}/5** sur {fiche.get('numero')} — {fiche.get('libelle') or ''}\n\n"
+                + (f"> {valeurs.get('texte', '')}\n\n" if valeurs.get("texte") else "")
+                + f"Moyenne : **{moyenne}/5** sur {combien} avis.",
+                0xF1C40F if note >= 4 else 0xFAA61A)
+            return
+    except Exception as erreur:
+        print(f"boutique: avis {numero} : {erreur}")
+
+
+async def api_boutique_avis(request):
+    """
+    Les avis, tels que le site les affiche. Publics, donc anonymisables :
+    ni identifiant Discord, ni numero de commande ne sortent d'ici.
+    """
+    tous = avis_tout()
+    moyenne, combien = bq.note_moyenne(tous)
+    return api_json({"ok": True, "avis": bq.avis_publics(tous),
+                     "moyenne": moyenne, "total": combien}, request=request)
+
+
+# ── Le fil de la commande, la checklist, la livraison ─────────────────
+
+def embed_checklist(fiche):
+    faites, total = bq.avancement(fiche)
+    return E(f"Suivi de {fiche.get('numero') or '?'}",
+             f"**{fiche.get('libelle') or ''}** — {contact_affiche(fiche)}\n\n"
+             + bq.texte_checklist(fiche),
+             0x43B581 if faites == total else 0x5865F2)
+
+
+async def ouvrir_fil(fiche):
+    """
+    Un fil par commande, accroche a son annonce.
+
+    Chaque commande a ainsi son endroit : la checklist y vit, et l'equipe
+    y parle sans encombrer le salon. Le client y est invite quand il peut
+    l'etre — Discord exige qu'il voie le salon parent, ce qui n'est pas le
+    cas d'un salon reserve a l'equipe. Quand il ne peut pas, il reste
+    prevenu en message prive, comme avant : le fil n'enleve rien.
+    """
+    annonce = fiche.get("annonce")
+    if (not isinstance(annonce, dict)
+            or str(annonce.get("salon") or "") != str(SALON_PAIEMENTS)
+            or not str(annonce.get("message") or "").isdigit()):
+        return None
+    try:
+        salon = bot.get_channel(SALON_PAIEMENTS) or await bot.fetch_channel(SALON_PAIEMENTS)
+        message = await salon.fetch_message(int(annonce["message"]))
+        fil = await message.create_thread(name=f"Commande {fiche.get('numero')}"[:100],
+                                          auto_archive_duration=10080)
+    except Exception as erreur:
+        print(f"boutique: fil de {fiche.get('numero')} impossible : {erreur}")
+        return None
+    fiche["fil"] = str(fil.id)
+    uid = trouver_client(fiche)
+    if uid is not None:
+        try:
+            await fil.add_user(discord.Object(id=uid))
+        except Exception as erreur:
+            print(f"boutique: client {uid} non ajoute au fil : {erreur}")
+    try:
+        suivi = await fil.send(embed=embed_checklist(fiche))
+        fiche["fil_message"] = str(suivi.id)
+    except Exception as erreur:
+        print(f"boutique: checklist non postee : {erreur}")
+    commande_ecrire(fiche)
+    return fil
+
+
+async def rouvrir_fil(fiche):
+    """
+    Le fil d'une commande, retrouve DEPUIS le salon des paiements.
+
+    Jamais par une recherche globale : un identifiant lu dans un fichier
+    ne doit pas pouvoir designer un salon de n'importe quel serveur.
+    """
+    identifiant = str((fiche or {}).get("fil") or "")
+    if not identifiant.isdigit():
+        return None
+    try:
+        salon = bot.get_channel(SALON_PAIEMENTS) or await bot.fetch_channel(SALON_PAIEMENTS)
+        return (salon.get_thread(int(identifiant))
+                or await salon.guild.fetch_channel(int(identifiant)))
+    except Exception as erreur:
+        print(f"boutique: fil {identifiant} introuvable : {erreur}")
+        return None
+
+
+async def dire_dans_le_fil(fiche, embed):
+    """Poste dans le fil de la commande, s'il existe. Sinon, tant pis."""
+    fil = await rouvrir_fil(fiche)
+    if fil is None:
+        return False
+    try:
+        await fil.send(embed=embed)
+        return True
+    except Exception as erreur:
+        print(f"boutique: message dans le fil impossible : {erreur}")
+        return False
+
+
+async def rafraichir_checklist(fiche):
+    """Remet la checklist du fil a jour, la ou elle est deja postee."""
+    identifiant = str((fiche or {}).get("fil_message") or "")
+    if not identifiant.isdigit():
+        return False
+    fil = await rouvrir_fil(fiche)
+    if fil is None:
+        return False
+    try:
+        message = await fil.fetch_message(int(identifiant))
+        await message.edit(embed=embed_checklist(fiche))
+        return True
+    except Exception as erreur:
+        print(f"boutique: checklist non mise a jour : {erreur}")
+        return False
+
+
+async def api_admin_boutique_etape(request):
+    """
+    Coche ou decoche une etape de production.
+
+    Cocher previent le client ; decocher ne previent personne : c'est une
+    correction interne, pas une nouvelle.
+    """
+    identity = await api_identity(request, admin_required=True)
+    numero = str(request.match_info.get("numero") or "")
+    payload = await _corps(request)
+    fiche = commandes_tout().get(numero)
+    if not fiche:
+        raise web.HTTPNotFound(text="Commande inconnue.")
+    clef = str(payload.get("etape") or "")
+    nouvelle, erreur = bq.basculer_etape(fiche, clef, now().isoformat())
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+    commande_ecrire(nouvelle)
+    await rafraichir_checklist(nouvelle)
+    envoye, raison = False, ""
+    if next((e["fait"] for e in bq.etapes_de(nouvelle) if e["clef"] == clef), False):
+        titre, texte = bq.message_avancement(nouvelle, clef)
+        envoye, raison = await ecrire_au_client(nouvelle, titre, texte, 0x5865F2)
+        dashboard_log("boutique_etape", None, identity.get("username"),
+                      f"{numero} — {bq.LIBELLES_ETAPES.get(clef, clef)}")
+    return api_json({"ok": True, "message_envoye": envoye, "raison": raison,
+                     "commande": commande_pour_admin(nouvelle)}, request=request)
+
+
+async def _lire_livraison(request):
+    """(nom, octets, message) depuis un envoi multipart. Rien n'est ecrit sur le disque."""
+    try:
+        lecteur = await request.multipart()
+    except Exception:
+        raise web.HTTPBadRequest(text="Envoi illisible.")
+    nom, octets, mot = "", b"", ""
+    while True:
+        morceau = await lecteur.next()
+        if morceau is None:
+            break
+        if morceau.name == "message":
+            mot = (await morceau.text())[:1000]
+        elif morceau.name == "fichier":
+            nom = morceau.filename or ""
+            tampon = bytearray()
+            while True:
+                bloc = await morceau.read_chunk()
+                if not bloc:
+                    break
+                tampon += bloc
+                if len(tampon) > bq.LIVRAISON_MAX:
+                    raise web.HTTPBadRequest(
+                        text=f"Fichier trop lourd : "
+                             f"{bq.LIVRAISON_MAX // (1024 * 1024)} Mo au plus.")
+            octets = bytes(tampon)
+    return nom, octets, mot
+
+
+async def api_admin_boutique_livrer(request):
+    """
+    Envoie les fichiers au client, et marque la commande livree.
+
+    Le fichier passe de la requete a Discord sans jamais toucher le
+    disque : rien a nettoyer, rien a oublier derriere soi.
+    """
+    identity = await api_identity(request, admin_required=True)
+    numero = str(request.match_info.get("numero") or "")
+    fiche = commandes_tout().get(numero)
+    if not fiche:
+        raise web.HTTPNotFound(text="Commande inconnue.")
+    nom, octets, mot = await _lire_livraison(request)
+    livraison, erreur = bq.valider_livraison(nom, octets, mot)
+    if erreur:
+        raise web.HTTPBadRequest(text=erreur)
+
+    titre, texte = bq.message_livraison(fiche, livraison)
+    envoye, raison = await ecrire_au_client(fiche, titre, texte, 0x43B581,
+                                            fichier=(livraison["nom"], octets))
+    fiche = bq.trace_livraison(fiche, livraison, _auteur(identity), now().isoformat())
+    commande_ecrire(fiche)
+    await dire_dans_le_fil(fiche, E(
+        "Fichiers livrés",
+        f"**{livraison['nom']}** ({max(livraison['taille'] // 1024, 1)} Ko) — "
+        f"{'envoyé à ' + contact_affiche(fiche) if envoye else 'envoi impossible : ' + raison}",
+        0x43B581 if envoye else 0xED4245))
+    dashboard_log("boutique_livraison", None, identity.get("username"),
+                  f"{numero} — {livraison['nom']}")
+    # Livrer, c'est changer de statut : le client recoit alors le message
+    # « livree » et l'annonce du salon suit, sans qu'on ait a y penser.
+    await boutique_changer_statut(numero, "livree", None, _auteur(identity))
+    return api_json({"ok": True, "message_envoye": envoye, "raison": raison},
+                    request=request)
+
+
+# ── Les chiffres, pour savoir ou on en est ────────────────────────────
+
+async def api_admin_boutique_stats(request):
+    """
+    Le chiffre d'affaires, le panier moyen, la transformation des devis.
+
+    Tout se recalcule a la demande depuis les fiches : aucun compteur
+    n'est tenu a cote, donc aucun ne peut deriver de la realite.
+    """
+    await api_identity(request, admin_required=True)
+    return api_json({"ok": True, **bq.statistiques(
+        commandes_tout(), devis_tout(), sav_tout(), now())}, request=request)
+
+
 # ── Les boutons et fenetres du salon des paiements ─────────────────────
 
 def valeurs_fenetre(donnees):
@@ -10529,6 +10860,7 @@ async def boutique_interaction(interaction):
 
 
 bot.add_listener(boutique_interaction, "on_interaction")
+bot.add_listener(avis_interaction, "on_interaction")
 
 
 async def api_stripe_webhook(request):
@@ -11735,6 +12067,7 @@ async def start_dashboard_api():
     # La boutique : catalogue et commande publics — le client n'a pas besoin
     # de compte ModBot — et paiement confirme par le meme webhook Stripe.
     app.router.add_get("/api/boutique/offres", api_boutique_offres)
+    app.router.add_get("/api/boutique/avis", api_boutique_avis)
     app.router.add_post("/api/boutique/promo", api_boutique_promo)
     app.router.add_post("/api/boutique/abonnement", api_boutique_abonnement)
     app.router.add_post("/api/boutique/commande", api_boutique_commande)
@@ -11745,6 +12078,9 @@ async def start_dashboard_api():
     app.router.add_get("/api/admin/boutique/devis/{devis_id}/pdf", api_admin_boutique_devis_pdf)
     app.router.add_post("/api/boutique/sav", api_boutique_sav)
     app.router.add_get("/api/admin/boutique", api_admin_boutique)
+    app.router.add_get("/api/admin/boutique/stats", api_admin_boutique_stats)
+    app.router.add_post("/api/admin/boutique/commandes/{numero}/etape", api_admin_boutique_etape)
+    app.router.add_post("/api/admin/boutique/commandes/{numero}/livrer", api_admin_boutique_livrer)
     app.router.add_get("/api/admin/boutique/promos", api_admin_boutique_promos)
     app.router.add_post("/api/admin/boutique/promos", api_admin_boutique_promos)
     app.router.add_post("/api/admin/boutique/promos/{code}/retirer", api_admin_boutique_promo_retirer)

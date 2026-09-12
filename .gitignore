@@ -43,6 +43,7 @@ sav.json
 factures.json
 promos.json
 abonnements.json
+avis.json
 
 # Le pouls du bot, purement local
 battement.json
