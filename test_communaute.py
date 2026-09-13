@@ -278,6 +278,101 @@ verifier("un palier deplace vers le haut reprend ses roles",
          retirer == ["100", "200"], str(retirer))
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  L'aller-retour avec le tableau de bord
+#
+#  Un reglage accepte puis jamais applique se lit comme une panne du
+#  bot : on verifie donc ce qui SORT de l'enregistrement, pas seulement
+#  ce que la logique pure sait calculer. Un salon ou un role d'un AUTRE
+#  serveur est refuse ici comme ailleurs — le navigateur garde parfois
+#  les listes du serveur precedent.
+# ══════════════════════════════════════════════════════════════════════
+print("--- L'aller-retour avec le tableau de bord ---")
+
+import asyncio           # noqa: E402
+import importlib.util    # noqa: E402
+import os                # noqa: E402
+
+os.environ.setdefault("TOKEN", "faux-token")
+import discord.ext.commands as _commands  # noqa: E402
+_commands.Bot.run = lambda self, *a, **k: None
+
+_spec = importlib.util.spec_from_file_location("botmod", "bot.py")
+_bot = importlib.util.module_from_spec(_spec)
+sys.modules["botmod"] = _bot
+_spec.loader.exec_module(_bot)
+
+_configs = {}
+_bot.get_cfg = lambda gid: dict(_configs.get(str(gid), {}))
+_bot.set_cfg = lambda gid, cfg: _configs.__setitem__(str(gid), dict(cfg))
+_bot.dashboard_log = lambda *a, **k: None
+
+
+class _Salon:
+    def __init__(self, ident, categorie=None):
+        self.id = ident
+        self.category_id = categorie
+
+
+class _Role:
+    def __init__(self, ident):
+        self.id = ident
+        self.managed = False
+
+
+class _Guild:
+    id = 111
+    name = "Serveur Test"
+
+    def get_channel(self, cid):
+        return _Salon(int(cid)) if str(cid) in ("10", "11", "12") else None
+
+    def get_thread(self, cid):
+        return None
+
+    def get_role(self, rid):
+        return _Role(int(rid)) if str(rid) in ("900", "901") else None
+
+
+_guild = _Guild()
+
+asyncio.run(_bot.apply_dashboard_config(_guild, {
+    "security": {"antilink": True,
+                 "antilink_channels": ["10", "12", "999", "10"]},
+    "communaute": {"xp": True, "mur_seuil": 5,
+                   "xp_message": "  Bravo {membre}, niveau {niveau} !  ",
+                   "xp_salons_exclus": ["11", "999"],
+                   "recompenses_cumul": False,
+                   "recompenses": [{"niveau": 10, "role": "901"},
+                                   {"niveau": 5, "role": "900"},
+                                   {"niveau": 7, "role": "404"}]},
+}))
+_cfg = _configs["111"]
+
+verifier("un salon d'un autre serveur n'entre pas dans les salons libres",
+         _cfg.get("salons_liens_libres") == ["10", "12"],
+         str(_cfg.get("salons_liens_libres")))
+verifier("un salon d'un autre serveur n'entre pas dans les salons sans experience",
+         _cfg.get("xp_salons_exclus") == ["11"], str(_cfg.get("xp_salons_exclus")))
+verifier("l'annonce est enregistree sans ses espaces de bord",
+         _cfg.get("xp_message") == "Bravo {membre}, niveau {niveau} !",
+         repr(_cfg.get("xp_message")))
+verifier("le cumul se decoche", _cfg.get("xp_recompenses_cumul") is False)
+verifier("les paliers sont tries, et un role inconnu est refuse",
+         _cfg.get("xp_recompenses") == [{"niveau": 5, "role": "900"},
+                                        {"niveau": 10, "role": "901"}],
+         str(_cfg.get("xp_recompenses")))
+verifier("les liens passent dans un salon libre",
+         _bot.lien_permis_ici(_cfg, _Salon(10)))
+verifier("et pas dans les autres",
+         not _bot.lien_permis_ici(_cfg, _Salon(11)))
+verifier("un fil herite du salon qui le porte",
+         _bot.lien_permis_ici(_cfg, type("Fil", (), {
+             "id": 777, "category_id": None, "parent": _Salon(10)})()))
+verifier("une categorie libre vaut pour ses salons",
+         _bot.lien_permis_ici({"salons_liens_libres": ["50"]}, _Salon(222, 50)))
+
+
 echecs = [r for r in resultats if not r[1]]
 print(f"\n{len(resultats) - len(echecs)}/{len(resultats)} verifications reussies")
 sys.exit(1 if echecs else 0)
