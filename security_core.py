@@ -1270,6 +1270,27 @@ def message_complet(contenu, embeds=None):
     return "\n".join(m for m in morceaux if m)
 
 
+def salon_sans_anti_lien(salons_permis, *identifiants):
+    """
+    Vrai si les liens sont permis ici.
+
+    Un serveur a presque toujours un salon ou l'on partage des liens :
+    #partage, #vos-creations, #clips. Sans exception, l'anti-lien y
+    supprime tout, et la reaction est de couper l'anti-lien partout —
+    donc de laisser passer la publicite sur le reste du serveur.
+
+    On accepte le salon, sa categorie, et le salon qui porte un fil :
+    sans cela il suffirait d'ouvrir un fil dans #partage pour retomber
+    sous le filtre, alors que le fil appartient visiblement au salon.
+    Une categorie vaut pour tous ses salons : c'est ce qu'on attend
+    quand on choisit « Créations » plutot que ses onze salons.
+    """
+    permis = {str(x) for x in (salons_permis or []) if str(x or "").strip()}
+    if not permis:
+        return False
+    return any(str(x) in permis for x in identifiants if x)
+
+
 # ════════════════════════════════════════════════════════════════════
 #  9. UTILITAIRES PARTAGES
 # ════════════════════════════════════════════════════════════════════

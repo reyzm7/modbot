@@ -483,5 +483,39 @@ class TestUtilitaires(unittest.TestCase):
         self.assertEqual(sc.human_duration(0), "-")
 
 
+class SalonsSansAntiLien(unittest.TestCase):
+    """
+    Les salons ou les liens restent permis.
+
+    Sans exception, un serveur qui a un salon #partage finit par couper
+    l'anti-lien partout : le filtre doit pouvoir reculer d'un salon
+    plutot que de tout le serveur.
+    """
+
+    def test_sans_liste_rien_nest_permis(self):
+        self.assertFalse(sc.salon_sans_anti_lien([], 111))
+        self.assertFalse(sc.salon_sans_anti_lien(None, 111))
+
+    def test_le_salon_choisi_est_permis(self):
+        self.assertTrue(sc.salon_sans_anti_lien(["111"], 111))
+
+    def test_le_salon_voisin_reste_filtre(self):
+        self.assertFalse(sc.salon_sans_anti_lien(["111"], 222))
+
+    def test_un_fil_herite_de_son_salon(self):
+        # (fil, salon porteur, categorie du porteur)
+        self.assertTrue(sc.salon_sans_anti_lien(["111"], 999, 111, 50))
+
+    def test_une_categorie_vaut_pour_ses_salons(self):
+        self.assertTrue(sc.salon_sans_anti_lien(["50"], 222, None, None, 50))
+
+    def test_un_identifiant_en_nombre_vaut_celui_en_texte(self):
+        self.assertTrue(sc.salon_sans_anti_lien([111], 111))
+
+    def test_les_vides_de_la_liste_ne_permettent_rien(self):
+        self.assertFalse(sc.salon_sans_anti_lien(["", None, "  "], 111))
+        self.assertFalse(sc.salon_sans_anti_lien(["111"], None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

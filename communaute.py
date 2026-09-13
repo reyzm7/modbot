@@ -134,8 +134,100 @@ def rang_de(table, uid):
     return next((l["rang"] for l in tous if l["id"] == str(uid)), None)
 
 
-def message_niveau(nom, niveau):
-    return f"🎉 **{nom}** passe au **niveau {niveau}** !"
+def message_niveau(nom, niveau, gabarit=""):
+    """
+    L'annonce d'une montee de niveau.
+
+    Le serveur peut ecrire la sienne : `{membre}` et `{niveau}` y sont
+    remplaces. Un gabarit vide, ou qui ne parle ni du membre ni du
+    niveau, ne serait pas une annonce — on garde alors la phrase par
+    defaut plutot que d'afficher un texte qui ne dit rien.
+    """
+    gabarit = str(gabarit or "").strip()
+    if gabarit and ("{membre}" in gabarit or "{niveau}" in gabarit):
+        return gabarit.replace("{membre}", str(nom)).replace(
+            "{niveau}", str(niveau))[:400]
+    return f"\N{PARTY POPPER} **{nom}** passe au **niveau {niveau}** !"
+
+
+# ── Les salons qui ne rapportent rien ─────────────────────────────────
+#
+# Un salon de commandes, un salon ou le bot deverse ses journaux, un
+# salon de jeu ou l'on ecrit « . » toute la soiree : y compter
+# l'experience fausse le classement. On exclut le salon, sa categorie
+# et, pour un fil, le salon qui le porte — sinon il suffirait d'ouvrir
+# un fil pour contourner l'exclusion.
+
+def salon_compte(exclus, *identifiants):
+    """Faux si ce salon (ou son parent) est exclu de l'experience."""
+    interdits = {str(x) for x in (exclus or []) if str(x or "").strip()}
+    if not interdits:
+        return True
+    return not any(str(x) in interdits for x in identifiants if x)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §6. Les recompenses de niveau
+# ══════════════════════════════════════════════════════════════════════
+#
+# Un role donne a un palier. Ce que chacun a deja recu n'est pas
+# conserve : on relit la table a chaque montee et on en deduit les roles
+# dus — la premiere regle du fichier vaut aussi ici.
+
+RECOMPENSES_MAX = 20
+
+
+def lire_recompenses(brut):
+    """
+    Nettoie une table de paliers venue du tableau de bord.
+
+    Un seul role par niveau : deux lignes au meme palier, c'est une
+    faute de saisie, et la garder donnerait deux roles a la montee sans
+    que personne comprenne pourquoi. La derniere saisie l'emporte.
+    Le resultat est trie par niveau : c'est l'ordre ou on le lit.
+    """
+    par_niveau = {}
+    for ligne in (brut or [])[:RECOMPENSES_MAX * 4]:
+        if not isinstance(ligne, dict):
+            continue
+        try:
+            niveau = int(str(ligne.get("niveau") or 0).strip())
+        except (TypeError, ValueError):
+            continue
+        role = str(ligne.get("role") or "").strip()
+        if niveau < 1 or niveau > NIVEAU_MAX or not role.isdigit():
+            continue
+        par_niveau[niveau] = role
+    paliers = [{"niveau": n, "role": par_niveau[n]} for n in sorted(par_niveau)]
+    return paliers[:RECOMPENSES_MAX]
+
+
+def recompenses_a_donner(niveau, recompenses, roles_actuels=(), cumul=True):
+    """
+    (a_donner, a_retirer) pour quelqu'un qui vient d'atteindre `niveau`.
+
+    `cumul` vrai — le reglage par defaut : on garde les roles des
+    paliers precedents, chacun reste la trace d'un chemin parcouru.
+    `cumul` faux : un seul rang a la fois, les anciens partent. Un
+    serveur qui affiche « Bronze / Argent / Or » veut ce mode-la, et
+    sans lui les trois roles s'empilent.
+
+    Rien n'est rendu pour un role deja porte : redonner un role ecrit
+    une ligne de plus dans le journal d'audit pour rien.
+    """
+    paliers = lire_recompenses(recompenses)
+    atteints = [p for p in paliers if p["niveau"] <= _points(niveau)]
+    portes = {str(r) for r in (roles_actuels or [])}
+    if not atteints:
+        dus = []
+    elif cumul:
+        dus = list(dict.fromkeys(p["role"] for p in atteints))
+    else:
+        dus = [atteints[-1]["role"]]
+    a_donner = [r for r in dus if r not in portes]
+    tous = {p["role"] for p in paliers}
+    a_retirer = sorted(r for r in portes if r in tous and r not in dus)
+    return a_donner, a_retirer
 
 
 # ══════════════════════════════════════════════════════════════════════

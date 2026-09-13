@@ -1098,6 +1098,34 @@ def status_txt(active):
 def anti_link_enabled(cfg):
     return bool(cfg.get("anti_lien") or cfg.get("anti_invite"))
 
+
+def salons_liens_libres(gid):
+    """Les salons ou l'anti-lien ne s'applique pas."""
+    valeurs = get_cfg(gid).get("salons_liens_libres") or []
+    return [str(x) for x in valeurs if str(x or "").strip()]
+
+
+def lien_permis_ici(cfg, salon):
+    """
+    Vrai si ce salon a le droit aux liens.
+
+    On presente au noyau le salon, le salon qui le porte si c'est un
+    fil, et la categorie : la decision elle-meme est dans
+    security_core, ou elle se verifie sans Discord.
+    """
+    permis = (cfg or {}).get("salons_liens_libres") or []
+    if not permis or salon is None:
+        return False
+    parent = getattr(salon, "parent", None)
+    categorie = getattr(salon, "category_id", None)
+    return sc.salon_sans_anti_lien(
+        permis,
+        getattr(salon, "id", None),
+        getattr(parent, "id", None),
+        getattr(parent, "category_id", None),
+        categorie,
+    )
+
 def contains_forbidden_link(text):
     return bool(text and LINK_RE.search(text))
 
@@ -1193,7 +1221,12 @@ def build_security_embed(guild):
     e.description = "Active ou desactive les protections du serveur." if lang == "fr" else "Enable or disable server protections."
     e.add_field(name="Lockdown", value=status_badge(cfg.get("lockdown"), gid), inline=True)
     e.add_field(name="Anti-Raid", value=status_badge(cfg.get("antiraid"), gid), inline=True)
-    e.add_field(name="Anti-Lien" if lang == "fr" else "Anti-Link", value=status_badge(anti_link_enabled(cfg), gid), inline=True)
+    libres = len(salons_liens_libres(gid))
+    valeur_lien = status_badge(anti_link_enabled(cfg), gid)
+    if anti_link_enabled(cfg) and libres:
+        valeur_lien += (f"\n`{libres}` salon(s) libre(s)" if lang == "fr"
+                        else f"\n`{libres}` free channel(s)")
+    e.add_field(name="Anti-Lien" if lang == "fr" else "Anti-Link", value=valeur_lien, inline=True)
     e.add_field(name="Anti-Spam", value=status_badge(cfg.get("anti_spam"), gid), inline=True)
     e.add_field(name="Staff Alert", value=status_badge(cfg.get("staff_alert_enabled"), gid), inline=True)
     return e
@@ -1432,7 +1465,9 @@ def build_ticket_panel_embed(guild):
     if rules_desc:
         e.add_field(name=f"📌 {rules_title[:240]}", value=rules_desc[:1024], inline=False)
     options = get_ticket_questions(gid)
-    preview = "\n".join(f"• {q.get('emoji', '🎫')} **{q['label']}** — {q['desc']}" for q in options[:6])
+    preview = "\n".join(
+        f"• {symbole_option(q) or q.get('emoji') or '🎫'} **{q['label']}** — {q['desc']}"
+        for q in options[:6])
     if preview:
         label = "Raisons disponibles" if lang == "fr" else "Available reasons"
         e.add_field(name=f"🧭 {label}", value=preview[:1024], inline=False)
@@ -4711,23 +4746,34 @@ async def handle_scam_message(message, detection):
 EMOJI_TICKET_PREFIXE = "modbot_tkt_"
 
 
-async def _telecharger_image(url):
-    """Octets d'une image, depuis une URL ou une donnee en ligne."""
+EMOJI_MAX_OCTETS = 256 * 1024
+
+
+async def _telecharger_image(url, plafond=EMOJI_MAX_OCTETS):
+    """
+    Octets d'une image, depuis une URL ou une donnee en ligne.
+
+    Le plafond est celui de l'usage, pas celui du fichier : un emoji
+    Discord s'arrete a 256 Ko, une piece jointe va bien au-dela. Le
+    chemin « data: » ne mesurait rien : une image de 400 Ko partait
+    vers Discord, qui la refusait, et l'option de ticket restait sans
+    symbole sans que rien ne le dise.
+    """
     if url.startswith("data:image/"):
         import base64
         try:
-            return base64.b64decode(url.split(",", 1)[1])
+            donnees = base64.b64decode(url.split(",", 1)[1])
         except Exception:
             return None
+        return donnees if len(donnees) <= plafond else None
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as reponse:
                 if reponse.status != 200:
                     return None
-                # Discord refuse au-dela de 256 Ko pour un emoji
-                donnees = await reponse.content.read(300 * 1024)
-                return donnees if len(donnees) <= 256 * 1024 else None
+                donnees = await reponse.content.read(plafond + 4096)
+                return donnees if len(donnees) <= plafond else None
     except Exception:
         return None
 
@@ -4867,6 +4913,72 @@ async def preparer_emojis_ticket(guild):
     if change:
         set_ticket_questions(guild.id, questions)
     return questions
+
+
+# Un message Discord porte dix embeds au plus, et le panneau en occupe
+# deja un.
+ILLUSTRATIONS_MAX = 9
+# Ce que Discord accepte en piece jointe sans abonnement au serveur.
+PIECE_JOINTE_MAX = 8 * 1024 * 1024
+
+
+def extension_image(url):
+    """L'extension a donner a la piece jointe, d'apres le type annonce."""
+    tete = str(url or "")[:32].lower()
+    for marque, ext in (("jpeg", "jpg"), ("jpg", "jpg"), ("gif", "gif"),
+                        ("webp", "webp")):
+        if marque in tete:
+            return ext
+    return "png"
+
+
+async def illustrations_ticket(guild, questions):
+    """
+    Le second format du panneau : chaque image dans son propre embed.
+
+    Une image d'option devient normalement un emoji pose sur le bouton
+    (`image_en_emoji`). Cette fabrication peut echouer — image trop
+    lourde pour un emoji, quota d'emojis de l'application atteint,
+    format refuse — et l'option se retrouvait alors sans rien du tout :
+    ni emoji, ni image. C'est le « les images ne marchent pas » qu'on
+    nous rapporte.
+
+    On bascule donc sur un format ou l'image s'affiche pour de bon : un
+    embed par option, sous le message principal. Les images arrivent du
+    tableau de bord en « data: » — aucune adresse publique a donner a
+    Discord — on les joint au message et on les designe par
+    `attachment://`, seule facon d'afficher une image qu'on possede sans
+    l'heberger.
+
+    Retourne (embeds, fichiers). Vide quand tout est deja passe en
+    emoji : le format normal suffit, et neuf embeds de plus sous un
+    panneau qui marche seraient neuf embeds de trop.
+    """
+    embeds, fichiers = [], []
+    if not guild:
+        return embeds, fichiers
+    gid = str(guild.id)
+    lang = get_lang(gid)
+    for index, q in enumerate(questions or []):
+        if len(embeds) >= ILLUSTRATIONS_MAX:
+            break
+        image = q.get("image")
+        if not image or q.get("emoji_image"):
+            continue
+        titre = q.get("label") or (f"Option {index + 1}" if lang == "fr"
+                                   else f"Option {index + 1}")
+        e = EG(titre[:256], (q.get("desc") or "")[:2048], gid=gid)
+        if str(image).startswith("data:image/"):
+            donnees = await _telecharger_image(image, PIECE_JOINTE_MAX)
+            if not donnees:
+                continue
+            nom = f"ticket-option-{index + 1}.{extension_image(image)}"
+            fichiers.append(discord.File(io.BytesIO(donnees), filename=nom))
+            e.set_thumbnail(url=f"attachment://{nom}")
+        else:
+            e.set_thumbnail(url=str(image))
+        embeds.append(e)
+    return embeds, fichiers
 
 
 def ticket_panel_en_boutons(questions):
@@ -5268,7 +5380,9 @@ async def deploy_fresh_ticket_panel(guild, channel):
     gid = str(guild.id)
     # Les images des options deviennent des emoji du serveur ici, une fois,
     # et non a chaque affichage : creer un emoji est une ecriture.
-    await preparer_emojis_ticket(guild)
+    questions = await preparer_emojis_ticket(guild)
+    # Ce qui n'a pas pu devenir un emoji s'affiche en embed.
+    illustrations, fichiers = await illustrations_ticket(guild, questions)
     await delete_system_message(guild, "salon_tickets", "status")
     cfg = get_cfg(gid)
     old_msg_id = cfg.get("salon_tickets_panel_message_id")
@@ -5281,7 +5395,9 @@ async def deploy_fresh_ticket_panel(guild, channel):
         except Exception:
             pass
     await cleanup_system_messages(guild, channel, "salon_tickets", keep_id=None, preserve_newest=False)
-    msg = await channel.send(embed=build_ticket_panel_embed(guild), view=VueChoixCategorie(gid))
+    msg = await channel.send(
+        embeds=[build_ticket_panel_embed(guild)] + illustrations,
+        files=fichiers, view=VueChoixCategorie(gid))
     update_cfg(guild.id, "salon_tickets_panel_message_id", msg.id)
     update_cfg(guild.id, "salon_tickets_panel_channel_id", channel.id)
     return msg
@@ -6244,6 +6360,7 @@ def serialize_dashboard_config(guild):
         },
         "security": {
             "antilink": anti_link_enabled(cfg),
+            "antilink_channels": salons_liens_libres(gid),
             "insultes_enabled": cfg.get("insultes_enabled", True),
             "antispam": bool(cfg.get("anti_spam")),
             "antiraid": bool(cfg.get("antiraid")),
@@ -6275,6 +6392,10 @@ def serialize_dashboard_config(guild):
         "communaute": {
             "xp": bool(cfg.get("xp_enabled")),
             "xp_salon": str(cfg.get("xp_salon") or ""),
+            "xp_message": cfg.get("xp_message") or "",
+            "xp_salons_exclus": [str(x) for x in (cfg.get("xp_salons_exclus") or [])],
+            "recompenses": cm.lire_recompenses(cfg.get("xp_recompenses")),
+            "recompenses_cumul": cfg.get("xp_recompenses_cumul", True) is not False,
             "anniv_salon": str(cfg.get("anniv_salon") or ""),
             "mur_salon": str(cfg.get("mur_salon") or ""),
             "mur_seuil": cm.lire_seuil(cfg.get("mur_seuil")),
@@ -6396,6 +6517,28 @@ async def apply_dashboard_config(guild, payload):
     if isinstance(vie, dict):
         cfg["xp_enabled"] = bool(vie.get("xp"))
         cfg["mur_seuil"] = cm.lire_seuil(vie.get("mur_seuil"))
+        if "xp_message" in vie:
+            cfg["xp_message"] = clean_short_text(vie.get("xp_message"), "", 400)
+        if "recompenses_cumul" in vie:
+            cfg["xp_recompenses_cumul"] = bool(vie.get("recompenses_cumul"))
+        if isinstance(vie.get("recompenses"), list):
+            # Un role d'un autre serveur n'a rien a faire ici : le
+            # navigateur garde parfois la liste du serveur precedent.
+            propres = []
+            for ligne in vie["recompenses"]:
+                if not isinstance(ligne, dict):
+                    continue
+                role = guild.get_role(parse_int(ligne.get("role")) or 0)
+                if role:
+                    propres.append({"niveau": ligne.get("niveau"), "role": str(role.id)})
+            cfg["xp_recompenses"] = cm.lire_recompenses(propres)
+        if isinstance(vie.get("xp_salons_exclus"), list):
+            exclus = []
+            for brut in vie["xp_salons_exclus"][:40]:
+                parsed = id_salon_du_serveur(guild, brut)
+                if parsed and str(parsed) not in exclus:
+                    exclus.append(str(parsed))
+            cfg["xp_salons_exclus"] = exclus
         for clef in ("xp_salon", "anniv_salon", "mur_salon"):
             parsed = id_salon_du_serveur(guild, vie.get(clef))
             if parsed:
@@ -6455,6 +6598,15 @@ async def apply_dashboard_config(guild, payload):
     if "antilink" in security:
         cfg["anti_lien"] = bool(security.get("antilink"))
         cfg["anti_invite"] = bool(security.get("antilink"))
+    if isinstance(security.get("antilink_channels"), list):
+        libres = []
+        for brut in security["antilink_channels"][:40]:
+            parsed = id_salon_du_serveur(guild, brut)
+            if parsed and str(parsed) not in libres:
+                libres.append(str(parsed))
+            elif not parsed and str(brut or "").strip():
+                print(f"config {guild.id}: salon libre {brut} refuse (autre serveur)")
+        cfg["salons_liens_libres"] = libres
     if "insultes_enabled" in security:
         cfg["insultes_enabled"] = bool(security.get("insultes_enabled"))
     if "antispam" in security:
@@ -19071,6 +19223,14 @@ async def gagner_experience(message):
     cfg = get_cfg(gid)
     if not cfg.get("xp_enabled"):
         return
+    ecrit = message.channel
+    porteur = getattr(ecrit, "parent", None)
+    if not cm.salon_compte(cfg.get("xp_salons_exclus"),
+                           getattr(ecrit, "id", None),
+                           getattr(ecrit, "category_id", None),
+                           getattr(porteur, "id", None),
+                           getattr(porteur, "category_id", None)):
+        return
     uid = str(message.author.id)
     table = xp_du_serveur(gid)
     fiche, monte = cm.gagner(table.get(uid), now(), random.randint(cm.XP_MIN, cm.XP_MAX))
@@ -19079,11 +19239,74 @@ async def gagner_experience(message):
     xp_ecrire(gid, uid, fiche)
     if monte is None:
         return
+    await donner_recompenses_niveau(message.author, monte)
     salon = salon_du_serveur(message.guild, cfg.get("xp_salon")) or message.channel
     try:
-        await salon.send(cm.message_niveau(message.author.mention, monte))
+        await salon.send(cm.message_niveau(message.author.mention, monte,
+                                           cfg.get("xp_message")))
     except Exception as erreur:
         print(f"xp: annonce de niveau impossible ({gid}) : {erreur}")
+
+
+async def donner_recompenses_niveau(membre, niveau):
+    """
+    Les roles dus a un palier atteint.
+
+    Rien n'est retenu de ce qui a deja ete donne : la table des paliers
+    et les roles portes suffisent a le deduire (communaute.py). Un
+    serveur qui deplace un palier corrige donc le passe tout seul, a la
+    montee suivante.
+
+    Un echec est journalise plutot que tu : « j'ai atteint le niveau 10
+    et je n'ai rien eu » est autrement plus difficile a diagnostiquer
+    qu'une ligne dans le journal des roles.
+    """
+    guild = getattr(membre, "guild", None)
+    if guild is None:
+        return
+    cfg = get_cfg(guild.id)
+    paliers = cfg.get("xp_recompenses") or []
+    if not paliers:
+        return
+    a_donner, a_retirer = cm.recompenses_a_donner(
+        niveau, paliers,
+        [r.id for r in getattr(membre, "roles", [])],
+        cumul=cfg.get("xp_recompenses_cumul", True) is not False)
+    if not a_donner and not a_retirer:
+        return
+    if not guild.me.guild_permissions.manage_roles:
+        return await log_event(
+            guild, "roles", "Recompense de niveau impossible",
+            f"{membre.mention} atteint le **niveau {niveau}**, mais ModBot "
+            "n'a pas la permission **Gerer les roles**.",
+            severity="warning", target=membre)
+    roles, refus = trier_auto_roles(guild, a_donner)
+    partants, _ = trier_auto_roles(guild, a_retirer)
+    donnes = []
+    if roles:
+        try:
+            await membre.add_roles(*roles, reason=f"[ModBot] Niveau {niveau}")
+            donnes = roles
+        except Exception as ex:
+            refus.append(f"echec ({type(ex).__name__})")
+    if partants:
+        try:
+            await membre.remove_roles(*partants, reason=f"[ModBot] Niveau {niveau}")
+        except Exception as ex:
+            refus.append(f"retrait impossible ({type(ex).__name__})")
+    if not donnes and not refus:
+        return
+    lignes = []
+    if donnes:
+        lignes.append("Donne : " + ", ".join(r.mention for r in donnes))
+    if partants:
+        lignes.append("Retire : " + ", ".join(r.mention for r in partants))
+    if refus:
+        lignes.append("Refuse : " + ", ".join(refus))
+    await log_event(
+        guild, "roles", f"Recompense de niveau {niveau}",
+        f"{membre.mention}\n" + "\n".join(lignes),
+        severity="warning" if refus else "info", target=membre)
 
 
 @bot.tree.command(name="niveau", description="📈 Voir son niveau, ou celui de quelqu'un")
@@ -19593,7 +19816,9 @@ async def on_message(message):
 
         # Anti-lien. Il lit desormais les embeds : la publicite qui est
         # passee ne mettait presque rien dans le corps du message.
-        if anti_link_enabled(cfg) and contains_forbidden_link(texte_complet_message(message)):
+        if (anti_link_enabled(cfg)
+                and not lien_permis_ici(cfg, message.channel)
+                and contains_forbidden_link(texte_complet_message(message))):
             if not immunise and not message.author.guild_permissions.manage_messages:
                 if not await claim_message_by_delete(message):
                     return

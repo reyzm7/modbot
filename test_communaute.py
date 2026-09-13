@@ -202,6 +202,82 @@ verifier("la barre garde toujours la meme largeur",
          cm.barre_de_vote(change))
 
 
+# ══════════════════════════════════════════════════════════════════════
+print("--- L'annonce de montee de niveau ---")
+
+verifier("sans gabarit, la phrase par defaut",
+         "niveau 4" in cm.message_niveau("@moi", 4))
+verifier("un gabarit remplace les deux marques",
+         cm.message_niveau("@moi", 4, "Bravo {membre}, niveau {niveau} !")
+         == "Bravo @moi, niveau 4 !")
+verifier("un gabarit qui ne parle de rien est ignore",
+         "niveau 4" in cm.message_niveau("@moi", 4, "Bien joue."),
+         cm.message_niveau("@moi", 4, "Bien joue."))
+verifier("un gabarit vide est ignore",
+         cm.message_niveau("@moi", 4, "   ") == cm.message_niveau("@moi", 4))
+verifier("une annonce ne depasse pas 400 caracteres",
+         len(cm.message_niveau("@moi", 4, "{membre} " + "a" * 900)) <= 400)
+
+
+# ══════════════════════════════════════════════════════════════════════
+print("--- Les salons qui ne rapportent pas d'experience ---")
+
+verifier("sans exclusion, tout salon compte", cm.salon_compte([], 111))
+verifier("sans exclusion (None), tout salon compte", cm.salon_compte(None, 111))
+verifier("un salon exclu ne compte pas", not cm.salon_compte(["111"], 111))
+verifier("un salon voisin compte toujours", cm.salon_compte(["111"], 222))
+verifier("le fil d'un salon exclu ne compte pas",
+         not cm.salon_compte(["111"], 999, None, 111))
+verifier("la categorie exclue emporte ses salons",
+         not cm.salon_compte(["50"], 222, 50))
+verifier("un identifiant en nombre vaut un identifiant en texte",
+         not cm.salon_compte([111], 111))
+
+
+# ══════════════════════════════════════════════════════════════════════
+print("--- Les recompenses de niveau ---")
+
+table = [{"niveau": 10, "role": "200"}, {"niveau": 5, "role": "100"}]
+verifier("la table se trie par palier",
+         [p["niveau"] for p in cm.lire_recompenses(table)] == [5, 10])
+verifier("deux roles au meme palier : le dernier gagne",
+         cm.lire_recompenses([{"niveau": 5, "role": "100"},
+                              {"niveau": 5, "role": "999"}])
+         == [{"niveau": 5, "role": "999"}])
+verifier("un niveau zero est refuse", cm.lire_recompenses([{"niveau": 0, "role": "1"}]) == [])
+verifier("un role qui n'est pas un identifiant est refuse",
+         cm.lire_recompenses([{"niveau": 5, "role": "@Bronze"}]) == [])
+verifier("au-dela du niveau maximum, refuse",
+         cm.lire_recompenses([{"niveau": cm.NIVEAU_MAX + 1, "role": "1"}]) == [])
+verifier("une ligne qui n'est pas un objet est ignoree",
+         cm.lire_recompenses(["5:100", None, {"niveau": 5, "role": "100"}])
+         == [{"niveau": 5, "role": "100"}])
+verifier("la table s'arrete au plafond",
+         len(cm.lire_recompenses([{"niveau": n, "role": str(n)}
+                                  for n in range(1, 60)])) == cm.RECOMPENSES_MAX)
+
+donner, retirer = cm.recompenses_a_donner(4, table)
+verifier("sous le premier palier, rien n'est du", (donner, retirer) == ([], []))
+donner, retirer = cm.recompenses_a_donner(5, table)
+verifier("au palier, le role est du", donner == ["100"], str(donner))
+donner, retirer = cm.recompenses_a_donner(12, table)
+verifier("en cumul, tous les paliers atteints",
+         donner == ["100", "200"], str(donner))
+verifier("en cumul, rien n'est retire", retirer == [])
+donner, retirer = cm.recompenses_a_donner(12, table, roles_actuels=["100"])
+verifier("un role deja porte n'est pas redonne", donner == ["200"], str(donner))
+donner, retirer = cm.recompenses_a_donner(12, table, cumul=False)
+verifier("sans cumul, seul le dernier palier", donner == ["200"], str(donner))
+donner, retirer = cm.recompenses_a_donner(12, table, roles_actuels=["100"], cumul=False)
+verifier("sans cumul, l'ancien rang part", retirer == ["100"], str(retirer))
+donner, retirer = cm.recompenses_a_donner(12, table, roles_actuels=["777"], cumul=False)
+verifier("un role etranger a la table n'est jamais retire",
+         retirer == [], str(retirer))
+donner, retirer = cm.recompenses_a_donner(3, table, roles_actuels=["100", "200"])
+verifier("un palier deplace vers le haut reprend ses roles",
+         retirer == ["100", "200"], str(retirer))
+
+
 echecs = [r for r in resultats if not r[1]]
 print(f"\n{len(resultats) - len(echecs)}/{len(resultats)} verifications reussies")
 sys.exit(1 if echecs else 0)

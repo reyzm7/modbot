@@ -218,6 +218,72 @@ else:
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  5. Quand l'emoji echoue, l'image s'affiche quand meme
+# ══════════════════════════════════════════════════════════════════════
+#
+# Une image trop lourde pour un emoji (256 Ko) partait quand meme vers
+# Discord, qui la refusait, et l'option restait sans symbole. Le panneau
+# bascule desormais sur un second format : un embed par image.
+print("\n--- Le second format du panneau ---")
+
+# 400 Ko : accepte en piece jointe, refuse comme emoji.
+LOURDE = "data:image/jpeg;base64," + ("A" * (400 * 1024 * 4 // 3 // 4 * 4))
+
+verifier("une image trop lourde n'est pas proposee comme emoji",
+         asyncio.run(bot_mod._telecharger_image(LOURDE)) is None)
+verifier("la meme passe en piece jointe",
+         asyncio.run(bot_mod._telecharger_image(
+             LOURDE, bot_mod.PIECE_JOINTE_MAX)) is not None)
+verifier("une image legere reste un emoji possible",
+         asyncio.run(bot_mod._telecharger_image(IMAGE)) is not None)
+verifier("l'extension suit le type annonce",
+         bot_mod.extension_image(LOURDE) == "jpg"
+         and bot_mod.extension_image(IMAGE) == "png",
+         bot_mod.extension_image(LOURDE))
+
+embeds, fichiers = asyncio.run(bot_mod.illustrations_ticket(GUILD, [
+    {"label": "Aide", "desc": "Un souci", "image": IMAGE},
+]))
+verifier("une option en image obtient son embed", len(embeds) == 1, str(len(embeds)))
+verifier("et la piece jointe qui va avec", len(fichiers) == 1)
+verifier("l'embed designe la piece jointe, pas une adresse data:",
+         embeds and embeds[0].thumbnail.url == "attachment://ticket-option-1.png",
+         embeds[0].thumbnail.url if embeds else "")
+verifier("l'embed porte le libelle de l'option",
+         embeds and embeds[0].title == "Aide", embeds[0].title if embeds else "")
+
+embeds, fichiers = asyncio.run(bot_mod.illustrations_ticket(GUILD, [
+    {"label": "Aide", "image": IMAGE, "emoji_image": EMOJI_GENERE},
+]))
+verifier("une image deja passee en emoji ne refait pas d'embed",
+         (embeds, fichiers) == ([], []))
+
+embeds, fichiers = asyncio.run(bot_mod.illustrations_ticket(GUILD, [
+    {"label": "Aide", "emoji": "🎫"},
+]))
+verifier("une option sans image ne fait pas d'embed", embeds == [])
+
+embeds, fichiers = asyncio.run(bot_mod.illustrations_ticket(GUILD, [
+    {"label": "Site", "image": "https://exemple.test/a.png"},
+]))
+verifier("une image deja en ligne n'a pas besoin de piece jointe",
+         len(embeds) == 1 and fichiers == []
+         and embeds[0].thumbnail.url == "https://exemple.test/a.png")
+
+embeds, fichiers = asyncio.run(bot_mod.illustrations_ticket(GUILD, [
+    {"label": f"Option {n}", "image": IMAGE} for n in range(15)]))
+verifier("un message Discord ne porte pas plus de dix embeds",
+         len(embeds) == bot_mod.ILLUSTRATIONS_MAX and len(fichiers) <= 10,
+         str(len(embeds)))
+
+# La liste des raisons du panneau montre le symbole reel de l'option.
+option_image = bot_mod.normalize_ticket_question(
+    {"image": IMAGE, "emoji_image": EMOJI_GENERE, "label": "Aide"})
+verifier("la liste des raisons montre l'emoji fabrique, pas le ticket par defaut",
+         bot_mod.symbole_option(option_image) == EMOJI_GENERE)
+
+
+# ══════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 62)
 rates = [nom for nom, ok, _ in resultats if not ok]
 if rates:
