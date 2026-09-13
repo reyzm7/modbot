@@ -1099,32 +1099,49 @@ def anti_link_enabled(cfg):
     return bool(cfg.get("anti_lien") or cfg.get("anti_invite"))
 
 
-def salons_liens_libres(gid):
-    """Les salons ou l'anti-lien ne s'applique pas."""
-    valeurs = get_cfg(gid).get("salons_liens_libres") or []
+# Les trois filtres automatiques qui peuvent reculer d'un salon, et la
+# clef ou chacun garde sa liste. Trois listes separees et non une : un
+# salon de partage de liens n'est pas un salon ou l'on s'insulte.
+SALONS_EXEMPTS = {
+    "lien": "salons_liens_libres",
+    "spam": "salons_spam_libres",
+    "filtre": "salons_filtre_libres",
+}
+
+
+def salons_exempts(gid, quoi):
+    """Les salons ou ce filtre-la ne s'applique pas."""
+    valeurs = get_cfg(gid).get(SALONS_EXEMPTS[quoi]) or []
     return [str(x) for x in valeurs if str(x or "").strip()]
 
 
-def lien_permis_ici(cfg, salon):
+def salons_liens_libres(gid):
+    return salons_exempts(gid, "lien")
+
+
+def exempte_ici(cfg, salon, quoi):
     """
-    Vrai si ce salon a le droit aux liens.
+    Vrai si ce salon echappe a ce filtre.
 
     On presente au noyau le salon, le salon qui le porte si c'est un
     fil, et la categorie : la decision elle-meme est dans
     security_core, ou elle se verifie sans Discord.
     """
-    permis = (cfg or {}).get("salons_liens_libres") or []
+    permis = (cfg or {}).get(SALONS_EXEMPTS[quoi]) or []
     if not permis or salon is None:
         return False
     parent = getattr(salon, "parent", None)
-    categorie = getattr(salon, "category_id", None)
-    return sc.salon_sans_anti_lien(
+    return sc.salon_exempte(
         permis,
         getattr(salon, "id", None),
         getattr(parent, "id", None),
         getattr(parent, "category_id", None),
-        categorie,
+        getattr(salon, "category_id", None),
     )
+
+
+def lien_permis_ici(cfg, salon):
+    return exempte_ici(cfg, salon, "lien")
 
 def contains_forbidden_link(text):
     return bool(text and LINK_RE.search(text))
@@ -1221,12 +1238,18 @@ def build_security_embed(guild):
     e.description = "Active ou desactive les protections du serveur." if lang == "fr" else "Enable or disable server protections."
     e.add_field(name="Lockdown", value=status_badge(cfg.get("lockdown"), gid), inline=True)
     e.add_field(name="Anti-Raid", value=status_badge(cfg.get("antiraid"), gid), inline=True)
-    libres = len(salons_liens_libres(gid))
-    valeur_lien = status_badge(anti_link_enabled(cfg), gid)
-    if anti_link_enabled(cfg) and libres:
-        valeur_lien += (f"\n`{libres}` salon(s) libre(s)" if lang == "fr"
-                        else f"\n`{libres}` free channel(s)")
-    e.add_field(name="Anti-Lien" if lang == "fr" else "Anti-Link", value=valeur_lien, inline=True)
+    def avec_exempts(valeur, quoi):
+        # Un reglage invisible se termine toujours par « le bot ne
+        # marche pas » : le panneau dit combien de salons echappent.
+        combien = len(salons_exempts(gid, quoi))
+        if not combien:
+            return valeur
+        return valeur + (f"\n`{combien}` salon(s) libre(s)" if lang == "fr"
+                         else f"\n`{combien}` free channel(s)")
+
+    e.add_field(name="Anti-Lien" if lang == "fr" else "Anti-Link",
+                value=avec_exempts(status_badge(anti_link_enabled(cfg), gid), "lien"),
+                inline=True)
     e.add_field(name="Anti-Spam", value=status_badge(cfg.get("anti_spam"), gid), inline=True)
     e.add_field(name="Staff Alert", value=status_badge(cfg.get("staff_alert_enabled"), gid), inline=True)
     return e
@@ -6366,7 +6389,9 @@ def serialize_dashboard_config(guild):
         },
         "security": {
             "antilink": anti_link_enabled(cfg),
-            "antilink_channels": salons_liens_libres(gid),
+            "antilink_channels": salons_exempts(gid, "lien"),
+            "antispam_channels": salons_exempts(gid, "spam"),
+            "filtre_channels": salons_exempts(gid, "filtre"),
             "insultes_enabled": cfg.get("insultes_enabled", True),
             "antispam": bool(cfg.get("anti_spam")),
             "antiraid": bool(cfg.get("antiraid")),
@@ -6604,15 +6629,22 @@ async def apply_dashboard_config(guild, payload):
     if "antilink" in security:
         cfg["anti_lien"] = bool(security.get("antilink"))
         cfg["anti_invite"] = bool(security.get("antilink"))
-    if isinstance(security.get("antilink_channels"), list):
+    # Les salons ou chaque filtre recule. Un salon d'un AUTRE serveur
+    # est refuse ici comme ailleurs : le navigateur garde parfois les
+    # listes du serveur precedent.
+    for champ, quoi in (("antilink_channels", "lien"),
+                        ("antispam_channels", "spam"),
+                        ("filtre_channels", "filtre")):
+        if not isinstance(security.get(champ), list):
+            continue
         libres = []
-        for brut in security["antilink_channels"][:40]:
+        for brut in security[champ][:40]:
             parsed = id_salon_du_serveur(guild, brut)
             if parsed and str(parsed) not in libres:
                 libres.append(str(parsed))
             elif not parsed and str(brut or "").strip():
                 print(f"config {guild.id}: salon libre {brut} refuse (autre serveur)")
-        cfg["salons_liens_libres"] = libres
+        cfg[SALONS_EXEMPTS[quoi]] = libres
     if "insultes_enabled" in security:
         cfg["insultes_enabled"] = bool(security.get("insultes_enabled"))
     if "antispam" in security:
@@ -9417,7 +9449,11 @@ async def api_boutique_offres(request):
     """Le catalogue, et si la caisse est ouverte. Aucune donnee nominative."""
     return api_json({"ok": True, "articles": bq.catalogue_public(),
                      "options": bq.options_publiques(),
+                     "hebergement": bq.hebergement_public(),
+                     # « abonnement » au singulier reste : une page du
+                     # site encore en cache le lit.
                      "abonnement": bq.abonnement_public(),
+                     "abonnements": bq.abonnements_publics(),
                      "checkout_available": bool(STRIPE_SECRET_KEY)}, request=request)
 
 
@@ -9710,6 +9746,9 @@ def embed_commande(fiche):
                     value=bq.LIBELLES_MOYENS.get(fiche.get("moyen"), fiche.get("moyen") or "?"),
                     inline=True)
     embed.add_field(name="E-mail", value=fiche.get("email") or "—", inline=True)
+    embed.add_field(name="Hébergement",
+                    value=bq.libelle_hebergement(fiche.get("hebergement")),
+                    inline=True)
     if fiche.get("devis"):
         embed.add_field(name="Devis", value=f"`{fiche['devis']}`", inline=True)
     embed.add_field(name="Projet", value=(fiche.get("projet") or "—")[:1024], inline=False)
@@ -10495,7 +10534,7 @@ def abonnements_tout():
 
 def abonnement_ecrire(fiche):
     donnees = dict(abonnements_tout())
-    donnees[fiche["discord_id"]] = fiche
+    donnees[bq.cle_abonnement(fiche["discord_id"], fiche.get("produit"))] = fiche
     jsave(F_ABONNEMENTS, donnees)
     return fiche
 
@@ -10512,7 +10551,7 @@ def abonnement_par_stripe(identifiant):
 
 async def api_boutique_abonnement(request):
     """
-    Ouvre la page de paiement de l'abonnement maintenance.
+    Ouvre la page de paiement d'un abonnement : maintenance, ou hebergement.
 
     Il faut etre connecte avec Discord : un abonnement qui revient chaque
     mois doit savoir a qui ecrire, et un pseudo tape a la main ne suffit
@@ -10522,12 +10561,19 @@ async def api_boutique_abonnement(request):
     contact = bq.contact_depuis_identite(identite)
     if contact is None:
         raise web.HTTPUnauthorized(text="Connecte-toi avec Discord d'abord.")
-    deja = abonnements_tout().get(contact["valeur"])
+    try:
+        corps_recu = await request.json()
+    except Exception:
+        corps_recu = {}
+    produit = bq.lire_produit_abonnement((corps_recu or {}).get("produit"))
+    offre = bq.ABONNEMENTS[produit]
+    cle = bq.cle_abonnement(contact["valeur"], produit)
+    deja = abonnements_tout().get(cle)
     if deja and bq.abonnement_actif(deja, now()) and not deja.get("resilie"):
-        raise web.HTTPConflict(text="Ton abonnement maintenance est déjà actif.")
+        raise web.HTTPConflict(
+            text=f"Ton abonnement {offre['equipe']} est déjà actif.")
 
     site = site_racine()
-    offre = bq.ABONNEMENT
     donnees = {
         "mode": "subscription",
         "line_items[0][quantity]": "1",
@@ -10541,14 +10587,16 @@ async def api_boutique_abonnement(request):
         "client_reference_id": contact["valeur"],
         "metadata[type]": "boutique_abonnement",
         "metadata[discord]": contact["valeur"],
+        "metadata[produit]": produit,
         "subscription_data[metadata][type]": "boutique_abonnement",
         "subscription_data[metadata][discord]": contact["valeur"],
+        "subscription_data[metadata][produit]": produit,
     }
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         corps = await stripe_appel(session, "POST", "/checkout/sessions", donnees)
     fiche = bq.nouvel_abonnement(contact["valeur"], contact, now().isoformat(),
-                                 str(corps.get("id") or ""))
+                                 str(corps.get("id") or ""), produit)
     abonnement_ecrire(fiche)
     return api_json({"ok": True, "url": corps.get("url", "")}, request=request)
 
@@ -10559,8 +10607,11 @@ async def boutique_abonnement_paye(session_stripe):
     uid = str(meta.get("discord") or "")
     if not uid.isdigit():
         return None
-    fiche = abonnements_tout().get(uid) or bq.nouvel_abonnement(
-        uid, {"type": "id", "valeur": uid}, now().isoformat())
+    produit = bq.lire_produit_abonnement(meta.get("produit"))
+    cle = bq.cle_abonnement(uid, produit)
+    fiche = abonnements_tout().get(cle) or bq.nouvel_abonnement(
+        uid, {"type": "id", "valeur": uid}, now().isoformat(), produit=produit)
+    fiche.setdefault("produit", produit)
     fiche.update(statut="actif", resilie=False,
                  abonnement=str(session_stripe.get("subscription") or ""),
                  client=str(session_stripe.get("customer") or ""),
@@ -10569,9 +10620,10 @@ async def boutique_abonnement_paye(session_stripe):
     abonnement_ecrire(fiche)
     titre, texte = bq.message_abonnement(fiche, True)
     await ecrire_au_client(fiche, titre, texte, 0x43B581)
-    await alerter_equipe("Un abonnement maintenance de plus",
-                         f"<@{uid}> vient de souscrire la maintenance "
-                         f"({bq.formater_prix(bq.ABONNEMENT['prix'])} par mois).",
+    offre = bq.ABONNEMENTS[produit]
+    await alerter_equipe(f"Un abonnement {offre['equipe']} de plus",
+                         f"<@{uid}> vient de souscrire {offre['equipe']} "
+                         f"({bq.formater_prix(offre['prix'])} par mois).",
                          0x43B581)
     return fiche
 
@@ -10591,7 +10643,8 @@ async def boutique_abonnement_change(objet, evenement):
     abonnement_ecrire(fiche)
     titre, texte = bq.message_abonnement(fiche, False)
     await ecrire_au_client(fiche, titre, texte, 0x747F8D)
-    await alerter_equipe("Un abonnement maintenance arrêté",
+    offre = bq.ABONNEMENTS[bq.lire_produit_abonnement(fiche.get("produit"))]
+    await alerter_equipe(f"Un abonnement {offre['equipe']} arrêté",
                          f"<@{fiche.get('discord_id')}> ne sera plus prélevé. "
                          "Le mois déjà payé reste servi.", 0xFAA61A)
     return fiche
@@ -19840,8 +19893,11 @@ async def on_message(message):
                 await send_log(message.guild, le)
                 return
 
-        # Anti-spam
-        if is_spamming(uid, gid) and not message.author.guild_permissions.manage_messages and not immunise:
+        # Anti-spam. Un salon de memes ou de flood vit de messages
+        # rapides : l'y sanctionner fait couper l'anti-spam partout.
+        if (is_spamming(uid, gid) and not immunise
+                and not exempte_ici(cfg, message.channel, "spam")
+                and not message.author.guild_permissions.manage_messages):
             if not await claim_message_by_delete(message):
                 return
             nb = add_avert(uid, gid, "[Anti-Spam] Messages trop rapides")
@@ -19858,8 +19914,11 @@ async def on_message(message):
         # Filtre de langage — moteur anti-contournement (security_core)
         # Detecte "s a l o p e", "s@l0pe", "s.a.l.o.p.e", zalgo, cyrillique...
         # tout en evitant les faux positifs ("dispute", "salon", "calcul").
+        # Le filtre de langage recule lui aussi d'un salon : un salon
+        # entre adultes prevenus, ou un salon de jeux de mots, n'a pas a
+        # couter le filtre sur tout le reste du serveur.
         detection = detect_message_content(message, gid)
-        if detection and not immunise:
+        if detection and not immunise and not exempte_ici(cfg, message.channel, "filtre"):
             await handle_bad_word(message, detection)
             return
 

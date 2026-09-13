@@ -192,6 +192,7 @@ def valider_commande(donnees, contact=None):
         return None, "Il faut accepter les conditions de la boutique."
     return {"article": clef, "moyen": moyen,
             "projet": nettoyer_projet(donnees.get("projet")),
+            "hebergement": lire_hebergement(donnees.get("hebergement")),
             "options": lire_options(donnees.get("options"), ARTICLES[clef]["categorie"]),
             "code_promo": nettoyer_code(donnees.get("promo")),
             **_champs_contact(contact)}, None
@@ -237,6 +238,11 @@ def nouvelle_commande(numero, commande, maintenant_iso, promo=None):
         "montant": remise_promo(promo, brut) if promo else brut,
         "montant_brut": brut,
         "options": options,
+        # L'hebergement mensuel ne s'ajoute PAS au paiement d'aujourd'hui :
+        # il se preleve a partir de la livraison, et melanger un
+        # abonnement a un achat unique ferait payer douze mois d'avance a
+        # quelqu'un qui n'a encore rien recu.
+        "hebergement": lire_hebergement(commande.get("hebergement")),
         "promo": str((promo or {}).get("code") or ""),
         "devise": DEVISE,
         "moyen": commande["moyen"],
@@ -271,6 +277,8 @@ def metadonnees_stripe(numero, commande):
         meta["devis"] = commande["devis"]
     if commande.get("options"):
         meta["options"] = ",".join(commande["options"])[:400]
+    if commande.get("hebergement"):
+        meta["hebergement"] = str(commande["hebergement"])[:20]
     promo = commande.get("promo") or commande.get("code_promo")
     if promo:
         meta["promo"] = str(promo)[:40]
@@ -295,6 +303,7 @@ def commande_depuis_stripe(numero, meta, maintenant_iso):
     return {
         "numero": numero,
         "options": options,
+        "hebergement": lire_hebergement(meta.get("hebergement")),
         "promo": str(meta.get("promo") or "")[:40],
         "article": clef,
         "libelle": article.get("libelle") or ("Création sur mesure" if devis else clef or "?"),
@@ -414,12 +423,38 @@ def libelle_statut(fiche):
     return LIBELLES_STATUTS.get(statut, str(statut or "?"))
 
 
+def _phrase_hebergement(fiche, livree=False):
+    """
+    Ce qu'on dit au client de son hebergement, ou rien.
+
+    Le choix « chez nous » ne se preleve pas le jour de la commande : il
+    demarre a la livraison. Le dire deux fois — a la commande et a la
+    livraison — vaut mieux qu'un abonnement qui apparait sans prevenir,
+    ou qu'une creation qui s'eteint parce que personne n'y a pense.
+    """
+    if lire_hebergement(fiche.get("hebergement")) != "modbot":
+        if livree:
+            return ("\n\nTu héberges toi-même : les fichiers, les identifiants et "
+                    "la marche à suivre sont dans la livraison.")
+        return ""
+    offre = HEBERGEMENT["modbot"]
+    prix = f"{formater_prix(offre['prix'])} {offre['periode']}"
+    if livree:
+        return ("\n\n**Ton hébergement** : active-le sur la boutique pour qu'on mette "
+                f"ta création en ligne et qu'elle y reste ({prix}). Rien n'est "
+                "prélevé tant que tu ne l'as pas fait.")
+    return (f"\n\nTu as choisi qu'on héberge ta création ({prix}). Ce n'est **pas** "
+            "compris dans le paiement d'aujourd'hui : l'abonnement démarre à la "
+            "livraison, et tu l'actives toi-même à ce moment-là.")
+
+
 def message_paiement_recu(fiche):
     return {
         "titre": "✅ Commande reçue",
         "texte": (f"Merci ! Ta commande **{fiche.get('libelle')}** "
                   f"(`{fiche.get('numero')}`) est payée.\n"
-                  "On te contacte ici, sur Discord, sous 24 h pour parler de ton projet."),
+                  "On te contacte ici, sur Discord, sous 24 h pour parler de ton projet."
+                  + _phrase_hebergement(fiche)),
     }
 
 
@@ -448,7 +483,8 @@ def message_statut(fiche):
         return {"titre": "✅ Ta commande est livrée",
                 "texte": (f"Ta commande **{libelle}** (`{numero}`) est livrée ! Besoin "
                           "d'aide pour l'installer ou la découvrir ? Fais une demande "
-                          "d'assistance sur la boutique, en rappelant ce numéro.")}
+                          "d'assistance sur la boutique, en rappelant ce numéro."
+                          + _phrase_hebergement(fiche, livree=True))}
     return {"titre": "Ta commande", "texte": f"Ta commande `{numero}` a changé de statut."}
 
 
@@ -1106,13 +1142,63 @@ OPTIONS = {
         "detail": "Une page supplémentaire sur ton site, écrite et soignée comme les autres.",
         "pour": ("site", "pack"),
     },
-    "hebergement": {
-        "libelle": "Hébergement un an",
-        "prix": 2900,
-        "detail": "Mise en ligne, nom de domaine branché et hébergement pendant douze mois.",
-        "pour": ("site", "pack"),
+}
+
+# ── Ou vit la creation, une fois livree ────────────────────────────────
+#
+# La question se pose pour TOUTE creation, un bot comme un site : il
+# faut bien une machine allumee quelque part. Ce n'est pas une option
+# qu'on ajoute au panier, c'est un choix qu'on fait — et le laisser
+# implicite, c'est livrer un bot qui s'eteint le soir meme.
+#
+# « Hébergement un an, 29 € » vivait ici en option de catalogue, pour
+# les sites seulement et en une fois. Il devient ce choix-la, mensuel,
+# ouvert aux bots : un hebergement qu'on paie une fois s'arrete au bout
+# d'un an sans que personne s'en apercoive avant la panne.
+
+HEBERGEMENT = {
+    "soi": {
+        "libelle": "Je l'héberge moi-même",
+        "prix": 0,
+        "periode": "",
+        "detail": ("On te livre les fichiers, les identifiants et la marche à "
+                   "suivre. Tu choisis ton hébergeur et tu restes maître de tout."),
+    },
+    "modbot": {
+        "libelle": "Hébergé par nous",
+        "prix": 350,
+        "periode": "par mois",
+        "detail": ("On met en ligne, on garde allumé, on surveille et on remet "
+                   "en marche. Facturé à partir de la livraison, sans engagement."),
     },
 }
+HEBERGEMENT_DEFAUT = "soi"
+
+
+def lire_hebergement(brut):
+    """
+    Le choix d'hebergement, ou celui par defaut.
+
+    Par defaut « moi-meme » : personne ne doit se retrouver abonne a
+    quelque chose qu'il n'a pas coche.
+    """
+    clef = str(brut or "").strip().lower()
+    return clef if clef in HEBERGEMENT else HEBERGEMENT_DEFAUT
+
+
+def libelle_hebergement(clef):
+    """« Hébergé par nous — 3,50 € par mois », ou le choix inverse."""
+    offre = HEBERGEMENT[lire_hebergement(clef)]
+    if not offre["prix"]:
+        return offre["libelle"]
+    return f"{offre['libelle']} — {formater_prix(offre['prix'])} {offre['periode']}"
+
+
+def hebergement_public():
+    return [{"key": c, "libelle": o["libelle"], "prix": o["prix"],
+             "prix_label": formater_prix(o["prix"]) if o["prix"] else "",
+             "periode": o["periode"], "detail": o["detail"]}
+            for c, o in HEBERGEMENT.items()]
 # Trois options existent ; en accepter cinquante ferait une facture illisible.
 OPTIONS_MAX = 3
 
@@ -1122,7 +1208,7 @@ def lire_options(brut, categorie=None):
     Les options valides, sans doublon, dans l'ordre du catalogue.
 
     Avec une categorie, celles qui n'ont pas de sens pour elle tombent :
-    un bot Discord n'a pas de page en plus, ni d'hebergement.
+    un bot Discord n'a pas de page en plus.
     """
     demandees = [str(x) for x in (brut if isinstance(brut, (list, tuple)) else [])]
     clefs = []
@@ -1242,30 +1328,93 @@ def promo_public(promo, montant=0):
 # Le seul revenu qui revient tout seul. Il ne se vend qu'apres une
 # creation : entretenir ce qu'on n'a pas fait n'aurait pas de sens.
 
-ABONNEMENT = {
-    "clef": "maintenance",
-    "libelle": "Maintenance et évolutions",
-    "prix": 1000,
-    "periode": "par mois",
-    "detail": "Les corrections, les mises à jour et les petits ajouts, tous les mois.",
-    "avantages": [
-        "Les bugs corrigés en priorité, sans rien payer de plus",
-        "Les mises à jour de Discord et des hébergeurs suivies pour toi",
-        "Les petits ajouts du mois inclus (une commande, une page, un réglage)",
-        "Sans engagement : résiliable en un clic, la période payée reste servie",
-    ],
+ABONNEMENTS = {
+    "maintenance": {
+        "clef": "maintenance",
+        "libelle": "Maintenance et évolutions",
+        "prix": 1000,
+        "periode": "par mois",
+        "detail": "Les corrections, les mises à jour et les petits ajouts, tous les mois.",
+        "avantages": [
+            "Les bugs corrigés en priorité, sans rien payer de plus",
+            "Les mises à jour de Discord et des hébergeurs suivies pour toi",
+            "Les petits ajouts du mois inclus (une commande, une page, un réglage)",
+            "Sans engagement : résiliable en un clic, la période payée reste servie",
+        ],
+        "actif": ("Maintenance activée", (
+            "Ton abonnement **maintenance et évolutions** est actif.\n\n"
+            "À partir de maintenant, les corrections sont prioritaires et les "
+            "petits ajouts du mois sont inclus. Écris simplement ici quand tu "
+            "as besoin de quelque chose.\n\nSans engagement : tu peux arrêter "
+            "quand tu veux, et le mois déjà payé reste servi.")),
+        "arrete": ("Maintenance arrêtée",
+                   "Ton abonnement maintenance ne sera plus prélevé."),
+        "equipe": "maintenance",
+    },
+    "hebergement": {
+        "clef": "hebergement",
+        "libelle": "Hébergement",
+        "prix": 350,
+        "periode": "par mois",
+        "detail": "Ta création reste allumée, surveillée et remise en marche.",
+        "avantages": [
+            "Ton bot ou ton site en ligne, allumé jour et nuit",
+            "Remis en marche tout seul après une panne ou une mise à jour",
+            "Les sauvegardes gardées ailleurs que sur la machine qui tourne",
+            "Sans engagement : résiliable en un clic, le mois payé reste servi",
+        ],
+        "actif": ("Hébergement activé", (
+            "Ton **hébergement** est actif.\n\n"
+            "Ta création reste en ligne, surveillée, et repart toute seule "
+            "après une panne. Tu n'as rien à installer ni à surveiller.\n\n"
+            "Sans engagement : tu peux arrêter quand tu veux, et le mois déjà "
+            "payé reste servi.")),
+        "arrete": ("Hébergement arrêté", (
+            "Ton hébergement ne sera plus prélevé.\n\n"
+            "**Ta création sera éteinte au terme du mois déjà payé.** Écris-nous "
+            "avant si tu veux qu'on te livre les fichiers pour l'héberger "
+            "ailleurs — c'est gratuit et c'est à toi.")),
+        "equipe": "hébergement",
+    },
 }
+# La maintenance a ete le premier abonnement vendu : du code ecrit avant
+# l'hebergement la designe encore au singulier.
+ABONNEMENT = ABONNEMENTS["maintenance"]
 
 
-def abonnement_public():
-    return {"key": ABONNEMENT["clef"], "libelle": ABONNEMENT["libelle"],
-            "prix": ABONNEMENT["prix"], "prix_label": formater_prix(ABONNEMENT["prix"]),
-            "periode": ABONNEMENT["periode"], "detail": ABONNEMENT["detail"],
-            "avantages": list(ABONNEMENT["avantages"])}
+def lire_produit_abonnement(brut):
+    clef = str(brut or "").strip().lower()
+    return clef if clef in ABONNEMENTS else "maintenance"
 
 
-def nouvel_abonnement(uid, contact, maintenant_iso, session=""):
+def abonnement_public(produit="maintenance"):
+    offre = ABONNEMENTS[lire_produit_abonnement(produit)]
+    return {"key": offre["clef"], "libelle": offre["libelle"],
+            "prix": offre["prix"], "prix_label": formater_prix(offre["prix"]),
+            "periode": offre["periode"], "detail": offre["detail"],
+            "avantages": list(offre["avantages"])}
+
+
+def abonnements_publics():
+    return [abonnement_public(c) for c in ABONNEMENTS]
+
+
+def cle_abonnement(uid, produit="maintenance"):
+    """
+    Ou se range la fiche d'un abonnement.
+
+    La maintenance garde la sienne — le seul identifiant Discord. Les
+    fiches deja payees sont rangees ainsi depuis le premier jour, et les
+    renommer perdrait un abonnement en cours au premier redemarrage.
+    """
+    uid = str(uid)
+    produit = lire_produit_abonnement(produit)
+    return uid if produit == "maintenance" else f"{uid}:{produit}"
+
+
+def nouvel_abonnement(uid, contact, maintenant_iso, session="", produit="maintenance"):
     return {"discord_id": str(uid), "statut": "en_attente",
+            "produit": lire_produit_abonnement(produit),
             "creee_le": maintenant_iso, "session": str(session),
             "abonnement": "", "depuis": "", "jusqu_au": "",
             "resilie": False, **_champs_contact(contact)}
@@ -1287,18 +1436,15 @@ def abonnement_actif(fiche, maintenant=None):
 
 
 def message_abonnement(fiche, actif=True):
+    """Ce qu'on ecrit au client. Chaque produit a ses propres mots."""
+    offre = ABONNEMENTS[lire_produit_abonnement((fiche or {}).get("produit"))]
     if actif:
-        return ("Maintenance activée", (
-            "Ton abonnement **maintenance et évolutions** est actif.\n\n"
-            "À partir de maintenant, les corrections sont prioritaires et les "
-            "petits ajouts du mois sont inclus. Écris simplement ici quand tu "
-            "as besoin de quelque chose.\n\nSans engagement : tu peux arrêter "
-            "quand tu veux, et le mois déjà payé reste servi."))
-    return ("Maintenance arrêtée", (
-        "Ton abonnement maintenance ne sera plus prélevé.\n\n"
-        "Le mois déjà payé reste servi jusqu'à son terme"
-        + (f" ({str((fiche or {}).get('jusqu_au') or '')[:10]})" if (fiche or {}).get("jusqu_au") else "")
-        + ". Tu peux le reprendre quand tu veux, au même prix."))
+        return offre["actif"]
+    titre, texte = offre["arrete"]
+    terme = str((fiche or {}).get("jusqu_au") or "")[:10]
+    return (titre, texte + "\n\nLe mois déjà payé reste servi jusqu'à son terme"
+            + (f" ({terme})" if terme else "")
+            + ". Tu peux le reprendre quand tu veux, au même prix.")
 
 
 # ══════════════════════════════════════════════════════════════════════

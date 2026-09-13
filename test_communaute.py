@@ -338,7 +338,9 @@ _guild = _Guild()
 
 asyncio.run(_bot.apply_dashboard_config(_guild, {
     "security": {"antilink": True,
-                 "antilink_channels": ["10", "12", "999", "10"]},
+                 "antilink_channels": ["10", "12", "999", "10"],
+                 "antispam_channels": ["11"],
+                 "filtre_channels": ["12", "999"]},
     "communaute": {"xp": True, "mur_seuil": 5,
                    "xp_message": "  Bravo {membre}, niveau {niveau} !  ",
                    "xp_salons_exclus": ["11", "999"],
@@ -366,6 +368,16 @@ verifier("les liens passent dans un salon libre",
          _bot.lien_permis_ici(_cfg, _Salon(10)))
 verifier("et pas dans les autres",
          not _bot.lien_permis_ici(_cfg, _Salon(11)))
+verifier("l'anti-spam a sa propre liste",
+         _cfg.get("salons_spam_libres") == ["11"], str(_cfg.get("salons_spam_libres")))
+verifier("le filtre de langage aussi",
+         _cfg.get("salons_filtre_libres") == ["12"], str(_cfg.get("salons_filtre_libres")))
+verifier("un salon libre de liens ne l'est pas d'office pour le spam",
+         not _bot.exempte_ici(_cfg, _Salon(10), "spam"))
+verifier("chaque filtre lit la sienne",
+         _bot.exempte_ici(_cfg, _Salon(11), "spam")
+         and _bot.exempte_ici(_cfg, _Salon(12), "filtre")
+         and not _bot.exempte_ici(_cfg, _Salon(11), "filtre"))
 verifier("un fil herite du salon qui le porte",
          _bot.lien_permis_ici(_cfg, type("Fil", (), {
              "id": 777, "category_id": None, "parent": _Salon(10)})()))

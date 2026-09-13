@@ -1270,14 +1270,15 @@ def message_complet(contenu, embeds=None):
     return "\n".join(m for m in morceaux if m)
 
 
-def salon_sans_anti_lien(salons_permis, *identifiants):
+def salon_exempte(salons_permis, *identifiants):
     """
-    Vrai si les liens sont permis ici.
+    Vrai si ce salon echappe au filtre qui presente sa liste.
 
-    Un serveur a presque toujours un salon ou l'on partage des liens :
-    #partage, #vos-creations, #clips. Sans exception, l'anti-lien y
-    supprime tout, et la reaction est de couper l'anti-lien partout —
-    donc de laisser passer la publicite sur le reste du serveur.
+    Un serveur a presque toujours un salon a part : #partage pour les
+    liens, #memes pour le debit, #jeux-de-mots pour le vocabulaire.
+    Sans exception, le filtre y supprime tout, et la reaction est de le
+    couper PARTOUT — donc de laisser passer sur le reste du serveur.
+    Mieux vaut reculer d'un salon que du serveur entier.
 
     On accepte le salon, sa categorie, et le salon qui porte un fil :
     sans cela il suffirait d'ouvrir un fil dans #partage pour retomber

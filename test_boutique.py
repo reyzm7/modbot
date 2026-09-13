@@ -1397,20 +1397,20 @@ verifier("le message qui accompagne la facture cite son numero",
 # ── Les options payantes ───────────────────────────────────────────────
 
 verifier("les options inconnues et les doublons sont ecartes",
-         bq.lire_options(["express", "chocolat", "express", "hebergement"])
-         == ["express", "hebergement"], str(bq.lire_options(["express", "chocolat"])))
+         bq.lire_options(["express", "chocolat", "express", "page_extra"])
+         == ["express", "page_extra"], str(bq.lire_options(["express", "chocolat"])))
 verifier("une liste illisible ne donne aucune option",
          bq.lire_options("express") == [] and bq.lire_options(None) == [])
-verifier("un bot ne se voit proposer ni page en plus ni hebergement",
-         bq.lire_options(["express", "page_extra", "hebergement"], "bot") == ["express"],
-         str(bq.lire_options(["express", "page_extra", "hebergement"], "bot")))
+verifier("un bot ne se voit pas proposer une page en plus",
+         bq.lire_options(["express", "page_extra"], "bot") == ["express"],
+         str(bq.lire_options(["express", "page_extra"], "bot")))
 verifier("un site, lui, les garde toutes",
-         len(bq.lire_options(["express", "page_extra", "hebergement"], "site")) == 3)
+         len(bq.lire_options(["express", "page_extra"], "site")) == 2)
 verifier("chaque option dit a quels articles elle s'applique",
          all(o["pour"] for o in bq.options_publiques()))
 verifier("le prix des options est celui du catalogue",
-         bq.prix_options(["express", "hebergement"])
-         == bq.OPTIONS["express"]["prix"] + bq.OPTIONS["hebergement"]["prix"])
+         bq.prix_options(["express", "page_extra"])
+         == bq.OPTIONS["express"]["prix"] + bq.OPTIONS["page_extra"]["prix"])
 verifier("une option inconnue ne coute rien", bq.prix_options(["chocolat"]) == 0)
 verifier("les options se lisent en clair",
          bq.libelle_options(["express"]) == bq.OPTIONS["express"]["libelle"])
@@ -1418,13 +1418,13 @@ verifier("le catalogue public des options porte un prix lisible",
          all(o["prix_label"] and o["detail"] for o in bq.options_publiques()))
 
 commande_options = {"article": "site_complet", "moyen": "carte", "projet": "",
-                    "options": ["express", "hebergement"], "code_promo": "",
+                    "options": ["express", "page_extra"], "code_promo": "",
                     "discord": "client", "discord_type": "pseudo",
                     "discord_nom": "", "discord_id": ""}
 avec = bq.nouvelle_commande("CMD-260912-OPTS", commande_options, INSTANT.isoformat())
 verifier("les options s'ajoutent au prix de l'article",
          avec["montant"] == bq.ARTICLES["site_complet"]["prix"]
-         + bq.prix_options(["express", "hebergement"]), str(avec["montant"]))
+         + bq.prix_options(["express", "page_extra"]), str(avec["montant"]))
 verifier("le libelle de la commande dit ce qui a ete ajoute",
          bq.OPTIONS["express"]["libelle"] in avec["libelle"], avec["libelle"])
 verifier("le montant avant remise est garde",
@@ -1483,10 +1483,101 @@ verifier("la commande garde le code utilise", remisee["promo"] == "NOEL-2026")
 
 meta = bq.metadonnees_stripe("CMD-260912-OPTS", commande_options)
 verifier("les options et le code voyagent avec le paiement",
-         meta.get("options") == "express,hebergement", str(meta.get("options")))
+         meta.get("options") == "express,page_extra", str(meta.get("options")))
 refaite = bq.commande_depuis_stripe("CMD-260912-OPTS", meta, INSTANT.isoformat())
 verifier("une commande reconstituee depuis Stripe garde ses options",
-         refaite["options"] == ["express", "hebergement"], str(refaite["options"]))
+         refaite["options"] == ["express", "page_extra"], str(refaite["options"]))
+
+# ── Ou vit la creation ─────────────────────────────────────────────────
+#
+# « Hébergement un an, 29 € » etait une option de catalogue, pour les
+# sites seulement. C'est desormais un choix, mensuel, pose a chaque
+# commande — un bot aussi a besoin d'une machine allumee.
+
+verifier("par defaut, le client heberge lui-meme",
+         bq.lire_hebergement("") == "soi" and bq.lire_hebergement(None) == "soi")
+verifier("un choix inconnu retombe sur « moi-meme »",
+         bq.lire_hebergement("chez-mamie") == "soi")
+verifier("le choix « chez nous » est lu tel quel",
+         bq.lire_hebergement("modbot") == "modbot")
+verifier("l'hebergement chez nous coute 3,50 € par mois",
+         bq.HEBERGEMENT["modbot"]["prix"] == 350
+         and bq.HEBERGEMENT["modbot"]["periode"] == "par mois",
+         str(bq.HEBERGEMENT["modbot"]["prix"]))
+verifier("s'heberger soi-meme ne coute rien",
+         bq.HEBERGEMENT["soi"]["prix"] == 0)
+verifier("le libelle dit le prix quand il y en a un",
+         "3,50" in bq.libelle_hebergement("modbot")
+         and "3,50" not in bq.libelle_hebergement("soi"),
+         bq.libelle_hebergement("modbot"))
+verifier("le catalogue public annonce les deux choix",
+         {o["key"] for o in bq.hebergement_public()} == {"soi", "modbot"})
+
+commande_heb = {"article": "bot_pro", "moyen": "carte", "projet": "",
+                "options": [], "code_promo": "", "hebergement": "modbot",
+                "discord": "client", "discord_type": "pseudo",
+                "discord_nom": "", "discord_id": ""}
+fiche_heb = bq.nouvelle_commande("MB-260913-HEB1", commande_heb, INSTANT.isoformat())
+verifier("la commande garde le choix d'hebergement",
+         fiche_heb["hebergement"] == "modbot")
+verifier("l'hebergement mensuel ne s'ajoute PAS au paiement d'aujourd'hui",
+         fiche_heb["montant"] == bq.ARTICLES["bot_pro"]["prix"],
+         str(fiche_heb["montant"]))
+meta_heb = bq.metadonnees_stripe("MB-260913-HEB1", commande_heb)
+verifier("le choix voyage avec le paiement", meta_heb.get("hebergement") == "modbot")
+verifier("et revient si le fichier des commandes est perdu",
+         bq.commande_depuis_stripe("MB-260913-HEB1", meta_heb,
+                                   INSTANT.isoformat())["hebergement"] == "modbot")
+verifier("le message de paiement previent que l'abonnement demarre a la livraison",
+         "livraison" in bq.message_paiement_recu(fiche_heb)["texte"]
+         and "3,50" in bq.message_paiement_recu(fiche_heb)["texte"])
+fiche_soi = bq.nouvelle_commande("MB-260913-HEB2",
+                                 {**commande_heb, "hebergement": "soi"},
+                                 INSTANT.isoformat())
+verifier("celui qui heberge lui-meme n'entend pas parler d'abonnement",
+         "3,50" not in bq.message_paiement_recu(fiche_soi)["texte"])
+livree = bq.message_statut({**fiche_heb, "statut": "livree"})
+verifier("a la livraison, on rappelle d'activer l'hebergement",
+         "hébergement" in livree["texte"].lower() and "3,50" in livree["texte"],
+         livree["texte"][-90:])
+livree_soi = bq.message_statut({**fiche_soi, "statut": "livree"})
+verifier("et a l'autre, qu'il a ses fichiers",
+         "fichiers" in livree_soi["texte"])
+
+
+# ── Les deux abonnements ───────────────────────────────────────────────
+
+verifier("il y a deux abonnements : la maintenance et l'hebergement",
+         set(bq.ABONNEMENTS) == {"maintenance", "hebergement"})
+verifier("l'abonnement hebergement coute 3,50 € par mois",
+         bq.ABONNEMENTS["hebergement"]["prix"] == 350)
+verifier("« abonnement » au singulier designe toujours la maintenance",
+         bq.ABONNEMENT is bq.ABONNEMENTS["maintenance"])
+verifier("un produit inconnu retombe sur la maintenance",
+         bq.lire_produit_abonnement("chocolat") == "maintenance")
+verifier("le catalogue public annonce les deux",
+         {o["key"] for o in bq.abonnements_publics()} == {"maintenance", "hebergement"})
+
+# La maintenance garde sa clef d'origine : les fiches deja payees sont
+# rangees sous le seul identifiant Discord depuis le premier jour.
+verifier("la maintenance garde sa clef historique",
+         bq.cle_abonnement("42", "maintenance") == "42")
+verifier("l'hebergement se range a cote", bq.cle_abonnement("42", "hebergement") == "42:hebergement")
+verifier("sans produit, c'est la maintenance", bq.cle_abonnement("42") == "42")
+
+abo_heb = bq.nouvel_abonnement("42", {"type": "id", "valeur": "42"},
+                               INSTANT.isoformat(), produit="hebergement")
+verifier("la fiche retient son produit", abo_heb["produit"] == "hebergement")
+verifier("le message d'activation parle bien d'hebergement",
+         "hébergement" in bq.message_abonnement(abo_heb, True)[1].lower())
+verifier("l'arret previent que la creation sera eteinte",
+         "éteinte" in bq.message_abonnement({**abo_heb, "jusqu_au": ""}, False)[1])
+abo_mnt = bq.nouvel_abonnement("42", {"type": "id", "valeur": "42"},
+                               INSTANT.isoformat())
+verifier("celui de la maintenance garde ses mots",
+         "maintenance" in bq.message_abonnement(abo_mnt, True)[1].lower()
+         and "éteinte" not in bq.message_abonnement(abo_mnt, False)[1])
+
 
 # ── L'abonnement maintenance ───────────────────────────────────────────
 
