@@ -4958,6 +4958,12 @@ async def illustrations_ticket(guild, questions):
     if not guild:
         return embeds, fichiers
     gid = str(guild.id)
+    # L'image d'option est une fonctionnalite premium, comme avant :
+    # le second format n'ouvre pas une porte, il repare celle qui
+    # existe. Sans cette ligne, un serveur sans abonnement aurait
+    # obtenu ses images des l'instant ou l'emoji echouait.
+    if not est_premium(gid):
+        return embeds, fichiers
     lang = get_lang(gid)
     for index, q in enumerate(questions or []):
         if len(embeds) >= ILLUSTRATIONS_MAX:

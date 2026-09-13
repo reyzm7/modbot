@@ -229,6 +229,14 @@ print("\n--- Le second format du panneau ---")
 # 400 Ko : accepte en piece jointe, refuse comme emoji.
 LOURDE = "data:image/jpeg;base64," + ("A" * (400 * 1024 * 4 // 3 // 4 * 4))
 
+# L'image d'option est premium : le second format ne change pas cette
+# regle, il repare seulement ce qui est deja paye.
+bot_mod.est_premium = lambda gid: False
+verifier("sans abonnement, aucune illustration",
+         asyncio.run(bot_mod.illustrations_ticket(GUILD, [
+             {"label": "Aide", "image": IMAGE}])) == ([], []))
+bot_mod.est_premium = lambda gid: True
+
 verifier("une image trop lourde n'est pas proposee comme emoji",
          asyncio.run(bot_mod._telecharger_image(LOURDE)) is None)
 verifier("la meme passe en piece jointe",
