@@ -185,7 +185,24 @@ verifier("la caisse identifie l'acheteur",
 verifier("la caisse ne demande plus de serveur",
          "api_guild_from_request" not in bloc_caisse)
 
-bloc_hook = source[source.index("async def api_stripe_webhook"):][:6000]
+def corps_de(source, nom):
+    """
+    Le corps entier d'une fonction, jusqu'a la suivante.
+
+    Les blocs etaient decoupes au nombre de caracteres — « les 6 000
+    premiers ». Ajouter une branche au milieu du webhook poussait la
+    derniere verification hors de la fenetre, et le test echouait pour
+    une raison qui n'avait rien a voir avec ce qu'il verifie.
+    """
+    depart = source.index(nom)
+    reste = source[depart:]
+    suite = reste.find("\nasync def ", 1)
+    if suite < 0:
+        suite = reste.find("\ndef ", 1)
+    return reste if suite < 0 else reste[:suite]
+
+
+bloc_hook = corps_de(source, "async def api_stripe_webhook")
 verifier("un achat credite une licence",
          'licence_creer(uid, plan, "stripe"' in bloc_hook)
 verifier("un renouvellement repousse chaque serveur de la licence",
@@ -254,7 +271,7 @@ verifier("une annonce qui echoue ne casse pas le paiement",
 verifier("le salon est cherche puis recupere au besoin",
          "await bot.fetch_channel(SALON_PAIEMENTS)" in bloc_annonce)
 
-bloc_hook2 = source[source.index("async def api_stripe_webhook"):][:8000]
+bloc_hook2 = bloc_hook
 for evenement, attendu in (("Nouvel abonnement", "un achat"),
                            ("Abonnement renouvele", "un renouvellement"),
                            ("Abonnement resilie", "une resiliation")):
