@@ -558,7 +558,8 @@ messages_prives = []
 joignable = [True]
 
 
-async def faux_ecrire(fiche, titre, texte, couleur=0, lien=None, fichier=None, vue=None):
+async def faux_ecrire(fiche, titre, texte, couleur=0, lien=None, fichier=None,
+                      vue=None, **reste):
     messages_prives.append({"a": fiche.get("discord"), "titre": titre, "texte": texte,
                             "lien": lien, "fichier": fichier})
     if joignable[0]:
@@ -1598,7 +1599,36 @@ verifier("un abonnement resilie reste servi jusqu'au terme paye",
 verifier("passe le terme, il ne l'est plus",
          not bq.abonnement_actif(resilie, INSTANT + timedelta(days=40)))
 verifier("l'arret est annonce sans reproche, avec la date",
-         "terme" in bq.message_abonnement(resilie, False)[1])
+         "terme" in bq.message_abonnement(resilie, False, INSTANT)[1])
+# Sans cet INSTANT, la verification ci-dessus passait aujourd'hui et
+# echouait le 13 octobre 2026 : le terme de la fiche serait alors
+# depasse, et le message ne parlerait plus de terme a servir.
+verifier("passe le terme, on ne promet plus un mois deja fini",
+         "terminée" in bq.message_abonnement(resilie, False, INSTANT + timedelta(days=40))[1]
+         and "reste servi" not in bq.message_abonnement(
+             resilie, False, INSTANT + timedelta(days=40))[1])
+verifier("jamais preleve, on ne promet aucun mois",
+         "reste servi" not in bq.message_abonnement(
+             {**resilie, "jusqu_au": ""}, False, INSTANT)[1])
+
+# ── Le paiement refuse ─────────────────────────────────────────────────
+#
+# Le seul moment ou l'abonnement peut encore etre sauve. Sans message,
+# Stripe relance trois semaines dans son coin, la fiche expire au bout
+# de trente et un jours, et le client decouvre la panne en voyant sa
+# creation eteinte.
+titre_refus, texte_refus = bq.message_paiement_refuse(abo_heb, "https://stripe.test/p")
+verifier("le refus dit ce qui a ete refuse", "Hébergement" in texte_refus)
+verifier("pour l'hebergement, il dit que la creation sera eteinte",
+         "éteinte" in texte_refus)
+verifier("il annonce que la banque sera representee", "représentée" in texte_refus)
+verifier("avec un lien, il renvoie vers la page de paiement",
+         "Stripe" in texte_refus)
+verifier("sans lien, il dit au client de nous ecrire",
+         "Écris-nous" in bq.message_paiement_refuse(abo_heb)[1])
+verifier("la maintenance refusee n'annonce pas d'extinction",
+         "éteinte" not in bq.message_paiement_refuse(abo_mnt)[1]
+         and "Maintenance" in bq.message_paiement_refuse(abo_mnt)[1])
 
 # ── La facture en PDF ──────────────────────────────────────────────────
 
@@ -1635,6 +1665,7 @@ verifier("le devis reste un PDF bien forme apres le partage du code",
 source_b = open("bot.py", encoding="utf-8").read()
 for route in ('add_post("/api/boutique/promo", api_boutique_promo)',
               'add_post("/api/boutique/abonnement", api_boutique_abonnement)',
+              'add_post("/api/boutique/portail", api_boutique_portail)',
               'add_get("/api/admin/boutique/promos", api_admin_boutique_promos)',
               'add_post("/api/admin/boutique/promos", api_admin_boutique_promos)',
               'add_post("/api/admin/boutique/promos/{code}/retirer", api_admin_boutique_promo_retirer)',
@@ -1649,6 +1680,18 @@ verifier("essayer un code a son propre quota", premier_promo == "/api/boutique/p
 verifier("le webhook reconnait l'abonnement de la boutique",
          'meta.get("type") == "boutique_abonnement"' in source_b
          and "boutique_abonnement_paye(objet)" in source_b)
+# La liste servait deux fois dans le meme « if » : ajouter un evenement
+# a l'une et pas a l'autre passait inapercu, et l'evenement n'arrivait
+# jamais. Elle est ecrite une fois, et c'est ce qu'on verifie.
+verifier("le refus de paiement figure parmi les evenements d'abonnement",
+         "invoice.payment_failed" in bot_mod.ABONNEMENT_EVENEMENTS)
+verifier("le webhook ne reecrit pas cette liste a la main",
+         source_b.count('("invoice.paid", "customer.subscription.deleted")') == 0)
+verifier("le premium aussi previent quand la carte est refusee",
+         'elif type_evenement == "invoice.payment_failed":' in source_b
+         and "prevenir_paiement_refuse(" in source_b)
+verifier("aucun numero de carte ne traverse le bot",
+         "/billing_portal/sessions" in source_b)
 verifier("la facture part au client des que la commande est payee",
          "await envoyer_la_facture(fiche)" in source_b)
 verifier("un code promo n'est consomme qu'au paiement",

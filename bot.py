@@ -5606,6 +5606,9 @@ RATE_LIMITS = [
     # tous a la suite, si : vingt tentatives par tranche de dix minutes.
     ("/api/boutique/promo", (20, 600)),
     ("/api/boutique/abonnement", (5, 600)),
+    # Ouvrir sa page de gestion chez Stripe : dix par tranche de dix
+    # minutes. C'est un appel a Stripe, pas un simple affichage.
+    ("/api/boutique/portail", (10, 600)),
     # Le lien d'un devis s'ouvre et se paie : large, mais borne — payer
     # ouvre une session chez Stripe.
     ("/api/boutique/devis/", (20, 600)),
@@ -8930,6 +8933,33 @@ async def stripe_appel(session, methode, chemin, donnees=None):
         return corps
 
 
+async def stripe_portail(client, retour=""):
+    """
+    L'adresse ou le client gere sa carte et sa resiliation, chez Stripe.
+
+    Rend une chaine vide plutot que de lever : ce lien accompagne des
+    messages qu'il vaut mieux envoyer sans lien que pas du tout. Sans
+    lui, changer une carte obligeait a resilier puis re-souscrire.
+    """
+    client = str(client or "")
+    if not client.startswith("cus_"):
+        return ""
+    donnees = {"customer": client,
+               "return_url": retour or f"{site_racine()}/boutique.html"}
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            corps = await stripe_appel(
+                session, "POST", "/billing_portal/sessions", donnees)
+        return str(corps.get("url") or "")
+    except Exception as erreur:
+        # Le portail n'est peut-etre pas active dans le tableau de bord
+        # Stripe. C'est un confort, pas une condition : on le dit dans la
+        # sortie du bot et le message part sans bouton.
+        print(f"stripe portail: {erreur}")
+        return ""
+
+
 async def stripe_tarif_du_produit(session, produit):
     """Identifiant de tarif actif d'un produit, mis en cache."""
     if produit in _stripe_tarifs:
@@ -9635,7 +9665,8 @@ def trouver_client(fiche):
 
 
 async def ecrire_au_client(fiche, titre, texte, couleur=0x5865F2, lien=None,
-                           fichier=None, vue=None):
+                           fichier=None, vue=None,
+                           lien_libelle="Voir et payer", lien_emoji="💶"):
     """
     (True, "") si le message prive part, (False, raison) sinon.
 
@@ -9654,7 +9685,8 @@ async def ecrire_au_client(fiche, titre, texte, couleur=0x5865F2, lien=None,
         options = {"embed": embed}
         if lien:
             boutons = discord.ui.View(timeout=None)
-            boutons.add_item(discord.ui.Button(label="Voir et payer", url=lien, emoji="💶"))
+            boutons.add_item(discord.ui.Button(
+                label=lien_libelle, url=lien, emoji=lien_emoji))
             options["view"] = boutons
         elif vue is not None:
             options["view"] = vue
@@ -10601,6 +10633,37 @@ async def api_boutique_abonnement(request):
     return api_json({"ok": True, "url": corps.get("url", "")}, request=request)
 
 
+async def api_boutique_portail(request):
+    """
+    L'adresse ou un abonne gere sa carte, ses factures et sa resiliation.
+
+    Sans elle, changer de carte obligeait a resilier puis re-souscrire —
+    et entre les deux l'hebergement s'arrete. Tout se passe chez Stripe :
+    aucun numero de carte ne traverse ce serveur, ni ce code.
+    """
+    identite = await api_identity(request)
+    contact = bq.contact_depuis_identite(identite)
+    if contact is None:
+        raise web.HTTPUnauthorized(text="Connecte-toi avec Discord d'abord.")
+    fiches = abonnements_tout()
+    # Le meme client Stripe porte les deux abonnements quand ils ont ete
+    # pris depuis le meme compte ; on prend le premier qu'on trouve.
+    client = ""
+    for produit in bq.ABONNEMENTS:
+        fiche = fiches.get(bq.cle_abonnement(contact["valeur"], produit)) or {}
+        if fiche.get("client"):
+            client = fiche["client"]
+            break
+    if not client:
+        raise web.HTTPNotFound(text="Aucun abonnement à gérer pour ce compte.")
+    lien = await stripe_portail(client)
+    if not lien:
+        raise web.HTTPServiceUnavailable(
+            text="La page de gestion n'est pas disponible pour le moment. "
+                 "Écris-nous sur le serveur de support.")
+    return api_json({"ok": True, "url": lien}, request=request)
+
+
 async def boutique_abonnement_paye(session_stripe):
     """Stripe confirme le premier prelevement : l'abonnement demarre."""
     meta = session_stripe.get("metadata") or {}
@@ -10628,8 +10691,15 @@ async def boutique_abonnement_paye(session_stripe):
     return fiche
 
 
+# Les evenements Stripe qui font bouger un abonnement de la boutique.
+# Ecrits une fois : la liste servait deux fois dans le webhook, et le
+# refus de paiement n'avait ete ajoute qu'a une des deux.
+ABONNEMENT_EVENEMENTS = ("invoice.paid", "invoice.payment_failed",
+                         "customer.subscription.deleted")
+
+
 async def boutique_abonnement_change(objet, evenement):
-    """Renouvellement, resiliation : la fiche suit ce que Stripe raconte."""
+    """Renouvellement, refus, resiliation : la fiche suit ce que Stripe raconte."""
     identifiant = str(objet.get("subscription") or objet.get("id") or "")
     fiche = abonnement_par_stripe(identifiant)
     if fiche is None:
@@ -10638,10 +10708,27 @@ async def boutique_abonnement_change(objet, evenement):
         fiche.update(statut="actif", jusqu_au=(now() + timedelta(days=31)).isoformat())
         abonnement_ecrire(fiche)
         return fiche
+
+    if evenement == "invoice.payment_failed":
+        # Le seul moment ou l'on peut encore sauver l'abonnement. Apres,
+        # Stripe relance tout seul pendant trois semaines, la fiche expire
+        # au bout de trente et un jours, et le client decouvre la panne en
+        # voyant sa creation eteinte. On ne touche PAS au statut : la
+        # periode en cours est payee, elle reste due.
+        client = fiche.get("client") or objet.get("customer")
+        lien = await stripe_portail(client)
+        titre, texte = bq.message_paiement_refuse(fiche, lien)
+        envoye, raison = await ecrire_au_client(
+            fiche, titre, texte, 0xFAA61A, lien=lien or None,
+            lien_libelle=bq.LIEN_CARTE, lien_emoji="💳")
+        titre, texte = bq.alerte_paiement_refuse(fiche, envoye, raison)
+        await alerter_equipe(titre, texte, 0xFAA61A)
+        return fiche
+
     # Resilie : la periode payee reste servie jusqu'a son terme.
     fiche.update(statut="resilie", resilie=True)
     abonnement_ecrire(fiche)
-    titre, texte = bq.message_abonnement(fiche, False)
+    titre, texte = bq.message_abonnement(fiche, False, now())
     await ecrire_au_client(fiche, titre, texte, 0x747F8D)
     offre = bq.ABONNEMENTS[bq.lire_produit_abonnement(fiche.get("produit"))]
     await alerter_equipe(f"Un abonnement {offre['equipe']} arrêté",
@@ -11173,11 +11260,11 @@ async def api_stripe_webhook(request):
     # l'abonnement qu'on a deja enregistre.
     reference = str(objet.get("subscription") or objet.get("id") or "")
     if (meta.get("type") == "boutique_abonnement"
-            or (type_evenement in ("invoice.paid", "customer.subscription.deleted")
+            or (type_evenement in ABONNEMENT_EVENEMENTS
                 and abonnement_par_stripe(reference))):
         if type_evenement == "checkout.session.completed":
             await boutique_abonnement_paye(objet)
-        elif type_evenement in ("invoice.paid", "customer.subscription.deleted"):
+        elif type_evenement in ABONNEMENT_EVENEMENTS:
             await boutique_abonnement_change(objet, type_evenement)
         return api_json({"ok": True, "received": type_evenement})
 
@@ -11250,6 +11337,28 @@ async def api_stripe_webhook(request):
             premium_ecrire(cible, pc.prolonger(
                 fiche_actuelle, jours, "stripe", plan, "Stripe"))
             print(f"premium: {cible} renouvele de {jours} jours")
+
+    elif type_evenement == "invoice.payment_failed":
+        # Meme trou que la boutique, et meme consequence : la licence
+        # n'est pas prolongee, elle expire, et le serveur perd le premium
+        # sans que personne n'ait rien dit.
+        proprietaire, licence = licence_par_abonnement(
+            str(objet.get("subscription") or ""))
+        if licence is not None:
+            lien = await stripe_portail(objet.get("customer"))
+            offre = pc.OFFRES.get(str(licence.get("plan") or "")) or {}
+            await prevenir_paiement_refuse(
+                proprietaire, offre.get("libelle") or "ModBot Premium", lien,
+                "ton serveur perdra les fonctions premium")
+            profil = profil_discord(proprietaire)
+            await annoncer_paiement(
+                "Paiement refuse",
+                f"**{profil['name'] or proprietaire}** n'a pas pu etre preleve. "
+                "Stripe va reessayer plusieurs fois avant d'arreter l'abonnement.",
+                [("Offre", offre.get("libelle", licence.get("plan", "?"))),
+                 ("Abonne", f"<@{proprietaire}>"),
+                 ("Jusqu'au", str(licence.get("until"))[:10])],
+                couleur=0xFAA61A)
 
     elif type_evenement in ("customer.subscription.deleted",
                             "customer.subscription.updated"):
@@ -11575,6 +11684,38 @@ async def api_admin_premium_acheteurs(request):
     lignes.sort(key=lambda x: (not x["dormant"], not x["active"],
                                (x["name"] or x["id"]).lower()))
     return api_json({"ok": True, "buyers": lignes})
+
+
+async def prevenir_paiement_refuse(uid, libelle, lien="", consequence=""):
+    """
+    Previent en prive celui dont la carte vient d'etre refusee.
+
+    Le premium ne passe pas par `ecrire_au_client` : un acheteur de
+    licence n'a pas de fiche de boutique, seulement un identifiant
+    Discord. Rend True si le message est parti.
+    """
+    try:
+        utilisateur = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+    except Exception as erreur:
+        print(f"paiement refuse: {uid} injoignable ({erreur})")
+        return False
+    titre, texte = bq.message_paiement_refuse(
+        lien=lien, libelle=libelle, consequence=consequence)
+    try:
+        embed = discord.Embed(title=titre, description=texte,
+                              color=0xFAA61A, timestamp=now())
+        embed.set_footer(text="ModBot Premium")
+        options = {"embed": embed}
+        if lien:
+            vue = discord.ui.View(timeout=None)
+            vue.add_item(discord.ui.Button(
+                label=bq.LIEN_CARTE, url=lien, emoji="💳"))
+            options["view"] = vue
+        await utilisateur.send(**options)
+        return True
+    except Exception as erreur:
+        print(f"paiement refuse: message a {uid} non envoye ({erreur})")
+        return False
 
 
 async def annoncer_paiement(titre, description, champs, couleur=0x43B581):
@@ -12329,6 +12470,7 @@ async def start_dashboard_api():
     app.router.add_get("/api/boutique/avis", api_boutique_avis)
     app.router.add_post("/api/boutique/promo", api_boutique_promo)
     app.router.add_post("/api/boutique/abonnement", api_boutique_abonnement)
+    app.router.add_post("/api/boutique/portail", api_boutique_portail)
     app.router.add_post("/api/boutique/commande", api_boutique_commande)
     app.router.add_post("/api/boutique/devis", api_boutique_devis)
     app.router.add_get("/api/boutique/devis/{devis_id}", api_boutique_devis_lire)

@@ -1435,16 +1435,88 @@ def abonnement_actif(fiche, maintenant=None):
     return (maintenant or datetime.now(timezone.utc)) <= fin
 
 
-def message_abonnement(fiche, actif=True):
+def message_abonnement(fiche, actif=True, maintenant=None):
     """Ce qu'on ecrit au client. Chaque produit a ses propres mots."""
     offre = ABONNEMENTS[lire_produit_abonnement((fiche or {}).get("produit"))]
     if actif:
         return offre["actif"]
     titre, texte = offre["arrete"]
-    terme = str((fiche or {}).get("jusqu_au") or "")[:10]
-    return (titre, texte + "\n\nLe mois déjà payé reste servi jusqu'à son terme"
-            + (f" ({terme})" if terme else "")
-            + ". Tu peux le reprendre quand tu veux, au même prix.")
+    fin = _date((fiche or {}).get("jusqu_au"))
+    maintenant = maintenant or datetime.now(timezone.utc)
+    if fin is None:
+        # Jamais preleve : il n'y a pas de mois paye a promettre.
+        return (titre, texte + "\n\nTu peux le reprendre quand tu veux, au même prix.")
+    if fin <= maintenant:
+        # Un abonnement que Stripe arrete apres plusieurs prelevements
+        # refuses a vu son terme passer depuis des semaines. Lui ecrire
+        # « le mois deja paye reste servi », c'est rassurer quelqu'un
+        # dont la creation est eteinte depuis vingt jours.
+        return (titre, texte + "\n\nLa période déjà payée est terminée. Tu peux "
+                "reprendre l'abonnement quand tu veux, au même prix.")
+    return (titre, texte + "\n\nLe mois déjà payé reste servi jusqu'à son terme "
+            f"({fin.date().isoformat()}). Tu peux le reprendre quand tu veux, "
+            "au même prix.")
+
+
+# Le libelle du bouton qui mene chez Stripe. Ecrit ICI, et pas dans
+# bot.py : `langue_bot` releve les phrases de bot.py pour les traduire en
+# cinq langues, et celle-ci n'a rien a y faire — la boutique est en
+# francais, et le dictionnaire se fait limiter quand on le nourrit pour
+# rien.
+LIEN_CARTE = "Mettre à jour ma carte"
+
+
+def message_paiement_refuse(fiche=None, lien="", libelle="", consequence=""):
+    """
+    Ce qu'on ecrit quand la banque refuse le prelevement.
+
+    Sans ce message, le client n'apprenait rien : Stripe relance dans son
+    coin pendant trois semaines, l'abonnement expire au bout de trente et
+    un jours, et il decouvrait la panne en voyant sa creation eteinte.
+
+    Dans cet ordre : ce qui s'est passe, ce que ca coute si on ne fait
+    rien, ce qu'il y a a faire. Et surtout le lien : sans lui, il faut
+    resilier et re-souscrire pour changer une carte.
+    """
+    if libelle:
+        # Le premium passe par ici : il n'a pas de fiche de boutique, mais
+        # ses abonnes meritent le meme message.
+        perte = f" et {consequence}" if consequence else ""
+    else:
+        offre = ABONNEMENTS[lire_produit_abonnement((fiche or {}).get("produit"))]
+        libelle = offre["libelle"]
+        perte = (" et **ta création sera éteinte**"
+                 if offre["clef"] == "hebergement" else "")
+    texte = (f"Le prélèvement de ton abonnement **{libelle}** a été "
+             "refusé — carte expirée, plafond atteint, ou refus passager de "
+             "la banque.\n\nTa banque sera représentée automatiquement "
+             "plusieurs fois dans les prochains jours. Si aucun paiement ne "
+             f"passe, l'abonnement s'arrête{perte}.")
+    if lien:
+        texte += ("\n\nLe bouton ci-dessous ouvre ta page de paiement chez "
+                  "Stripe : tu peux y changer de carte, ou arrêter "
+                  "l'abonnement si tu préfères.")
+    else:
+        texte += ("\n\nÉcris-nous ici et on t'envoie le lien pour changer "
+                  "de carte.")
+    return ("⚠️ Ton paiement a été refusé", texte)
+
+
+def alerte_paiement_refuse(fiche, envoye=True, raison=""):
+    """
+    Ce que l'equipe lit quand un prelevement est refuse.
+
+    Le dit aussi quand le CLIENT n'a pas pu etre prevenu : messages
+    prives fermes, plus aucun serveur en commun. Sans cette ligne,
+    l'equipe croirait le client au courant, et personne ne rattraperait
+    l'abonnement avant que Stripe l'arrete.
+    """
+    offre = ABONNEMENTS[lire_produit_abonnement((fiche or {}).get("produit"))]
+    texte = (f"<@{(fiche or {}).get('discord_id')}> n'a pas pu être prélevé. "
+             "Stripe va réessayer plusieurs fois avant d'arrêter l'abonnement.")
+    if not envoye:
+        texte += f"\n\n**Le client n'a pas été prévenu** : {raison}."
+    return (f"Un paiement {offre['equipe']} a été refusé", texte)
 
 
 # ══════════════════════════════════════════════════════════════════════
