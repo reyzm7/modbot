@@ -5418,3 +5418,131 @@ consommation, le portfolio, les tests automatisés du parcours de paiement,
 et — décidé par le propriétaire — l'acompte (paiement complet à la
 commande) ainsi que le SIRET et l'adresse postale, qui ne figurent nulle
 part faute d'immatriculation.
+
+## 74. Livré les 13 et 14 septembre 2026 — l'affichage repris, et quatre trous bouchés
+
+Quatre demandes en quatre jours, plus une relecture du projet demandée le
+14. Ce qui suit reprend le tout, dans l'ordre où c'est arrivé.
+
+### Le tableau de bord se lit
+
+Les libellés de la barre latérale étaient boîtés en 22 × 22 px et coupés
+(« Vie du serveur » devenait « Vie du serv… ») : un sélecteur `.dash-nav
+span` attrapait aussi bien la pastille de l'icône que le texte à côté.
+Il vise maintenant `> span[aria-hidden="true"]`, et le texte a son propre
+retour à la ligne. L'entrée active n'est plus en gras — elle l'était deux
+fois, par la couleur et par la graisse.
+
+### Trois filtres peuvent reculer d'un salon
+
+Anti-lien, anti-spam et filtre de langage acceptent chacun une liste de
+salons où ils ne s'appliquent pas. Un seul chemin de code
+(`sc.salon_exempte`), trois listes. Le bloc n'apparaît dans la page que
+quand le filtre est allumé : proposer des exceptions à une règle éteinte
+n'a pas de sens.
+
+Le salon est exempté s'il correspond, ou si sa catégorie correspond :
+mieux vaut reculer d'un salon que du serveur entier.
+
+### Une seule liste de mots filtrés
+
+Deux interfaces tenaient chacune leur liste, et chaque enregistrement
+écrasait l'autre : un mot ajouté disparaissait au rechargement. Elles
+partagent désormais `motsFiltres`.
+
+### Les images des tickets
+
+Une illustration de plus de 256 Ko échouait en silence comme emoji. Elle
+part maintenant en pièce jointe (`attachment://`), jusqu'à 8 Mo et neuf
+images — l'emoji reste pour les petites, qui s'affichent dans le texte.
+Réservé aux serveurs premium.
+
+### L'hébergement devient un choix, pas une option
+
+À la commande, le client décide : il héberge lui-même (gratuit, on livre
+les fichiers et la marche à suivre) ou nous hébergeons (3,50 €/mois).
+**Rien n'est prélevé le jour de la commande** : l'abonnement démarre à la
+livraison, et le client l'active lui-même. On le lui dit deux fois — à la
+commande, et à la livraison.
+
+`ABONNEMENTS` porte donc deux produits. La maintenance garde sa clef
+historique (l'identifiant Discord seul) : renommer les fiches aurait perdu
+les abonnements en cours au premier redémarrage.
+
+### Le fond, et le passage d'une page à l'autre
+
+L'écran de choix du serveur portait un aplat gris Discord sur toute la
+hauteur : le décor vivant était derrière, invisible. Le gris est parti.
+
+Un voile noir passe entre deux pages : posé en 190 ms au départ, effacé en
+420 ms à l'arrivée. **L'opacité de repos est zéro, et l'animation part de
+un** : si les animations ne tournent pas, le voile reste invisible —
+l'inverse aurait laissé un écran noir définitif. Il est écrit dans le
+HTML et non créé par le script : créé après coup, la page apparaîtrait
+avant de disparaître.
+
+### Les partenaires
+
+ePro League et POODX Ranking Server retirés à la demande du propriétaire,
+V-Hub ajouté. Une invitation Discord qui expire ne se voit nulle part —
+la carte garde son monogramme et le bouton mène au vide. Deux des huit
+expiraient ; les liens ont été renouvelés, et il reste **CPG Belge, qui
+expire le 12 octobre 2026**.
+
+### Un paiement refusé ne s'arrête plus en silence
+
+Stripe envoie `invoice.payment_failed` quand la banque refuse. **Personne
+ne l'écoutait**, ni côté boutique ni côté premium. La suite était
+invisible : Stripe relance dans son coin pendant trois semaines, la fiche
+expire au bout de trente et un jours, et le client découvre la panne en
+voyant sa création éteinte. Puis, à l'abandon, il recevait « le mois déjà
+payé reste servi jusqu'à son terme » — une date passée depuis vingt
+jours.
+
+Au premier refus, désormais : un message privé qui dit ce qui s'est
+passé et ce qu'il y a à faire, avec le lien pour changer de carte, et une
+alerte à l'équipe — qui précise si le client n'a **pas** pu être prévenu.
+Le statut ne bouge pas : la période en cours est payée, elle reste due.
+
+Le lien mène au portail de facturation Stripe, nouveau lui aussi
+(`/api/boutique/portail`, et un bouton sur la boutique). Sans lui,
+changer de carte obligeait à résilier puis re-souscrire — et entre les
+deux, l'hébergement s'arrête. **Aucun numéro de carte ne traverse ce
+serveur.**
+
+### L'administration voit qui paie son hébergement
+
+Le mot « hébergement » n'apparaissait pas une fois dans l'administration.
+Une création livrée « hébergée par nous » dont l'abonnement n'a jamais
+démarré ne se voyait donc nulle part. `/api/admin/boutique` rend
+maintenant les abonnements — le produit, le statut, s'il est actif, sa
+date, et rien d'autre : ni identifiant client Stripe, ni session. La
+fiche d'une commande livrée sans hébergement payé porte une pastille
+d'alerte.
+
+### Le site pesait 478 Ko avant d'afficher une ligne
+
+`translations.js` portait les cinq langues — 904 Ko bruts, 257 Ko
+compressés — et se téléchargeait sur **chaque page**, par **chaque
+visiteur**. Un lecteur français recevait l'arabe, l'allemand, l'espagnol
+et l'anglais pour ne jamais les lire.
+
+Le français reste dans `translations.js` : il sert de repli à tout le
+site et doit être là sans attendre. Les quatre autres sont dans
+`traductions-<langue>.js`, demandés par `script.js` quand on en a besoin.
+**La liste des langues ne se déduit plus du contenu chargé**
+(`window.MODBOT_LANGUES`) : s'y fier aurait ramené tout le monde au
+français.
+
+Un fichier qui n'arrive pas laisse la page en français — ce qu'elle est
+déjà dans son HTML. Mieux vaut une langue qu'on n'attendait pas qu'une
+page vide.
+
+### Ce qui reste à faire, et qui n'est pas du code
+
+- **Un vrai nom de domaine.** Le site vend des créations à 200 € depuis
+  `modbot-website.vercel.app`.
+- **L'invitation de CPG Belge**, qui expire le 12 octobre 2026.
+- **Les quatre traductions sont invisibles pour Google** : une seule URL,
+  langue changée en JavaScript. Corriger demanderait des URL par langue.
+  C'est un choix, pas un oubli.
