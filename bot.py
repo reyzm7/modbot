@@ -10155,6 +10155,23 @@ def commande_pour_admin(fiche):
             "faites": faites, "etapes_total": total}
 
 
+def abonnement_pour_admin(fiche):
+    """
+    Ce que l'administration a besoin de savoir d'un abonnement.
+
+    Juste assez pour repondre a la seule question qui se pose devant une
+    commande livree : « celui-la paie-t-il son hebergement ? » — et pas
+    une ligne de plus. Ni session Stripe, ni identifiant client : rien de
+    tout cela ne regarde le navigateur.
+    """
+    return {"discord_id": str(fiche.get("discord_id") or ""),
+            "produit": bq.lire_produit_abonnement(fiche.get("produit")),
+            "statut": str(fiche.get("statut") or ""),
+            "statut_label": bq.LIBELLES_ABONNEMENT.get(fiche.get("statut"), "?"),
+            "actif": bool(bq.abonnement_actif(fiche, now())),
+            "jusqu_au": str(fiche.get("jusqu_au") or "")}
+
+
 def devis_pour_admin(fiche):
     # La cle ne part jamais telle quelle : seulement dans le lien, et
     # seulement quand il y a un prix a payer.
@@ -10189,6 +10206,10 @@ async def api_admin_boutique(request):
                       _recent(commandes_tout().values(), "payee_le", "creee_le")],
         "devis": [devis_pour_admin(f) for f in _recent(devis_tout().values(), "creee_le")],
         "sav": [sav_pour_admin(f) for f in _recent(sav_tout().values(), "creee_le")],
+        # Sans eux, l'administration ne pouvait pas voir qu'une creation
+        # livree « hebergee par nous » n'avait jamais ete activee : le
+        # client l'oublie, et 3,50 EUR par mois ne se reclament jamais.
+        "abonnements": [abonnement_pour_admin(f) for f in abonnements_tout().values()],
     }, request=request)
 
 

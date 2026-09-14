@@ -1692,6 +1692,23 @@ verifier("le premium aussi previent quand la carte est refusee",
          and "prevenir_paiement_refuse(" in source_b)
 verifier("aucun numero de carte ne traverse le bot",
          "/billing_portal/sessions" in source_b)
+# L'administration ne voyait rien des abonnements : impossible d'y
+# reperer une creation livree « hebergee par nous » dont l'abonnement
+# n'a jamais demarre.
+verifier("l'administration recoit les abonnements",
+         '"abonnements": [abonnement_pour_admin(f)' in source_b)
+fiche_abo = bot_mod.abonnement_pour_admin(
+    {**actif, "produit": "hebergement", "client": "cus_secret",
+     "session": "cs_secret", "jusqu_au": (bot_mod.now() + timedelta(days=9)).isoformat()})
+verifier("elle dit le produit, le statut et s'il est actif",
+         fiche_abo["produit"] == "hebergement" and fiche_abo["actif"] is True
+         and fiche_abo["statut_label"])
+verifier("elle ne laisse filer ni le client ni la session Stripe",
+         "cus_secret" not in str(fiche_abo) and "cs_secret" not in str(fiche_abo))
+verifier("un abonnement fini n'est plus annonce actif",
+         bot_mod.abonnement_pour_admin(
+             {**actif, "jusqu_au": (bot_mod.now() - timedelta(days=1)).isoformat()}
+         )["actif"] is False)
 verifier("la facture part au client des que la commande est payee",
          "await envoyer_la_facture(fiche)" in source_b)
 verifier("un code promo n'est consomme qu'au paiement",
