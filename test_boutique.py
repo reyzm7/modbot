@@ -441,6 +441,12 @@ async def commander(corps):
     return lire(await bot_mod.api_boutique_commande(FausseRequete(corps)))
 
 
+# Le prix du catalogue, lu une fois. Le recopier faisait echouer des
+# verifications qui n'ont rien a voir avec les tarifs le jour ou ils
+# baissent.
+PRIX_ESSENTIEL = bq.ARTICLES["bot_essentiel"]["prix"]
+
+
 async def scenario():
     # Le prix vient du catalogue, quoi que dise la requete.
     reponse = await commander(dict(bonne, article="bot_essentiel", moyen="carte",
@@ -449,8 +455,7 @@ async def scenario():
     verifier("la commande ouvre une session de paiement Stripe",
              chemin == "/checkout/sessions" and reponse["url"].startswith("https://"))
     verifier("le montant est celui du catalogue, pas celui de la requete",
-             donnees["line_items[0][price_data][unit_amount]"]
-             == str(bq.ARTICLES["bot_essentiel"]["prix"]),
+             donnees["line_items[0][price_data][unit_amount]"] == str(PRIX_ESSENTIEL),
              donnees["line_items[0][price_data][unit_amount]"])
     verifier("un paiement unique, pas un abonnement", donnees["mode"] == "payment")
     verifier("la carte bancaire est demandee a Stripe",
@@ -462,7 +467,8 @@ async def scenario():
              "client_reference_id" not in donnees and "metadata[user_id]" not in donnees)
     fiche = bot_mod.commandes_tout().get(reponse["numero"])
     verifier("la commande est enregistree, en attente de paiement",
-             fiche and fiche["statut"] == "en_attente" and fiche["montant"] == 1900)
+             fiche and fiche["statut"] == "en_attente"
+             and fiche["montant"] == PRIX_ESSENTIEL)
 
     await commander(dict(bonne, moyen="paypal"))
     verifier("PayPal est demande a Stripe", envois_stripe[-1][2]["payment_method_types[0]"] == "paypal")
@@ -477,7 +483,7 @@ async def scenario():
     # Le webhook : signature, paiement confirme, une seule annonce.
     numero = reponse["numero"]
     evenement = {"type": "checkout.session.completed", "data": {"object": {
-        "id": "cs_test_1", "payment_status": "paid", "amount_total": 1900,
+        "id": "cs_test_1", "payment_status": "paid", "amount_total": PRIX_ESSENTIEL,
         "metadata": {"type": "boutique", "commande": numero, "article": "bot_essentiel",
                      "discord": "client_42", "moyen": "carte"},
         "customer_details": {"email": "client@exemple.fr", "name": "Client"}}}}
