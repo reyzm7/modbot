@@ -1857,7 +1857,8 @@ def embed_dossier_sanction(guild, nb, raison):
         inline=False)
     embed.add_field(
         name="🤔 Ce n'est pas juste ?",
-        value="Le bouton ci-dessous previent l'equipe du serveur. Un humain relira.",
+        value=("Le bouton **Contester** ci-dessous previent l'equipe du serveur. "
+               "Un humain relira."),
         inline=False)
     return embed
 
