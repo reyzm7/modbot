@@ -14900,6 +14900,7 @@ class ModalMotifTicket(discord.ui.Modal, title="🎫 Ouvrir un ticket"):
             "priority": 0, "closed": False, "motif": self.motif.value, "date": now().strftime("%Y-%m-%d %H:%M:%S")
         }
         save_tickets(tickets)
+        rapport_compter(gid, "tickets")
         tdata = tickets["tickets"][str(channel.id)]
         e = build_ticket_welcome_embed(i.guild, tdata, i.user.mention)
         mentions = [i.user.mention]
