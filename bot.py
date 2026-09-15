@@ -18349,6 +18349,50 @@ async def security_whitelist(i: discord.Interaction, action: app_commands.Choice
     await log_event(i.guild, "admin", "Liste blanche anti-nuke modifiee",
                     "\n".join(changed), severity="warning", actor=i.user)
 
+@security_group.command(name="ia-test",
+                        description="Verifier que la clef de l'assistant IA fonctionne")
+async def security_ia_test(i: discord.Interaction):
+    """
+    Le plus petit appel possible au fournisseur, pour separer « clef
+    presente » de « clef qui marche ».
+
+    `ai_verifier_clef` existait et n'etait appele NULLE PART. Sans lui, la
+    seule facon d'essayer une clef etait de mentionner le bot dans un
+    salon, devant tout le monde — et d'attendre de voir s'il repondait.
+
+    La reponse est ephemere : un message d'erreur d'API n'a rien a faire
+    devant les membres.
+    """
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id)
+
+    if not ai_available():
+        return await i.followup.send(embed=embed_warning(
+            "Aucune clef chargee",
+            f"La variable `{AI_ENV_KEY}` n'est pas posee sur cet hebergement.",
+            gid), ephemeral=True)
+
+    ok, message = await ai_verifier_clef()
+    embed = (embed_success("La clef fonctionne", message, gid) if ok
+             else embed_error("La clef est refusee", message, gid))
+
+    # Ce qui empecherait quand meme l'assistant de repondre ICI : autant
+    # le dire dans le meme souffle, plutot que de le decouvrir apres.
+    obstacles = []
+    if not est_premium(gid):
+        obstacles.append("l'abonnement premium de ce serveur n'est pas actif")
+    reglages = ai_cfg(gid)
+    if not reglages["enabled"]:
+        obstacles.append("l'assistant est eteint au tableau de bord")
+    if reglages["channels"] and str(i.channel_id) not in reglages["channels"]:
+        obstacles.append("l'assistant ne repond pas dans ce salon")
+    if obstacles:
+        embed.add_field(name="⚠️ Meme avec une clef valide",
+                        value="\n".join(f"• {o}" for o in obstacles), inline=False)
+
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
 @security_group.command(name="lockdown", description="Activer ou lever manuellement le mode securite")
 @app_commands.describe(actif="Activer (true) ou lever (false) le mode securite")
 async def security_lockdown(i: discord.Interaction, actif: bool):
