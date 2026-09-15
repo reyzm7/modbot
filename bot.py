@@ -20,6 +20,7 @@ import langue_bot as lb
 import boutique as bq
 import devis_pdf as dp
 import communaute as cm
+import rapport as rp
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -328,6 +329,14 @@ F_VOTES = chemin_donnees("votes.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
+# Les chiffres de la semaine, par serveur. Pas sauvegardes dans Discord :
+# perdre une semaine de comptage ne coute qu'un rapport, et le fichier
+# grossirait la sauvegarde pour rien.
+F_SEMAINE = chemin_donnees("semaine.json")
+# Les bannissements a lever, eux, DOIVENT survivre a un redeploiement :
+# les perdre, c'est laisser quelqu'un banni pour toujours alors qu'on lui
+# avait dit « une semaine ».
+F_TEMPBANS = chemin_donnees("tempbans.json")
 F_DATABASE = os.environ.get("MODBOT_DATABASE", chemin_donnees("modbot_dashboard.db"))
 
 
@@ -420,6 +429,9 @@ TAILLE_MAX_SAUVEGARDE = 6 * 1024 * 1024
 # fait l'inverse — elle oublie de sauvegarder, ce qui se repare.
 FICHIERS_SAUVEGARDES = (
     "config.json",        # les reglages : c'est le fichier qui compte
+    # Un bannissement temporaire perdu ne se leve jamais : on aurait dit
+    # « une semaine » et ce serait devenu « pour toujours ».
+    "tempbans.json",
     "blacklist.json",
     "tickets.json",
     "giveaways.json",
@@ -1807,6 +1819,7 @@ def reset_avert(uid, gid):
 
 async def appliquer_sanction(member, nb, raison):
     """Sanction progressive : warn→mute4h→mute24h→ban"""
+    rapport_compter(getattr(getattr(member, "guild", None), "id", None), "sanctions")
     result = {"type": "warn", "success": True, "label": "⚠️ Avertissement", "duration": "Aucune"}
     try:
         if nb == 2:
@@ -10274,6 +10287,30 @@ async def api_admin_boutique_version(request):
 
 # ── Quand quelque chose se passe mal, quelqu'un doit l'apprendre ───────
 
+# ══════════════════════════════════════════════════════════════════════
+#  LES CHIFFRES DE LA SEMAINE
+# ══════════════════════════════════════════════════════════════════════
+#
+# Un bot de moderation reussit en etant invisible : plus il travaille
+# bien, moins on le remarque, et plus on finit par se demander a quoi il
+# sert. Un message par semaine au proprietaire repond a la question avant
+# qu'elle soit posee.
+#
+# Rien n'est estime : chaque chiffre est compte au moment ou la chose
+# arrive. `rapport.py` decide, sans Discord et sans horloge cachee.
+
+def rapport_compter(gid, quoi, combien=1):
+    """Un evenement de plus dans la semaine de ce serveur."""
+    if not gid:
+        return
+    try:
+        jsave(F_SEMAINE, rp.compter(jload(F_SEMAINE), gid, quoi, now(), combien))
+    except Exception as erreur:
+        # Compter ne doit JAMAIS empecher de moderer : si le fichier est
+        # illisible, on perd un chiffre, pas une sanction.
+        print(f"rapport: comptage {quoi} impossible ({erreur})")
+
+
 async def alerter_equipe(titre, texte, couleur=0xED4245):
     """
     Un message prive a chaque administrateur du bot ; rend le nombre d'envois.
@@ -15786,6 +15823,8 @@ async def signaler_arrivee_bot(membre):
 async def on_member_join(member):
     gid = str(member.guild.id)
     cfg = get_cfg(gid)
+    if not member.bot:
+        rapport_compter(gid, "arrivees")
 
     # Un bot qui arrive est l'evenement le plus lourd de consequences sur
     # un serveur : il vient avec ses permissions. « bot_add » etait prevu
@@ -18680,6 +18719,7 @@ async def apply_ladder_sanction(member, step, reason):
     Applique un palier de l'echelle de sanctions.
     Retourne {"applied": bool, "label": str, "error": str|None}
     """
+    rapport_compter(getattr(getattr(member, "guild", None), "id", None), "filtres")
     action = step.get("action", "warn")
     minutes = int(step.get("minutes") or 0)
     label = step.get("fr", action)
@@ -19370,6 +19410,243 @@ def statuts_possibles():
     return phrases
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  ARRIVEE ET DEPART DU BOT
+# ══════════════════════════════════════════════════════════════════════
+#
+# Il ne se passait RIEN quand ModBot rejoignait un serveur. Celui qui
+# venait de l'installer voyait un bot muet et devait deviner la suite :
+# un bot qui ne montre rien dans ses cinq premieres minutes se fait
+# retirer dans la semaine, et personne ne sait pourquoi.
+#
+# Et son depart ne se voyait pas davantage. Savoir qu'on perd des
+# serveurs vaut mieux que de l'apprendre en comptant.
+
+def premier_salon_ecrivable(guild):
+    """
+    Ou poser le mot de bienvenue.
+
+    Le salon systeme d'abord — c'est celui que Discord a choisi pour ce
+    genre de message. Sinon le premier salon ou ModBot peut ecrire. Si
+    aucun ne convient, on ne force rien : le proprietaire recevra tout de
+    meme le message en prive.
+    """
+    moi = guild.me
+    if moi is None:
+        return None
+    candidats = []
+    if guild.system_channel:
+        candidats.append(guild.system_channel)
+    candidats += sorted(guild.text_channels, key=lambda s: s.position)
+    for salon in candidats:
+        droits = salon.permissions_for(moi)
+        if droits.send_messages and droits.embed_links:
+            return salon
+    return None
+
+
+def embed_bienvenue_serveur(guild):
+    """Ce que lit un serveur qui vient d'installer ModBot."""
+    embed = E("👋 Merci pour l'installation !",
+              "ModBot est en place. Il ne fait **rien** tant que tu n'as rien "
+              "activé — c'est voulu : aucun bot ne devrait modérer un serveur "
+              "sans qu'on le lui ait demandé.", Palette.INFO)
+    embed.add_field(
+        name="⚡ Les trois choses à activer en premier",
+        value=("**1.** L'anti-raid — il veille sur les arrivées en masse\n"
+               "**2.** Le filtre de langage — il nettoie sans que personne ait à lire\n"
+               "**3.** Les tickets — pour que tes membres puissent écrire à l'équipe"),
+        inline=False)
+    embed.add_field(
+        name="🎛️ Tout se règle au tableau de bord",
+        value="Connecte-toi avec Discord, choisis ce serveur, et coche ce que tu veux.",
+        inline=False)
+    embed.add_field(name="📚 Pour découvrir", value="`/aide` liste toutes les commandes.",
+                    inline=False)
+    return embed
+
+
+@bot.event
+async def on_guild_join(guild):
+    """Le mot de bienvenue, et l'alerte a l'equipe."""
+    salon = premier_salon_ecrivable(guild)
+    if salon is not None:
+        try:
+            await salon.send(embed=embed_bienvenue_serveur(guild), view=vue_liens_modbot())
+        except Exception as erreur:
+            print(f"arrivee: message impossible sur {guild.id} ({erreur})")
+
+    # Le proprietaire, en prive : c'est lui qui a les droits, et c'est lui
+    # qui decidera. Le salon public, souvent, il ne le lit pas.
+    proprietaire = guild.owner
+    if proprietaire is not None:
+        try:
+            await proprietaire.send(embed=embed_bienvenue_serveur(guild),
+                                    view=vue_liens_modbot())
+        except Exception:
+            pass  # MP fermes : le message du salon suffit
+
+    dashboard_log("guild_join", guild=guild, detail=f"{guild.member_count} membres")
+    await alerter_equipe(
+        "Un serveur de plus",
+        f"**{guild.name}** vient d'ajouter ModBot.\n"
+        f"`{guild.member_count}` membres · `{len(bot.guilds)}` serveurs au total.",
+        0x43B581)
+
+
+@bot.event
+async def on_guild_remove(guild):
+    """
+    Le depart, dit aussi franchement que l'arrivee.
+
+    C'est le chiffre le plus utile et le plus desagreable : savoir qu'on
+    perd des serveurs vaut mieux que de l'apprendre en comptant.
+    """
+    dashboard_log("guild_remove", guild=guild, detail=f"{guild.member_count} membres")
+    await alerter_equipe(
+        "Un serveur en moins",
+        f"**{guild.name}** a retiré ModBot.\n"
+        f"`{guild.member_count}` membres · il en reste `{len(bot.guilds)}`.",
+        0xFAA61A)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  LES BANNISSEMENTS TEMPORAIRES
+# ══════════════════════════════════════════════════════════════════════
+#
+# Entre vingt-huit jours de silence — le plafond d'une exclusion Discord
+# — et « banni pour toujours », il n'y avait rien. Or c'est la sanction
+# la plus courante en moderation reelle : « tu reviens dans une semaine ».
+
+def tempbans_tout():
+    donnees = jload(F_TEMPBANS)
+    return donnees if isinstance(donnees, dict) else {}
+
+
+async def lever_les_bans(maintenant=None):
+    """
+    Un tour de levees ; rend le nombre de bannissements leves.
+
+    Une levee qui echoue N'EST PAS reessayee indefiniment : la fiche part
+    dans tous les cas. Le membre a peut-etre ete debanni a la main, ou le
+    serveur a retire ModBot — reessayer toutes les minutes pour toujours
+    ne rendrait service a personne.
+    """
+    maintenant = maintenant or now()
+    table = tempbans_tout()
+    dus = rp.bans_a_lever(table, maintenant)
+    if not dus:
+        return 0
+
+    leves = 0
+    for gid, ban in dus:
+        guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
+        if guild is not None:
+            try:
+                await guild.unban(discord.Object(id=int(ban["membre"])),
+                                  reason="[ModBot] Fin du bannissement temporaire")
+                leves += 1
+                await log_event(guild, "moderation", "Bannissement temporaire levé",
+                                f"Le bannissement de `{ban['membre']}` est arrivé à son terme.",
+                                severity="info")
+            except discord.NotFound:
+                pass  # Deja debanni a la main : tres bien
+            except Exception as erreur:
+                print(f"tempban: levee impossible sur {gid} ({erreur})")
+        table = rp.retirer_ban(table, gid, ban["membre"])
+    jsave(F_TEMPBANS, table)
+    return leves
+
+
+async def tempbans_loop():
+    """Toutes les minutes : ce qui est arrive a terme."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await lever_les_bans()
+        except Exception as erreur:
+            print(f"boucle tempbans: {erreur}")
+        await asyncio.sleep(60)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  LE RAPPORT DE LA SEMAINE
+# ══════════════════════════════════════════════════════════════════════
+
+def embed_rapport(guild, compte):
+    """Les chiffres de la semaine, pour le proprietaire."""
+    embed = E(f"📊 Ta semaine sur {guild.name}",
+              "Voici ce que ModBot a fait pendant les sept derniers jours.",
+              Palette.INFO)
+    lignes = [("👥 Nouveaux membres", compte["arrivees"]),
+              ("⚠️ Sanctions appliquées", compte["sanctions"]),
+              ("🚫 Messages filtrés", compte["filtres"]),
+              ("🎫 Tickets ouverts", compte["tickets"])]
+    for nom, valeur in lignes:
+        if valeur:
+            embed.add_field(name=nom, value=f"`{valeur}`", inline=True)
+    embed.add_field(
+        name="🎛️ Tout se règle au tableau de bord",
+        value="Un chiffre te surprend ? Le journal du serveur dit qui, quand et pourquoi.",
+        inline=False)
+    embed.set_footer(text="Un rapport par semaine, seulement quand il s'est passé quelque chose.")
+    return embed
+
+
+async def envoyer_les_rapports(maintenant=None):
+    """
+    Un tour de rapports ; rend le nombre envoye.
+
+    La semaine est close dans TOUS les cas, envoyee ou non : un
+    proprietaire injoignable ne doit pas accumuler ses chiffres jusqu'a
+    recevoir un jour le compte de six mois.
+    """
+    maintenant = maintenant or now()
+    table = jload(F_SEMAINE)
+    if not isinstance(table, dict):
+        table = {}
+    dus = rp.a_rendre(table, maintenant)
+    if not dus:
+        return 0
+
+    envoyes = 0
+    for gid, compte in dus:
+        guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
+        proprietaire = getattr(guild, "owner", None)
+        if guild is not None and proprietaire is not None:
+            try:
+                await proprietaire.send(embed=embed_rapport(guild, compte),
+                                        view=vue_liens_modbot())
+                envoyes += 1
+            except Exception as erreur:
+                print(f"rapport: {gid} non envoye ({erreur})")
+        table = rp.apres_envoi(table, gid, maintenant)
+    jsave(F_SEMAINE, table)
+    return envoyes
+
+
+async def rapports_loop():
+    """
+    Toutes les heures : les semaines arrivees a terme.
+
+    Pas « tous les lundis a 9 h » : chaque serveur a sa propre semaine,
+    qui commence le jour ou il a compte sa premiere chose. Un rapport qui
+    tomberait pour tout le monde au meme moment ferait une salve de
+    messages prives, et Discord n'aime pas les salves.
+    """
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await envoyer_les_rapports()
+        except Exception as erreur:
+            print(f"boucle rapports: {erreur}")
+        await asyncio.sleep(3600)
+
+
+_tempbans_task = None
+_rapports_task = None
+
+
 async def presence_loop():
     """Fait tourner le statut. Discord tolere largement ce rythme."""
     await bot.wait_until_ready()
@@ -19834,6 +20111,7 @@ async def on_ready():
     global _security_task, _autobackup_task, _giveaway_task, _sauvegarde_task
     global _battement_task, _rappels_task
     global _anniversaires_task
+    global _tempbans_task, _rapports_task
     global _licences_task
     global _presence_task
     global _sauvegarde_a_faire
@@ -19907,6 +20185,10 @@ async def on_ready():
         _anniversaires_task = asyncio.create_task(anniversaires_loop())
     if not _rappels_membres_task or _rappels_membres_task.done():
         _rappels_membres_task = asyncio.create_task(rappels_loop())
+    if not _tempbans_task or _tempbans_task.done():
+        _tempbans_task = asyncio.create_task(tempbans_loop())
+    if not _rapports_task or _rapports_task.done():
+        _rapports_task = asyncio.create_task(rapports_loop())
     try:
         # Les descriptions des commandes, dans chaque langue de Discord.
         # Discord ne connait qu'une liste de commandes pour tous les
@@ -20392,11 +20674,25 @@ async def cmd_warn(i: discord.Interaction, membre: discord.Member):
     try: await i.response.send_modal(ModalWarn(membre))
     except Exception: pass
 
-@bot.tree.command(name="ban", description="🔨 Bannir manuellement un membre")
-@app_commands.describe(membre="Le membre à bannir", raison="Raison du bannissement")
+@bot.tree.command(name="ban", description="🔨 Bannir un membre, pour toujours ou pour un temps")
+@app_commands.describe(membre="Le membre à bannir", raison="Raison du bannissement",
+                       duree="Durée du bannissement : 7j, 24h, 1h30… (vide = définitif)")
 @app_commands.checks.has_permissions(ban_members=True)
-async def cmd_ban(i: discord.Interaction, membre: discord.Member, raison: str = "Aucune raison fournie"):
+async def cmd_ban(i: discord.Interaction, membre: discord.Member,
+                  raison: str = "Aucune raison fournie", duree: str = ""):
     gid = str(i.guild.id)
+
+    # Entre vingt-huit jours d'exclusion — le plafond de Discord — et
+    # « pour toujours », il n'y avait rien. C'est pourtant la sanction la
+    # plus courante : « tu reviens dans une semaine ».
+    limite = None
+    if str(duree or "").strip():
+        limite = rp.duree_ban_valide(parse_duree(duree))
+        if limite is None:
+            return await send_error(
+                i, "Durée incomprise",
+                "Écris par exemple `7j`, `24h` ou `1h30`.\n"
+                "Entre une minute et un an ; laisse vide pour un bannissement définitif.")
 
     # Verifications avant toute action irreversible
     if membre.id == i.user.id:
@@ -20417,13 +20713,18 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member, raison: str = 
             f"Le role de {membre.mention} est superieur a celui de ModBot.\n"
             "Deplace le role **ModBot** plus haut dans la liste des roles.")
 
+    duree_lisible = sc.human_duration(int(limite.total_seconds() // 60)) if limite else ""
     confirmed, view = await ask_confirmation(
         i, "Confirmer le bannissement",
-        f"Tu es sur le point de bannir **definitivement** {membre.mention} de **{i.guild.name}**.",
+        (f"Tu es sur le point de bannir {membre.mention} de **{i.guild.name}** "
+         f"pour **{duree_lisible}**." if limite else
+         f"Tu es sur le point de bannir **definitivement** {membre.mention} "
+         f"de **{i.guild.name}**."),
         confirm_label="Bannir",
         fields=[
             ("👤 Membre", f"{membre} (`{membre.id}`)"),
             ("📋 Raison", raison),
+            ("⏳ Durée", duree_lisible or "Définitif"),
             ("📅 Arrive le", fmt(membre.joined_at) if membre.joined_at else "inconnu"),
         ],
     )
@@ -20433,7 +20734,11 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member, raison: str = 
 
     try:
         dm = EG("🔨 Tu as été banni", couleur=Palette.DANGER, gid=gid)
-        dm.description = f"Tu as été banni de **{i.guild.name}**.\n\n🔓 **Conteste :** {LIEN_DEBAN}"
+        dm.description = (
+            (f"Tu as été banni de **{i.guild.name}** pour **{duree_lisible}**. "
+             "Tu pourras revenir automatiquement à la fin."
+             if limite else f"Tu as été banni de **{i.guild.name}**.")
+            + f"\n\n🔓 **Conteste :** {LIEN_DEBAN}")
         dm.add_field(name="📋 Raison", value=raison, inline=False)
         await membre.send(embed=dm)
     except Exception:
@@ -20447,12 +20752,20 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member, raison: str = 
                               "Discord a refuse l'action : verifie les permissions de ModBot.", gid),
             ephemeral=True)
 
-    add_ban(gid, str(membre.id), str(membre), raison, "Permanent", "manual_ban", i.user)
+    add_ban(gid, str(membre.id), str(membre), raison,
+            duree_lisible or "Permanent", "manual_ban", i.user)
+    if limite:
+        # Inscrit APRES le bannissement : une levee programmee pour
+        # quelqu'un qui n'a jamais ete banni ferait un debannissement
+        # fantome dans le journal du serveur.
+        jsave(F_TEMPBANS, rp.poser_ban(tempbans_tout(), gid, str(membre.id),
+                                       now() + limite, raison, str(i.user)))
 
     e = embed_success("Membre banni", "", gid)
     e.set_thumbnail(url=membre.display_avatar.url)
     e.add_field(name="👤 Membre", value=str(membre), inline=True)
     e.add_field(name="🆔 ID", value=f"`{membre.id}`", inline=True)
+    e.add_field(name="⏳ Durée", value=duree_lisible or "Définitif", inline=True)
     e.add_field(name="📋 Raison", value=raison, inline=False)
     e.add_field(name="👮 Par", value=str(i.user), inline=True)
     await target.followup.send(embed=e, ephemeral=True)
