@@ -65,7 +65,7 @@ catalogue = bq.catalogue_public()
 verifier("le catalogue public reprend les neuf articles, dans l'ordre",
          [a["key"] for a in catalogue] == list(bq.ARTICLES))
 verifier("le catalogue public donne la valeur des packs",
-         next(a for a in catalogue if a["key"] == "pack_starter")["value"] == 4800)
+         next(a for a in catalogue if a["key"] == "pack_starter")["value"] == 4300)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -449,7 +449,8 @@ async def scenario():
     verifier("la commande ouvre une session de paiement Stripe",
              chemin == "/checkout/sessions" and reponse["url"].startswith("https://"))
     verifier("le montant est celui du catalogue, pas celui de la requete",
-             donnees["line_items[0][price_data][unit_amount]"] == "1900",
+             donnees["line_items[0][price_data][unit_amount]"]
+             == str(bq.ARTICLES["bot_essentiel"]["prix"]),
              donnees["line_items[0][price_data][unit_amount]"])
     verifier("un paiement unique, pas un abonnement", donnees["mode"] == "payment")
     verifier("la carte bancaire est demandee a Stripe",

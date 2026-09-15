@@ -20765,18 +20765,44 @@ def _nettoyer_description(texte):
     return _AVANT_LE_TEXTE.sub("", (texte or "").strip()).strip()
 
 
+# Les droits demandes a l'installation. Le meme nombre que le bouton du
+# site : deux invitations qui n'accordent pas les memes droits, c'est un
+# bot qui marche ici et pas la, sans que personne comprenne pourquoi.
+PERMISSIONS_INVITATION = "3124257994829047"
+
+
+def lien_invitation_bot():
+    """L'adresse pour ajouter ModBot a un serveur."""
+    return ("https://discord.com/oauth2/authorize"
+            f"?client_id={DISCORD_CLIENT_ID}"
+            f"&permissions={PERMISSIONS_INVITATION}"
+            "&scope=bot+applications.commands")
+
+
 def vue_liens_modbot():
-    """Boutons vers le site, le wiki et le support."""
+    """
+    Les boutons sous /aide et /info-bot.
+
+    « Ajouter a mon serveur » vient en premier, et il manquait : quelqu'un
+    qui voyait le bot travailler chez un ami, puis tapait /info-bot, n'avait
+    aucun moyen de l'installer chez lui. C'est la seule action de cette
+    rangee qui fasse grandir quoi que ce soit.
+
+    Deux rangees de trois plutot qu'une de cinq et une de un : Discord
+    remplit les rangees par cinq, et ca se voyait.
+    """
     racine = site_base_url()
     vue = discord.ui.View()
-    for libelle, emoji, url in (
-        ("Dashboard", "📊", DASHBOARD_SITE_URL),
-        ("Wiki", "📚", f"{racine}/wiki.html"),
-        ("Conditions", "📜", f"{racine}/conditions.html"),
-        ("Support", "💬", "https://discord.gg/CK8CbFtYuv"),
+    for rangee, libelle, emoji, url in (
+        (0, "Ajouter à mon serveur", "➕", lien_invitation_bot()),
+        (0, "Dashboard", "📊", DASHBOARD_SITE_URL),
+        (0, "Boutique", "🛒", f"{racine}/boutique.html"),
+        (1, "Wiki", "📚", f"{racine}/wiki.html"),
+        (1, "Support", "💬", "https://discord.gg/CK8CbFtYuv"),
+        (1, "Conditions", "📜", f"{racine}/conditions.html"),
     ):
-        vue.add_item(discord.ui.Button(label=libelle, emoji=emoji,
-                                       url=url, style=discord.ButtonStyle.link))
+        vue.add_item(discord.ui.Button(label=libelle, emoji=emoji, url=url,
+                                       row=rangee, style=discord.ButtonStyle.link))
     return vue
 
 

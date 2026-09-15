@@ -31,13 +31,20 @@ DEVISE = "eur"
 # en jours a partir du moment ou le projet est precise, `revisions`
 # incluses. Un pack porte la liste de ce qu'il contient : son prix doit
 # rester sous la somme de ses parties, sinon il n'a aucune raison d'etre.
+# Les trois bots ont baisse le 15 septembre 2026 : 19/49/99 EUR devenaient
+# difficiles a defendre face a ce qui se fait sur les places de freelance,
+# ou un bot simple se negocie autour de dix a trente euros. Les sites, eux,
+# n'ont pas bouge — ce sont les bots qu'on vient comparer.
+#
+# Les packs suivent forcement : un pack doit rester moins cher que la somme
+# de ses parties, et `test_boutique` le verifie article par article.
 ARTICLES = {
     "bot_essentiel": {"categorie": "bot", "libelle": "Bot Essentiel",
-                      "prix": 1900, "delai": 3, "revisions": 1},
+                      "prix": 1400, "delai": 3, "revisions": 1},
     "bot_avance": {"categorie": "bot", "libelle": "Bot Avancé",
-                   "prix": 4900, "delai": 7, "revisions": 2},
+                   "prix": 3400, "delai": 7, "revisions": 2},
     "bot_pro": {"categorie": "bot", "libelle": "Bot Pro",
-                "prix": 9900, "delai": 14, "revisions": 3},
+                "prix": 6900, "delai": 14, "revisions": 3},
     "site_vitrine": {"categorie": "site", "libelle": "Site Vitrine",
                      "prix": 2900, "delai": 4, "revisions": 1},
     "site_complet": {"categorie": "site", "libelle": "Site Complet",
@@ -45,13 +52,13 @@ ARTICLES = {
     "site_dashboard": {"categorie": "site", "libelle": "Site + Dashboard",
                        "prix": 17900, "delai": 21, "revisions": 3},
     "pack_starter": {"categorie": "pack", "libelle": "Pack Starter",
-                     "prix": 4200, "delai": 7, "revisions": 1,
+                     "prix": 3900, "delai": 7, "revisions": 1,
                      "contient": ("bot_essentiel", "site_vitrine")},
     "pack_serveur": {"categorie": "pack", "libelle": "Pack Serveur",
-                     "prix": 10900, "delai": 14, "revisions": 2,
+                     "prix": 9900, "delai": 14, "revisions": 2,
                      "contient": ("bot_avance", "site_complet")},
     "pack_pro": {"categorie": "pack", "libelle": "Pack Pro",
-                 "prix": 24900, "delai": 30, "revisions": 3,
+                 "prix": 21900, "delai": 30, "revisions": 3,
                  "contient": ("bot_pro", "site_dashboard")},
 }
 
