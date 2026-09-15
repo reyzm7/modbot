@@ -815,7 +815,7 @@
 "Le bot n'a pas répondu pendant **⟦0⟧**.": "البوت لم يستجب لـ **⟦0⟧**.",
 "Le bot n'a pas répondu pendant **⟦0⟧**.\n\nLes paiements de cette période ne sont pas perdus : Stripe réessaie ses notifications tout seul. Si cette alerte revient souvent, c'est l'hébergement qu'il faut regarder.": "البوت لم يستجب لـ **⟦0⟧**.\n\nلا يتم فقدان الدفعات من هذه الفترة: يعيد Stripe محاولة إشعاراته من تلقاء نفسه. إذا ظهر هذا التنبيه كثيرًا، فهذه هي الاستضافة التي تحتاج إلى إلقاء نظرة عليها.",
 "Le bot ne peut pas executer cette action sur ce serveur.": "لا يمكن للروبوت تنفيذ هذا الإجراء على هذا الخادم.",
-"Le bouton ci-dessous previent l'equipe du serveur. Un humain relira.": "يقوم الزر أدناه بإعلام فريق الخادم. سوف يصحح الإنسان.",
+"Le bouton **Contester** ci-dessous previent l'equipe du serveur. Un humain relira.": "يقوم الزر **Contest** أدناه بإعلام فريق الخادم. سوف يصحح الإنسان.",
 "Le captcha reste actif, mais les salons restent visibles pour tout le monde. Tu peux verrouiller plus tard avec le dashboard, rubrique « Verification ».": "يظل رمز التحقق نشطًا، لكن القنوات تظل مرئية للجميع. يمكنك قفله لاحقًا باستخدام لوحة التحكم، قسم \"التحقق\".",
 "Le compte ⟦0⟧ de ce ModBot est inactif ou suspendu. Le propriétaire doit le vérifier sur ⟦1⟧ — réessayer n'y changera rien.": "الحساب ⟦0⟧ الخاص بـ ModBot هذا غير نشط أو معلق. يجب على المالك التحقق من ذلك على ⟦1⟧ — المحاولة مرة أخرى لن تغير أي شيء.",
 "Le compte ⟦0⟧ de ce ModBot n'a plus de crédit. Le propriétaire doit en ajouter sur ⟦1⟧ — réessayer n'y changera rien.": "لم يعد حساب ModBot هذا ⟦0⟧ يحتوي على أي رصيد. يجب على المالك إضافة المزيد إلى ⟦1⟧ — المحاولة مرة أخرى لن تغير أي شيء.",

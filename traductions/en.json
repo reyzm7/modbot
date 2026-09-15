@@ -815,7 +815,7 @@
 "Le bot n'a pas répondu pendant **⟦0⟧**.": "The bot did not answer for **⟦0⟧**.",
 "Le bot n'a pas répondu pendant **⟦0⟧**.\n\nLes paiements de cette période ne sont pas perdus : Stripe réessaie ses notifications tout seul. Si cette alerte revient souvent, c'est l'hébergement qu'il faut regarder.": "The bot did not answer for **⟦0⟧**.\n\nPayments from that period are not lost: Stripe retries its notifications on its own. If this alert comes back often, the hosting is what you should look at.",
 "Le bot ne peut pas executer cette action sur ce serveur.": "The bot cannot perform this action on this server.",
-"Le bouton ci-dessous previent l'equipe du serveur. Un humain relira.": "The button below notifies the server team. A human will proofread.",
+"Le bouton **Contester** ci-dessous previent l'equipe du serveur. Un humain relira.": "The **Contest** button below notifies the server team. A human will proofread.",
 "Le captcha reste actif, mais les salons restent visibles pour tout le monde. Tu peux verrouiller plus tard avec le dashboard, rubrique « Verification ».": "The captcha remains active, but the channels remain visible to everyone. You can lock it later with the dashboard, “Verification” section.",
 "Le compte ⟦0⟧ de ce ModBot est inactif ou suspendu. Le propriétaire doit le vérifier sur ⟦1⟧ — réessayer n'y changera rien.": "Account ⟦0⟧ of this ModBot is inactive or suspended. The owner should check it on ⟦1⟧ — trying again won't change anything.",
 "Le compte ⟦0⟧ de ce ModBot n'a plus de crédit. Le propriétaire doit en ajouter sur ⟦1⟧ — réessayer n'y changera rien.": "This ModBot's account ⟦0⟧ no longer has any credit. The owner must add to ⟦1⟧ — trying again will not change anything.",
