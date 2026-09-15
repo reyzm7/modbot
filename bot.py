@@ -1817,9 +1817,113 @@ def reset_avert(uid, gid):
         data[g][u] = {"historique": []}
         jsave(F_DATA, data)
 
+# ══════════════════════════════════════════════════════════════════════
+#  LE DOSSIER DE SANCTION
+# ══════════════════════════════════════════════════════════════════════
+#
+# « J'ai ete ban, je sais meme pas pourquoi » est la plainte numero un
+# contre les bots de moderation, sur tous les serveurs. Elle a une
+# reponse : dire ce qui s'est passe, quelle regle, ou l'on en est dans
+# l'echelle, et comment contester.
+#
+# Aucun bot ne le fait. C'est ce qui separe une moderation arbitraire
+# d'une moderation lisible — et une moderation lisible fait beaucoup
+# moins de drames.
+
+ECHELLE_LISIBLE = {
+    1: "un avertissement",
+    2: "une exclusion de 4 heures",
+    3: "une exclusion de 24 heures",
+    MAX_AVERT: "un bannissement",
+}
+
+
+def embed_dossier_sanction(guild, nb, raison):
+    """Le dossier envoye en prive au membre sanctionne."""
+    palier = ECHELLE_LISIBLE.get(nb, "une sanction")
+    embed = E(f"📋 Ton dossier sur {guild.name}",
+              f"Tu viens de recevoir **{palier}**.", Palette.WARNING)
+    embed.add_field(name="📋 Ce qui l'a declenche", value=str(raison)[:1000], inline=False)
+    # L'echelle en entier : savoir ce qui vient ensuite vaut tous les
+    # rappels a l'ordre.
+    etapes = []
+    for palier_nb in sorted(ECHELLE_LISIBLE):
+        marque = "**➜**" if palier_nb == nb else "　"
+        etapes.append(f"{marque} {palier_nb}. {ECHELLE_LISIBLE[palier_nb]}")
+    embed.add_field(name="⚖️ Ou tu en es", value="\n".join(etapes), inline=False)
+    embed.add_field(
+        name="⏱️ Ca s'efface",
+        value="Les avertissements de plus de cinq mois ne comptent plus.",
+        inline=False)
+    embed.add_field(
+        name="🤔 Ce n'est pas juste ?",
+        value="Le bouton ci-dessous previent l'equipe du serveur. Un humain relira.",
+        inline=False)
+    return embed
+
+
+def vue_contester(gid):
+    """
+    Le bouton « Contester », dans le message prive.
+
+    Il ecrit a l'equipe DU SERVEUR, pas un ticket : un membre banni ne
+    voit plus aucun salon, il ne pourrait pas en ouvrir un.
+    """
+    vue = discord.ui.View(timeout=None)
+    vue.add_item(discord.ui.Button(
+        label="Contester", emoji="🤔", style=discord.ButtonStyle.secondary,
+        custom_id=f"sanc:contester:{gid}"))
+    return vue
+
+
+async def envoyer_dossier(member, nb, raison):
+    """
+    Envoie le dossier AVANT d'appliquer la sanction.
+
+    Avant, et pas apres : un membre banni ne partage plus aucun serveur
+    avec le bot, et le message prive n'arriverait jamais.
+    """
+    guild = getattr(member, "guild", None)
+    if guild is None:
+        return False
+    try:
+        await member.send(embed=embed_dossier_sanction(guild, nb, raison),
+                          view=vue_contester(str(guild.id)))
+        return True
+    except Exception:
+        return False  # MP fermes : la sanction s'applique quand meme
+
+
+async def sanction_interaction(interaction):
+    """Le bouton « sanc:contester:<serveur> », clique depuis un message prive."""
+    donnees = interaction.data or {}
+    custom_id = str(donnees.get("custom_id") or "")
+    if not custom_id.startswith("sanc:contester:"):
+        return
+    gid = custom_id.split(":")[-1]
+    guild = bot.get_guild(int(gid)) if gid.isdigit() else None
+    membre = interaction.user
+
+    if guild is not None:
+        embed = E("🤔 Contestation d'une sanction",
+                  f"**{membre}** (`{membre.id}`) conteste sa derniere sanction.\n"
+                  "Son historique est dans `/infractions`.", Palette.WARNING)
+        await send_log(guild, embed)
+        await alert_staff(guild, "CONTESTATION", membre, membre, "Le membre conteste sa sanction")
+    try:
+        await interaction.response.send_message(
+            embed=E("✅ C'est transmis",
+                    "L'equipe du serveur a ete prevenue. Elle te repondra ici.",
+                    Palette.SUCCESS),
+            ephemeral=True)
+    except Exception:
+        pass
+
+
 async def appliquer_sanction(member, nb, raison):
     """Sanction progressive : warn→mute4h→mute24h→ban"""
     rapport_compter(getattr(getattr(member, "guild", None), "id", None), "sanctions")
+    await envoyer_dossier(member, nb, raison)
     result = {"type": "warn", "success": True, "label": "⚠️ Avertissement", "duration": "Aucune"}
     try:
         if nb == 2:
@@ -2644,6 +2748,51 @@ def build_ai_system_prompt(guild, member, reglages):
     return base
 
 
+def ai_raison_du_silence(message, reglages):
+    """
+    Pourquoi l'IA ne repondra pas, ou "" si elle repond.
+
+    Les quatre refus se faisaient EN SILENCE. Un administrateur qui
+    mentionnait le bot et n'obtenait rien n'avait aucun moyen de savoir
+    lequel des quatre s'appliquait : premium fini, assistant eteint,
+    salon non autorise, clef absente. Il croyait le bot casse.
+
+    La raison n'est montree qu'aux ADMINISTRATEURS : un membre ordinaire
+    n'a pas a lire une note de service, et repondre a tout le monde
+    ferait du bot un repondeur a chaque mention.
+    """
+    if not ai_available():
+        return ("La clef du fournisseur d'IA n'est pas posee sur ce ModBot "
+                f"(`{AI_ENV_KEY}`).")
+    if not est_premium(str(message.guild.id)):
+        return ("L'assistant IA fait partie du premium, et l'abonnement de ce "
+                "serveur n'est pas actif.")
+    if not reglages["enabled"]:
+        return "L'assistant IA est eteint. Il s'allume au tableau de bord."
+    if reglages["channels"] and str(message.channel.id) not in reglages["channels"]:
+        return ("L'assistant est limite a certains salons, et celui-ci n'en "
+                "fait pas partie.")
+    if not message.channel.permissions_for(message.guild.me).send_messages:
+        return "ModBot n'a pas la permission d'ecrire dans ce salon."
+    return ""
+
+
+async def ai_dire_pourquoi(message, raison):
+    """Montre la raison a un administrateur ; se tait pour les autres."""
+    droits = getattr(message.author, "guild_permissions", None)
+    if not (getattr(droits, "administrator", False)
+            or getattr(droits, "manage_guild", False)):
+        return False
+    try:
+        await message.reply(
+            embed=E("🤖 L'assistant ne repondra pas", raison + "\n"
+                    "-# Seuls les administrateurs voient ce message.", 0xFAA61A),
+            mention_author=False)
+    except Exception:
+        pass
+    return True
+
+
 async def handle_ai_mention(message):
     """
     Repond a une mention du bot. Retourne True si l'IA a pris la main.
@@ -2653,20 +2802,11 @@ async def handle_ai_mention(message):
     """
     gid = str(message.guild.id)
     reglages = ai_cfg(gid)
-    if not reglages["enabled"] or not ai_available():
-        return False
-    # L'IA coute des appels a un service payant : c'est du premium.
-    if not est_premium(gid):
-        return False
-
-    # Restriction eventuelle a certains salons
-    if reglages["channels"] and str(message.channel.id) not in reglages["channels"]:
-        return False
-
-    # Permissions reelles du bot dans ce salon
-    perms = message.channel.permissions_for(message.guild.me)
-    if not perms.send_messages:
-        return False
+    # Un seul endroit decide, et il sait DIRE pourquoi. Les quatre refus
+    # se faisaient en silence, et le proprietaire croyait le bot casse.
+    raison = ai_raison_du_silence(message, reglages)
+    if raison:
+        return await ai_dire_pourquoi(message, raison)
 
     # La question, une fois la mention retiree
     question = re.sub(rf"<@!?{bot.user.id}>", "", message.content or "").strip()
@@ -11265,6 +11405,7 @@ async def boutique_interaction(interaction):
 
 bot.add_listener(boutique_interaction, "on_interaction")
 bot.add_listener(avis_interaction, "on_interaction")
+bot.add_listener(sanction_interaction, "on_interaction")
 
 
 async def api_stripe_webhook(request):
@@ -14951,15 +15092,9 @@ class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
         except Exception:
             pass
 
-        try:
-            dm = EG("⚠️ Avertissement reçu", couleur=c, gid=gid)
-            dm.description = f"Tu as reçu un avertissement sur **{i.guild.name}**."
-            dm.add_field(name="📋 Raison", value=self.raison.value, inline=False)
-            dm.add_field(name="⚡ Sanction appliquée", value=sanction["label"], inline=True)
-            dm.add_field(name="📊 Progression", value=f"`{nb}/{MAX_AVERT}`", inline=True)
-            await self.membre.send(embed=dm)
-        except Exception:
-            pass
+        # Le message prive au membre est parti d'`appliquer_sanction` : le
+        # dossier complet, avec l'echelle et le bouton de contestation. Il
+        # y en avait un second ici, plus pauvre, qui disait la meme chose.
 
         le = E(f"⚠️ LOG — Avert. manuel {nb}/{MAX_AVERT} — {sanction['label']}", couleur=c)
         le.add_field(name="👤 Membre", value=str(self.membre), inline=True)
@@ -21192,7 +21327,10 @@ async def cmd_info(i: discord.Interaction):
         actifs.append("captcha")
     if (cfg.get("welcome_system") or {}).get("enabled"):
         actifs.append("bienvenue")
-    if cfg.get("ia_enabled"):
+    # « ia_enabled » n'etait ecrit NULLE PART : l'assistant n'apparaissait
+    # donc jamais dans cette liste, meme allume. Le vrai reglage est
+    # « ai_system.enabled », celui que lit l'assistant lui-meme.
+    if ai_cfg(gid)["enabled"]:
         actifs.append("assistant IA")
     e.add_field(name="🛡️ Actifs sur ce serveur",
                 value=("• " + "\n• ".join(actifs)) if actifs else
