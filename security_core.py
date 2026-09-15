@@ -529,10 +529,15 @@ class RaidDetector:
         self._joins = defaultdict(deque)
         self._safe_mode = {}
 
-    def register_join(self, guild_id, config=None):
+    def register_join(self, guild_id, config=None, membre_id=None):
         """
         Enregistre une arrivee.
         Retourne {"burst": bool, "count": int, "threshold": int, "window": int}
+
+        `membre_id` est facultatif : sans lui, on compte sans savoir qui.
+        Avec lui, `vague()` peut rendre la liste des comptes arrives
+        ensemble — c'est ce qui permet a l'equipe d'agir sur EUX, et pas
+        sur le serveur entier.
         """
         cfg = dict(DEFAULT_RAID_CONFIG)
         cfg.update(config or {})
@@ -548,8 +553,8 @@ class RaidDetector:
         now_ts = time.monotonic()
 
         bucket = self._joins[gid]
-        bucket.append(now_ts)
-        while bucket and now_ts - bucket[0] > window:
+        bucket.append((now_ts, str(membre_id) if membre_id else ""))
+        while bucket and now_ts - bucket[0][0] > window:
             bucket.popleft()
 
         return {
@@ -558,6 +563,17 @@ class RaidDetector:
             "threshold": threshold,
             "window": window,
         }
+
+    def vague(self, guild_id, window=None):
+        """
+        Les comptes encore dans la fenetre d'arrivee, du plus ancien au
+        plus recent. Ceux enregistres sans identifiant sont ignores.
+        """
+        bucket = self._joins.get(str(guild_id)) or ()
+        if window:
+            limite = time.monotonic() - max(1, int(window))
+            return [i for t, i in bucket if i and t >= limite]
+        return [i for _, i in bucket if i]
 
     def reset(self, guild_id):
         self._joins.pop(str(guild_id), None)

@@ -16797,6 +16797,56 @@ class VueAlerteAttaque(discord.ui.View):
             f"(*{alerte.get('decision')}*). Aucune action supplementaire n'est necessaire.",
             0x747F8D))
 
+    @discord.ui.button(label="Expulser la vague", emoji="🧹",
+                       style=discord.ButtonStyle.danger)
+    async def expulser(self, interaction: discord.Interaction, _button):
+        """
+        Expulse les comptes arrives ensemble — expulse, pas bannit.
+
+        Une vague d'arrivees n'est pas toujours une attaque : un streamer
+        qui cite le serveur en direct en produit une identique. Expulser
+        se defait — celui qui revient garde son compte. Bannir quarante
+        personnes par erreur ne se defait pas aussi bien.
+        """
+        alerte = self._alerte()
+        if not alerte:
+            return await safe_ephemeral(interaction, embed=E(
+                "Alerte expiree", "Cette alerte n'est plus active.", 0x747F8D))
+        if alerte.get("decide_par"):
+            return await self._deja_tranchee(interaction, alerte)
+        if alerte.get("expulses") is not None:
+            return await safe_ephemeral(interaction, embed=E(
+                "Deja fait", f"La vague a deja ete expulsee "
+                f"(`{alerte['expulses']}` comptes).", 0x747F8D))
+
+        guild = bot.get_guild(self.guild_id)
+        if not guild:
+            return await safe_ephemeral(interaction, embed=E(
+                "Serveur introuvable", "ModBot n'a plus acces a ce serveur.", 0xED4245))
+
+        await _safe_defer(interaction)
+        alerte["expulses"] = 0  # pose tout de suite : deux clics, une seule vague
+        partis, restes = await expulser_la_vague(guild, alerte.get("vague") or [],
+                                                 str(interaction.user))
+        alerte["expulses"] = partis
+
+        embed = E("🧹 Vague expulsee", couleur=0xFAA61A)
+        embed.description = (
+            f"`{partis}` compte(s) expulse(s) de **{guild.name}**.\n"
+            "Ils peuvent revenir : une expulsion n'est pas un bannissement."
+        )
+        if restes:
+            embed.add_field(name="⚠️ Non expulses", value="\n".join(restes[:10]),
+                            inline=False)
+        embed.add_field(name="👤 Decide par", value=str(interaction.user), inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        await log_event(
+            guild, "security", "Vague d'arrivees expulsee",
+            f"{interaction.user.mention} a expulse `{partis}` compte(s) "
+            "arrives pendant la vague.",
+            severity="warning", actor=interaction.user)
+
     @discord.ui.button(label="Fausse alerte — tout annuler", emoji="✋",
                        style=discord.ButtonStyle.success)
     async def fausse_alerte(self, interaction: discord.Interaction, _button):
@@ -16953,8 +17003,48 @@ async def _cloturer_alerte(alerte_id):
             pass
 
 
+def liste_de_la_vague(identifiants, montres=12):
+    """Les comptes arrives, mentionnes — et le compte du reste."""
+    identifiants = [str(x) for x in (identifiants or []) if str(x).isdigit()]
+    if not identifiants:
+        return "aucun identifiant retenu"
+    debut = " ".join(f"<@{x}>" for x in identifiants[:montres])
+    reste = len(identifiants) - montres
+    return debut + (f"\net `{reste}` autre(s)" if reste > 0 else "")
+
+
+async def expulser_la_vague(guild, identifiants, par=""):
+    """
+    Expulse les comptes d'une vague ; rend (expulses, ce qui a resiste).
+
+    Un membre parti entre-temps, un membre qu'on ne peut pas toucher, un
+    membre qui n'est plus la : aucun de ces cas n'arrete les autres. Une
+    expulsion sur quarante qui echoue ne doit pas laisser trente-neuf
+    comptes en place.
+    """
+    partis, restes = 0, []
+    for brut in identifiants:
+        if not str(brut).isdigit():
+            continue
+        membre = guild.get_member(int(brut))
+        if membre is None:
+            continue  # deja parti : tres bien
+        # On ne touche jamais a quelqu'un qui a des droits : une vague
+        # qui contient un moderateur est une fausse alerte, pas un raid.
+        if membre.guild_permissions.manage_messages or membre.bot:
+            restes.append(f"{membre} — membre de confiance")
+            continue
+        try:
+            await membre.kick(reason=f"[ModBot Anti-Raid] Vague d'arrivees — {par}"[:500])
+            partis += 1
+        except Exception as erreur:
+            restes.append(f"{membre} — {type(erreur).__name__}")
+    return partis, restes
+
+
 async def alerter_administrateurs(guild, titre, description, fields=None,
-                                  acteur=None, sanction=None, safe_mode_engage=False):
+                                  acteur=None, sanction=None, safe_mode_engage=False,
+                                  vague=None):
     """
     Previent tous les administrateurs en message prive.
 
@@ -16978,6 +17068,11 @@ async def alerter_administrateurs(guild, titre, description, fields=None,
         "acteur_id": getattr(acteur, "id", None),
         "sanction": sanction,
         "safe_mode_engage": safe_mode_engage,
+        # La liste est FIGEE ici, a la detection. La relire au moment du
+        # clic expulserait ceux qui sont arrives entre-temps — dont les
+        # curieux venus voir ce qui se passe.
+        "vague": [str(x) for x in (vague or [])],
+        "expulses": None,
         "messages": [],
         "decide_par": None,
         "decision": None,
@@ -17113,13 +17208,17 @@ async def handle_raid_join(member):
         return False
 
     risk = sc.account_risk(member.created_at, bool(member.avatar), cfg)
-    burst = RAID.register_join(gid, cfg)
+    burst = RAID.register_join(gid, cfg, member.id)
 
     # 1. Vague d'arrivees -> mode securite + alerte aux administrateurs
     if burst["burst"]:
         motif = f"{burst['count']} arrivees en {burst['window']}s (seuil : {burst['threshold']})"
         engage = await engage_safe_mode(guild, motif)
         if engage:
+            # Qui, exactement. L'alerte disait « 47 comptes ont rejoint » et
+            # s'arretait la : l'equipe savait qu'il se passait quelque chose,
+            # sans aucun moyen d'agir sur ces 47 autrement qu'a la main.
+            vague = RAID.vague(gid, burst["window"])
             await alerter_administrateurs(
                 guild,
                 "Raid detecte — vague d'arrivees",
@@ -17129,8 +17228,10 @@ async def handle_raid_join(member):
                     ("📊 Seuil configure", f"`{burst['threshold']}` arrivees / `{burst['window']}s`"),
                     ("🔒 Mesure appliquee", "Mode securite actif : niveau de verification eleve"),
                     ("♻️ Levee automatique", f"dans {cfg.get('auto_release_minutes', 15)} minutes"),
+                    ("👥 Les comptes arrives", liste_de_la_vague(vague)),
                 ],
                 safe_mode_engage=True,
+                vague=vague,
             )
 
     handled = False
