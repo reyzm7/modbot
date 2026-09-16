@@ -203,8 +203,13 @@ class FausseReponse:
         return False
 
 
-def fausse_api(refuses):
+def fausse_api(refuses, limites=None):
+    """
+    refuses : modeles hors formule (403).
+    limites : {modele: nombre de 429 avant de repondre} ; -1 = toujours 429.
+    """
     appels = []
+    limites = dict(limites or {})
 
     class FausseSession:
         def __init__(self, *a, **k):
@@ -220,12 +225,26 @@ def fausse_api(refuses):
             appels.append(json["model"])
             if json["model"] in refuses:
                 return FausseReponse(403, {"object": "error", "message": HORS_FORMULE})
+            reste = limites.get(json["model"], 0)
+            if reste:
+                limites[json["model"]] = reste - 1 if reste > 0 else reste
+                return FausseReponse(429, {"message": "Requests rate limit exceeded"})
             return FausseReponse(200, {"choices": [{"message": {"content": "pong"}}]})
 
     return FausseSession, appels
 
 
+# Les pauses sont notees, pas attendues : le test reste instantane.
+pauses = []
+vraie_pause = _asyncio.sleep
+
+
+async def fausse_pause(duree, *a, **k):
+    pauses.append(duree)
+
+
 vraie_session = _aiohttp.ClientSession
+_asyncio.sleep = fausse_pause
 try:
     Session, appels = fausse_api({"mistral-large-latest", "mistral-medium-latest"})
     _aiohttp.ClientSession = Session
@@ -236,6 +255,11 @@ try:
              str(appels))
     verifier("le modele qui a repondu est retenu", b.ai_modele() == "mistral-small-latest",
              b.ai_modele())
+    # Le palier gratuit : une requete par seconde. Sans pause, le troisieme
+    # essai revenait en 429 (constate le 17/09/2026).
+    verifier("une pause separe chaque essai de modele",
+             pauses == [b.AI_PAUSE_ENTRE_MODELES] * 2 and b.AI_PAUSE_ENTRE_MODELES >= 1,
+             str(pauses))
 
     appels.clear()
     _asyncio.run(b.ask_ai([{"role": "user", "content": "ping"}], "consigne", 8))
@@ -272,12 +296,62 @@ try:
     except b.AIError:
         pass
     verifier("une clef invalide n'essaie pas les autres modeles", len(appels) == 1, str(appels))
+
+    print("\n--- La limite par seconde n'est plus prise pour un refus ---")
+    b = charger(MISTRAL_API_KEY="Q7XK2M9RTB4HWZ8NPL3VCD6JFG5YAS1E")
+    Session, appels = fausse_api({"mistral-large-latest", "mistral-medium-latest"},
+                                 {"mistral-small-latest": 1})
+    _aiohttp.ClientSession = Session
+    pauses.clear()
+    texte = _asyncio.run(b.ask_ai([{"role": "user", "content": "ping"}], "consigne", 8))
+    verifier("une limite passagere : on redemande apres une pause, et ca repond",
+             texte == "pong" and appels[-2:] == ["mistral-small-latest"] * 2, str(appels))
+    verifier("la pause avant de redemander est celle du quota",
+             b.AI_PAUSE_QUOTA in pauses, str(pauses))
+
+    b = charger(MISTRAL_API_KEY="Q7XK2M9RTB4HWZ8NPL3VCD6JFG5YAS1E")
+    Session, appels = fausse_api({"mistral-large-latest", "mistral-medium-latest"},
+                                 {"mistral-small-latest": -1})
+    _aiohttp.ClientSession = Session
+    try:
+        _asyncio.run(b.ask_ai([{"role": "user", "content": "ping"}], "consigne", 8))
+        verifier("une limite qui dure : erreur 429", False)
+    except b.AIError as ex:
+        verifier("une limite qui dure : erreur 429", ex.statut == 429, str(ex.statut))
+        verifier("l'erreur garde chaque essai, dans l'ordre",
+                 ex.essais == [("mistral-large-latest", 403), ("mistral-medium-latest", 403),
+                               ("mistral-small-latest", 429), ("mistral-small-latest", 429)],
+                 str(ex.essais))
+        verifier("le message parle de limite, pas de clef",
+                 "limite" in str(ex) and "refusée" not in str(ex), str(ex)[:80])
+    verifier("les modeles hors formule ne sont plus redemandes",
+             b.ai_modeles_a_essayer()[0] == "mistral-small-latest"
+             and "mistral-large-latest" not in b.ai_modeles_a_essayer(),
+             str(b.ai_modeles_a_essayer()))
+    appels.clear()
+    try:
+        _asyncio.run(b.ask_ai([{"role": "user", "content": "ping"}], "consigne", 8))
+    except b.AIError:
+        pass
+    verifier("l'essai suivant ne depense plus de requete sur eux",
+             "mistral-large-latest" not in appels and "mistral-medium-latest" not in appels,
+             str(appels))
+
+    verifier("chaque issue d'essai se lit",
+             [b.ai_issue_d_essai(c) for c in (200, 403, 404, 429, 401, 500)]
+             == ["a répondu", "hors formule", "hors formule", "limite de requêtes",
+                 "clef refusée", "erreur 500"])
 finally:
     _aiohttp.ClientSession = vraie_session
+    _asyncio.sleep = vraie_pause
 
 commande = open("bot.py", encoding="utf-8").read().replace("\r\n", "\n")
 commande = commande[commande.index("async def security_ia_test"):]
 commande = commande[:commande.index("\n@", 1)]
+verifier("/securite ia-test ne titre plus « refusee » une limite de requetes",
+         "elif statut == 429:" in commande
+         and commande.index("elif statut == 429:") < commande.index('"La clef est refusee"'))
+verifier("/securite ia-test liste les modeles essayes", "Modèles essayés" in commande)
 verifier("/securite ia-test distingue un modele refuse d'un compte sans formule",
          "elif ai_refus_de_modele(statut, detail):" in commande
          and commande.index("ai_refus_de_modele(statut, detail)") < commande.index("elif statut == 403:"))

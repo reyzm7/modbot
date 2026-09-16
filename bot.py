@@ -2278,6 +2278,14 @@ AI_MODELES_DE_REPLI = {
 # Le modele qui a vraiment repondu, s'il differe de AI_MODEL. En memoire :
 # apres un redemarrage, un seul essai refuse suffit a le retrouver.
 _AI_MODELE_ACTIF = {"nom": ""}
+# Les modeles que la formule a refuses : on ne les redemande plus. Chaque
+# essai inutile coute une requete d'un quota qui, au palier gratuit, n'en
+# accorde qu'une par seconde.
+_AI_MODELES_HORS_FORMULE = set()
+# Entre deux modeles, et avant de redemander apres une limite atteinte.
+# Enchainer sans pause faisait tomber le troisieme essai en 429.
+AI_PAUSE_ENTRE_MODELES = 1.2
+AI_PAUSE_QUOTA = 2.0
 
 
 def ai_modele():
@@ -2286,12 +2294,17 @@ def ai_modele():
 
 
 def ai_modeles_a_essayer():
-    """Dans l'ordre, sans doublon : l'actif, le demande, puis les replis."""
+    """
+    Dans l'ordre, sans doublon : l'actif, le demande, puis les replis —
+    moins ceux que la formule a deja refuses. S'ils l'ont tous ete, on les
+    rend tous : la formule a pu changer, et ne rien essayer ne dirait rien.
+    """
     ordre = []
     for nom in (ai_modele(), AI_MODEL, *AI_MODELES_DE_REPLI.get(AI_PROVIDER, ())):
         if nom and nom not in ordre:
             ordre.append(nom)
-    return ordre
+    restants = [nom for nom in ordre if nom not in _AI_MODELES_HORS_FORMULE]
+    return restants or ordre
 
 
 # Ce que les fournisseurs ecrivent quand le MODELE est refuse. Des motifs en
@@ -2299,6 +2312,19 @@ def ai_modeles_a_essayer():
 # la variable les tient hors du dictionnaire de traduction.
 AI_MOTIFS_REFUS_DE_MODELE = ("subscription tier", "not available", "invalid model",
                              "not found", "no access", "not allowed")
+
+
+def ai_issue_d_essai(code):
+    """Ce qu'un code HTTP veut dire pour un modele essaye, en quatre mots."""
+    if code == 429:
+        return "limite de requêtes"
+    if code in (403, 404):
+        return "hors formule"
+    if code == 401:
+        return "clef refusée"
+    if code and code < 400:
+        return "a répondu"
+    return f"erreur {code}"
 
 
 def ai_refus_de_modele(statut, detail):
@@ -2455,10 +2481,12 @@ class AIError(Exception):
 
     # Le code HTTP et le message brut du fournisseur, pour le diagnostic
     # administrateur seulement : un membre ne voit que la phrase.
-    def __init__(self, message="", statut=None, detail=""):
+    def __init__(self, message="", statut=None, detail="", essais=None):
         super().__init__(message)
         self.statut = statut
         self.detail = detail
+        # [(modele, code HTTP)], dans l'ordre ou ils ont ete essayes.
+        self.essais = list(essais or [])
 
 
 async def ai_verifier_clef():
@@ -2637,22 +2665,35 @@ async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=Fa
                       f"Un administrateur doit definir `{AI_ENV_KEY}`.")
 
     modeles = ai_modeles_a_essayer()
+    essais = []
     try:
         timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for rang, modele in enumerate(modeles):
+                if rang and AI_PAUSE_ENTRE_MODELES:
+                    await asyncio.sleep(AI_PAUSE_ENTRE_MODELES)
                 charge, entetes = _charge_utile(messages, system_prompt, max_tokens, modele)
-                async with session.post(AI_URL, json=charge, headers=entetes) as reponse:
-                    donnees = await reponse.json(content_type=None)
-                    statut = reponse.status
+                # Une limite par seconde se leve en un instant : on redemande
+                # une fois apres une pause, plutot que d'echouer tout de suite.
+                for tentative in (1, 2):
+                    async with session.post(AI_URL, json=charge, headers=entetes) as reponse:
+                        donnees = await reponse.json(content_type=None)
+                        statut = reponse.status
+                    essais.append((modele, statut))
+                    if statut != 429 or tentative == 2:
+                        break
+                    if AI_PAUSE_QUOTA:
+                        await asyncio.sleep(AI_PAUSE_QUOTA)
                 if statut >= 400:
                     detail = ai_detail_erreur(donnees)
                     print(f"{AI_LABEL} {statut} ({modele}): {detail}")
                     # La formule refuse CE modele : le suivant peut passer.
-                    if ai_refus_de_modele(statut, detail) and rang + 1 < len(modeles):
-                        continue
+                    if ai_refus_de_modele(statut, detail):
+                        _AI_MODELES_HORS_FORMULE.add(modele)
+                        if rang + 1 < len(modeles):
+                            continue
                     raise AIError(ai_message_erreur(statut, detail, detailler),
-                                  statut=statut, detail=detail)
+                                  statut=statut, detail=detail, essais=essais)
                 if modele != ai_modele():
                     print(f"{AI_LABEL} : {ai_modele()} refuse par la formule du compte, "
                           f"le bot utilise {modele}")
@@ -18569,19 +18610,33 @@ async def security_ia_test(i: discord.Interaction):
             gid), ephemeral=True)
 
     ok, message, erreur = await ai_verifier_clef()
-    embed = (embed_success("La clef fonctionne", message, gid) if ok
-             else embed_error("La clef est refusee", message, gid))
+    statut = getattr(erreur, "statut", None)
+    detail = str(getattr(erreur, "detail", "") or "")[:200]
+    # Un titre par cause : « La clef est refusee » coiffait aussi une limite
+    # de requetes atteinte, alors que la clef, elle, marchait.
+    if ok:
+        embed = embed_success("La clef fonctionne", message, gid)
+    elif statut == 429:
+        embed = embed_warning("La clef fonctionne, la limite de requêtes est atteinte", message, gid)
+    elif ai_refus_de_modele(statut, detail):
+        embed = embed_error("La clef fonctionne, aucun modèle n'est inclus", message, gid)
+    elif statut in (401, 403):
+        embed = embed_error("La clef est refusee", message, gid)
+    else:
+        embed = embed_error("L'IA ne répond pas", message, gid)
 
     if not ok:
         # « Refusee » seul laissait deviner. On dit ce que le bot a LU —
         # jamais la clef, pas meme son debut : ce message part sur Discord.
-        statut = getattr(erreur, "statut", None)
-        detail = str(getattr(erreur, "detail", "") or "")[:200]
         lu = [f"Variable lue : `{AI_ENV_KEY}`, {len(AI_API_KEY)} caractères",
               f"Variables lues au démarrage du bot : <t:{int(PROCESS_STARTED_AT.timestamp())}:f>. "
               "Une clef changée après cette heure n'est pas encore lue"]
         if detail:
             lu.append(f"Réponse de {AI_LABEL} : « {detail} »")
+        essais = getattr(erreur, "essais", None) or []
+        if essais:
+            liste = ", ".join(f"`{modele}` ({ai_issue_d_essai(code)})" for modele, code in essais)
+            lu.append(f"Modèles essayés : {liste}")
         similaires = ai_diagnostic()["similar_names"]
         if similaires:
             lu.append("Autres variables proches : " + ", ".join(f"`{n}`" for n in similaires[:5])
