@@ -6891,6 +6891,16 @@ async def apply_dashboard_config(guild, payload):
     dashboard_log("config_update", guild, payload.get("actor", "dashboard"), "Configuration sauvegardee depuis le dashboard")
     return cfg
 
+# Ce que Discord a accepte au dernier demarrage. Une synchronisation
+# refusee ne se voyait que dans les journaux de l'hebergeur : de l'exterieur,
+# le bot tournait, repondait, et gardait pourtant ses ANCIENNES commandes.
+# « Le bot ne se met plus a jour », sans aucun moyen de savoir pourquoi.
+# « etape » est un identifiant, pas une phrase : ce champ ne s'affiche
+# jamais dans Discord, et le dictionnaire du bot n'a pas a le traduire.
+SYNCHRO_COMMANDES = {"le": "", "commandes": 0, "traduites": False,
+                     "etape": "", "erreur": ""}
+
+
 async def api_health(request):
     """
     Sonde publique. Sert aussi au site pour detecter automatiquement l'API :
@@ -6918,6 +6928,10 @@ async def api_health(request):
         # Permet de voir depuis un navigateur si le service a bien redemarre
         # apres un changement de variable, sans attendre Discord.
         "started_at": PROCESS_STARTED_AT.isoformat(),
+        # Combien de commandes Discord a acceptees, et ce qui a coince.
+        # Rien de secret : ce sont des noms de commandes et un message
+        # d'erreur de Discord, pas une clef.
+        "commands": dict(SYNCHRO_COMMANDES),
         "client_id": DISCORD_CLIENT_ID,
         # Sans volume, le disque est efface a chaque redeploiement : les
         # sessions du dashboard partent avec, et tout le monde doit se
@@ -20479,14 +20493,19 @@ async def on_ready():
         # propres a chaque serveur.
         if bot.tree.translator is None:
             await bot.tree.set_translator(lb.traducteur_commandes(TRADUCTEUR))
+        SYNCHRO_COMMANDES.update(le=now().isoformat(), commandes=0,
+                                 traduites=False, etape="", erreur="")
         try:
             synced = await bot.tree.sync()
+            SYNCHRO_COMMANDES["traduites"] = True
         except discord.HTTPException as err:
             # Une traduction refusee par Discord ne doit pas priver le bot
             # de ses commandes : on resynchronise sans les traductions.
             print(f"sync traduite refusee, nouvel essai sans : {err}")
+            SYNCHRO_COMMANDES.update(etape="sync_traduite", erreur=str(err)[:300])
             await bot.tree.set_translator(None)
             synced = await bot.tree.sync()
+        SYNCHRO_COMMANDES["commandes"] = len(synced)
         for guild in bot.guilds:
             try:
                 await cleanup_configured_system_messages(guild)
@@ -20496,6 +20515,8 @@ async def on_ready():
         print(f"{len(synced)} commandes synchronisees")
     except Exception as e:
         print(f"Erreur sync : {e}")
+        # Les deux essais ont echoue : Discord garde les commandes d'AVANT.
+        SYNCHRO_COMMANDES.update(etape="sync_complete", erreur=str(e)[:300])
     if not _presence_task or _presence_task.done():
         _presence_task = asyncio.create_task(presence_loop())
 
