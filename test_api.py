@@ -433,8 +433,9 @@ def verifier_connaissances_ia():
     verifier("aucune consigne dupliquee",
              prompt_membre.count("plutôt que d'inventer") == 1)
 
-    # Le palier gratuit ouvre tous les modeles : prendre le petit ne fait
-    # economiser que de la culture generale.
+    # Le plus capable d'abord. Si la formule du compte ne l'inclut pas, le bot
+    # passe tout seul aux modeles de repli (test_ia.py) : viser petit d'emblee
+    # ne ferait perdre que de la culture generale a ceux qui y ont droit.
     verifier("le modele par defaut n'est pas le plus petit",
              "small" not in bot_mod.AI_MODEL, bot_mod.AI_MODEL)
     verifier("la reponse peut etre developpee", bot_mod.AI_MAX_TOKENS >= 1000,

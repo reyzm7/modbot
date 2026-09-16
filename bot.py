@@ -2216,9 +2216,10 @@ AI_PROVIDERS = {
         "label": "Mistral",
         "env_key": "MISTRAL_API_KEY",
         "env_model": "MISTRAL_MODEL",
-        # Le palier gratuit ouvre TOUS les modeles, y compris Large : prendre
-        # le petit ne fait economiser aucun argent, seulement de la culture
-        # generale et de la nuance.
+        # Large d'abord : la meilleure culture generale et la meilleure
+        # nuance. Toutes les formules ne l'incluent plus (« This model is not
+        # available in your subscription tier », septembre 2026) : le bot
+        # passe alors aux modeles de AI_MODELES_DE_REPLI, sans rien casser.
         "default_model": "mistral-large-latest",
         "url": "https://api.mistral.ai/v1/chat/completions",
         "console": "console.mistral.ai",
@@ -2265,6 +2266,47 @@ AI_MODEL = (os.environ.get(AI_REGLAGES["env_model"], "").strip()
 AI_URL = AI_REGLAGES["url"]
 AI_LABEL = AI_REGLAGES["label"]
 AI_ENV_KEY = AI_REGLAGES["env_key"]
+
+# Quand la formule du compte refuse le modele demande, le bot essaie ceux-ci,
+# du plus capable au plus modeste, et garde le premier qui repond. Sans eux,
+# une clef parfaitement valide laissait l'assistant muet.
+AI_MODELES_DE_REPLI = {
+    "mistral": ("mistral-medium-latest", "mistral-small-latest",
+                "ministral-8b-latest", "open-mistral-nemo"),
+    "anthropic": (),
+}
+# Le modele qui a vraiment repondu, s'il differe de AI_MODEL. En memoire :
+# apres un redemarrage, un seul essai refuse suffit a le retrouver.
+_AI_MODELE_ACTIF = {"nom": ""}
+
+
+def ai_modele():
+    """Le modele utilise : celui qui a repondu, sinon celui demande."""
+    return _AI_MODELE_ACTIF["nom"] or AI_MODEL
+
+
+def ai_modeles_a_essayer():
+    """Dans l'ordre, sans doublon : l'actif, le demande, puis les replis."""
+    ordre = []
+    for nom in (ai_modele(), AI_MODEL, *AI_MODELES_DE_REPLI.get(AI_PROVIDER, ())):
+        if nom and nom not in ordre:
+            ordre.append(nom)
+    return ordre
+
+
+def ai_refus_de_modele(statut, detail):
+    """
+    Le compte n'a pas droit a CE modele — un autre peut marcher.
+
+    A distinguer d'une clef refusee : la, changer de modele ne sert a rien.
+    """
+    if statut == 404:
+        return True
+    bas = str(detail or "").lower()
+    if statut not in (400, 403) or "model" not in bas:
+        return False
+    return any(mot in bas for mot in ("subscription tier", "not available", "invalid model",
+                                      "not found", "no access", "not allowed"))
 
 # Les variables d'environnement sont lues UNE FOIS, au demarrage du processus.
 # Une variable ajoutee sur l'hebergeur pendant que le bot tourne n'entre donc
@@ -2394,7 +2436,7 @@ def ai_diagnostic():
         "provider": AI_PROVIDER,
         "provider_label": AI_LABEL,
         "env_key": AI_ENV_KEY,
-        "model": AI_MODEL,
+        "model": ai_modele(),
         "free_tier": bool(AI_REGLAGES.get("gratuit")),
         "fallback_available": autre_nom,
         "fallback_label": (autre_reglages or {}).get("label", ""),
@@ -2426,7 +2468,11 @@ async def ai_verifier_clef():
     try:
         await ask_ai([{"role": "user", "content": "ping"}],
                      "Réponds exactement : pong", max_tokens=8, detailler=True)
-        return True, f"Clef acceptée, modèle `{AI_MODEL}` joignable sur {AI_LABEL}.", None
+        message = f"Clef acceptée, modèle `{ai_modele()}` joignable sur {AI_LABEL}."
+        if ai_modele() != AI_MODEL:
+            message += (f" `{AI_MODEL}` n'est pas inclus dans la formule de ce compte : "
+                        f"le bot utilise `{ai_modele()}` à la place.")
+        return True, message, None
     except AIError as ex:
         return False, str(ex), ex
 
@@ -2455,13 +2501,16 @@ def ai_message_erreur(status, detail="", detailler=False):
                 f"Le propriétaire doit en ajouter sur {console} — "
                 "réessayer n'y changera rien.")
 
+    # Avant « clef refusee » : Mistral repond 403 aussi quand la clef est
+    # bonne mais que la formule n'inclut pas le modele. Ce n'est pas la clef.
+    if ai_refus_de_modele(status, detail):
+        return (f"Aucun des modèles essayés n'est inclus dans la formule {AI_LABEL} "
+                f"de ce compte ({', '.join(ai_modeles_a_essayer())}). La clef, elle, "
+                f"est bonne. Choisis un modèle inclus avec `{AI_REGLAGES['env_model']}`, "
+                f"ou change de formule sur {console}.")
     if status in (401, 403):
         return (f"La clef d'API {AI_LABEL} est refusée. Vérifie `{AI_ENV_KEY}` : "
                 "révoquée, expirée, ou copiée incomplètement.")
-    if status == 404:
-        # La clef est bonne, mais le compte n'a pas acces au modele demande.
-        return (f"Le modèle `{AI_MODEL}` est introuvable pour cette clef. "
-                f"Corrige `{AI_REGLAGES['env_model']}` sur l'hébergeur du bot.")
     if status == 422 or (status == 400 and not bas):
         # Requete mal formee : c'est un bug du bot, pas un probleme de compte.
         return ("La requête envoyée à l'IA a été refusée comme invalide. "
@@ -2514,11 +2563,12 @@ def ai_detail_erreur(donnees):
     return ""
 
 
-def _charge_utile(messages, system_prompt, max_tokens):
+def _charge_utile(messages, system_prompt, max_tokens, modele=None):
     """Corps de requete et en-tetes, au format du fournisseur actif."""
+    modele = modele or ai_modele()
     if AI_PROVIDER == "anthropic":
         charge = {
-            "model": AI_MODEL,
+            "model": modele,
             "max_tokens": max_tokens,
             "messages": list(messages),
         }
@@ -2534,7 +2584,7 @@ def _charge_utile(messages, system_prompt, max_tokens):
         return charge, entetes
 
     charge = {
-        "model": AI_MODEL,
+        "model": modele,
         "max_tokens": max_tokens,
         "messages": ([{"role": "system", "content": system_prompt}] if system_prompt
                      else []) + list(messages),
@@ -2580,18 +2630,28 @@ async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=Fa
         raise AIError("L'IA n'est pas configuree sur ce ModBot. "
                       f"Un administrateur doit definir `{AI_ENV_KEY}`.")
 
-    charge, entetes = _charge_utile(messages, system_prompt, max_tokens)
-
+    modeles = ai_modeles_a_essayer()
     try:
         timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(AI_URL, json=charge, headers=entetes) as reponse:
-                donnees = await reponse.json(content_type=None)
-                if reponse.status >= 400:
+            for rang, modele in enumerate(modeles):
+                charge, entetes = _charge_utile(messages, system_prompt, max_tokens, modele)
+                async with session.post(AI_URL, json=charge, headers=entetes) as reponse:
+                    donnees = await reponse.json(content_type=None)
+                    statut = reponse.status
+                if statut >= 400:
                     detail = ai_detail_erreur(donnees)
-                    print(f"{AI_LABEL} {reponse.status}: {detail}")
-                    raise AIError(ai_message_erreur(reponse.status, detail, detailler),
-                                  statut=reponse.status, detail=detail)
+                    print(f"{AI_LABEL} {statut} ({modele}): {detail}")
+                    # La formule refuse CE modele : le suivant peut passer.
+                    if ai_refus_de_modele(statut, detail) and rang + 1 < len(modeles):
+                        continue
+                    raise AIError(ai_message_erreur(statut, detail, detailler),
+                                  statut=statut, detail=detail)
+                if modele != ai_modele():
+                    print(f"{AI_LABEL} : {ai_modele()} refuse par la formule du compte, "
+                          f"le bot utilise {modele}")
+                    _AI_MODELE_ACTIF["nom"] = modele
+                break
 
         texte = _extraire_texte(donnees)
         if not texte:
@@ -6561,7 +6621,7 @@ def etat_ia_dashboard(gid):
         "available": ai_available(),
         "configured": bool(diag.get("configured")),
         "provider": AI_LABEL,
-        "model": AI_MODEL,
+        "model": ai_modele(),
         "free": bool(AI_REGLAGES.get("gratuit")),
         "console": AI_REGLAGES.get("console", ""),
         "env_key": AI_ENV_KEY,
@@ -7404,7 +7464,7 @@ def serialize_security_config(guild):
         },
         "antiscam": antiscam_cfg(gid),
         "ai": {**ai_cfg(gid), "configured": ai_available(),
-               "model": AI_MODEL, "provider": AI_PROVIDER, "provider_label": AI_LABEL},
+               "model": ai_modele(), "provider": AI_PROVIDER, "provider_label": AI_LABEL},
         "logs_enabled": cfg.get("logs_enabled") if isinstance(cfg.get("logs_enabled"), dict) else {},
         "permissions": {
             "view_audit_log": perms.view_audit_log,
@@ -18527,6 +18587,12 @@ async def security_ia_test(i: discord.Interaction):
         if defauts:
             embed.add_field(name="✂️ La clef collée est abîmée",
                             value="\n".join(f"• {x}" for x in defauts)[:1024], inline=False)
+        elif ai_refus_de_modele(statut, detail):
+            embed.add_field(name="💳 La clef est bonne, pas le modèle",
+                            value=(f"La formule de ce compte n'inclut aucun des modèles essayés : "
+                                   f"{', '.join(ai_modeles_a_essayer())}. Pose "
+                                   f"`{AI_REGLAGES['env_model']}` sur un modèle inclus, ou change de "
+                                   f"formule sur {AI_REGLAGES.get('console', '')}."), inline=False)
         elif statut == 403:
             embed.add_field(name="💳 La clef est reconnue, pas le compte",
                             value=(f"L'espace de travail n'a pas de formule active. Choisis-en une "
