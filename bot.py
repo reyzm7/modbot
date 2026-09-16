@@ -878,6 +878,8 @@ def set_cfg(gid, data):
     d = jload(F_CONFIG)
     d[str(gid)] = data
     jsave(F_CONFIG, d)
+    # Le pays et la langue d'un serveur font partie des chiffres publics.
+    oublier_stats_publiques()
 
 def update_cfg(gid, key, val):
     d = jload(F_CONFIG)
@@ -886,6 +888,7 @@ def update_cfg(gid, key, val):
         d[g] = {}
     d[g][key] = val
     jsave(F_CONFIG, d)
+    oublier_stats_publiques()
 
 def get_ch(gid, key, default):
     v = get_cfg(gid).get(key)
@@ -8766,7 +8769,17 @@ LOCALE_LANGUES = {
 LANGUE_INCONNUE = ("", "Non renseigné", "🌐")
 
 _STATS_PUBLIQUES = {"data": None, "expire": 0.0}
-STATS_PUBLIQUES_TTL = 300  # 5 minutes
+# Une minute : les membres qui arrivent et partent. Ce qui compte vraiment
+# — un serveur rejoint ou quitte, un pays declare — n'attend pas : ces
+# evenements vident le cache (oublier_stats_publiques). Avec cinq minutes
+# et aucun oubli, le site montrait l'ancien nombre de serveurs longtemps
+# apres l'arrivee du bot.
+STATS_PUBLIQUES_TTL = 60
+
+
+def oublier_stats_publiques():
+    """La prochaine lecture des chiffres publics les recalcule."""
+    _STATS_PUBLIQUES["expire"] = 0.0
 
 
 def langue_du_serveur(guild, config=None):
@@ -19904,6 +19917,9 @@ def embed_bienvenue_serveur(guild):
 @bot.event
 async def on_guild_join(guild):
     """Le mot de bienvenue, et l'alerte a l'equipe."""
+    # En premier : le site doit compter ce serveur des maintenant, meme si
+    # le message de bienvenue echoue plus bas.
+    oublier_stats_publiques()
     salon = premier_salon_ecrivable(guild)
     if salon is not None:
         try:
@@ -19937,6 +19953,7 @@ async def on_guild_remove(guild):
     C'est le chiffre le plus utile et le plus desagreable : savoir qu'on
     perd des serveurs vaut mieux que de l'apprendre en comptant.
     """
+    oublier_stats_publiques()
     dashboard_log("guild_remove", guild=guild, detail=f"{guild.member_count} membres")
     await alerter_equipe(
         "Un serveur en moins",
