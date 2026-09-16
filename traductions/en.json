@@ -843,7 +843,6 @@
 "Le membre à réinitialiser": "The member to reset",
 "Le membre à vérifier": "The member to check",
 "Le message ci-dessous va etre envoye en message prive a ⟦0⟧.": "The message below will be sent as a private message to ⟦0⟧.",
-"Le modèle `⟦0⟧` est introuvable pour cette clef. Corrige `⟦1⟧` sur l'hébergeur du bot.": "The model `⟦0⟧` was not found for this key. Fixes `⟦1⟧` on the bot host.",
 "Le modérateur à analyser (vous par défaut)": "The moderator to analyze (you by default)",
 "Le niveau de verification du serveur sera eleve et les nouvelles arrivees suspectes seront bloquees jusqu'a la levee du mode.": "The server verification level will be high and suspicious new arrivals will be blocked until the mode is lifted.",
 "Le parametre `⟦0⟧` est obligatoire.": "The `⟦0⟧` parameter is mandatory.",
