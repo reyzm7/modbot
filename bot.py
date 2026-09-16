@@ -20480,7 +20480,12 @@ async def on_ready():
     global _dashboard_recurring_task, _dashboard_social_task, _compteurs_task
     global _security_task, _autobackup_task, _giveaway_task, _sauvegarde_task
     global _battement_task, _rappels_task
-    global _anniversaires_task
+    # _rappels_membres_task MANQUAIT ici. Assignee plus bas sans etre
+    # declaree, Python la tenait pour une variable LOCALE de toute la
+    # fonction : la lire (« if not _rappels_membres_task ») levait
+    # UnboundLocalError, et on_ready s'arretait la, a chaque demarrage.
+    # Tout ce qui suivait ne tournait jamais — dont l'envoi des commandes.
+    global _anniversaires_task, _rappels_membres_task
     global _tempbans_task, _rapports_task
     global _licences_task
     global _presence_task

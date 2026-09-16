@@ -64,6 +64,27 @@ for boucle in ("giveaway_loop()", "auto_backup_loop()", "rappels_loop()",
     verifier(f"« {boucle} » demarre avant les commandes",
              pos is not None and sync is not None and pos < sync, str(pos))
 
+print(chr(10) + "--- Chaque tache assignee est declaree globale ---")
+# LA cause reelle. « _rappels_membres_task » etait assignee dans on_ready
+# sans figurer dans les « global ». Python la tenait donc pour LOCALE a
+# toute la fonction : la lire levait UnboundLocalError, et on_ready
+# s'arretait la, a chaque demarrage, depuis le 12 septembre 2026. Les
+# commandes n'etaient plus jamais envoyees a Discord, et plusieurs boucles
+# ne demarraient plus. Rien ne le montrait : le bot restait « pret ».
+
+declarees = set()
+for ligne in re.findall(r"^\s*global (.+)$", corps, re.M):
+    declarees |= {nom.strip() for nom in ligne.split(",")}
+assignees = set(re.findall(r"^\s*(_[a-z_]+) = ", corps, re.M))
+oubliees = sorted(assignees - declarees)
+# Un test qui ne trouve rien passe toujours. On verifie qu'il a bien lu
+# quelque chose : sinon il ne protegerait de rien.
+verifier("le test lit bien les declarations et les assignations",
+         len(declarees) >= 10 and len(assignees) >= 10,
+         f"{len(declarees)} declarees, {len(assignees)} assignees")
+verifier("toute variable de module assignee dans on_ready est declaree global",
+         not oubliees, str(oubliees))
+
 print(chr(10) + "--- Chaque attente est bornee ---")
 
 verifier("la reprise de la configuration a une limite de temps",
