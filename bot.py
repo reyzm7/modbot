@@ -2299,6 +2299,48 @@ def ai_available():
     return bool(AI_API_KEY)
 
 
+def ai_defauts_de_clef(brute, fournisseur):
+    """
+    Ce qui cloche dans la FORME d'une clef, sans jamais la montrer.
+
+    « Clef refusee » ne disait pas pourquoi. Or la cause la plus frequente
+    n'est pas une clef revoquee : c'est un copier-coller rate. Mistral ne
+    montre une clef en entier qu'a sa creation ; ensuite sa liste n'en
+    affiche qu'une version masquee, et c'est souvent elle qui est collee.
+
+    Chaque defaut est nomme par ce qu'il faut faire. Aucun message ne cite
+    un seul caractere de la clef : la reponse part sur Discord.
+    """
+    clef = (brute or "").strip()
+    if not clef:
+        return []
+    defauts = []
+    guillemets = "\"'«»“”‘’`"
+    if clef[0] in guillemets or clef[-1] in guillemets:
+        defauts.append("elle est entourée de guillemets : colle la clef seule, sans guillemets")
+    if re.match(r"^[A-Za-z_]{3,}\s*[=:]", clef):
+        defauts.append("elle commence par un nom de variable : dans la valeur, colle seulement la clef")
+    if clef.lower().startswith("bearer"):
+        defauts.append("elle commence par « Bearer » : colle seulement la clef, sans ce mot")
+    if any(c.isspace() for c in clef):
+        defauts.append("elle contient un espace ou un retour à la ligne : le copier-coller "
+                       "a pris autre chose que la clef")
+    if any(c in "*•●…" for c in clef) or "..." in clef:
+        defauts.append("elle contient des étoiles ou des points de suspension : c'est la "
+                       "version masquée de la liste, pas la clef. Crée une nouvelle clef "
+                       "et copie-la dans la fenêtre qui s'ouvre à sa création")
+    deja_nommes = guillemets + "*•●…"
+    if any((ord(c) < 32 or ord(c) > 126) and c not in deja_nommes and not c.isspace()
+           for c in clef):
+        defauts.append("elle contient un caractère invisible ou accentué, qu'aucune clef "
+                       "ne contient : recopie-la avec le bouton de copie")
+    if len(clef) < 20:
+        defauts.append(f"elle ne fait que {len(clef)} caractères : elle a sûrement été coupée")
+    if fournisseur == "anthropic" and not clef.startswith("sk-ant-"):
+        defauts.append("une clef Anthropic commence par « sk-ant- »")
+    return defauts
+
+
 def ai_autre_fournisseur():
     """
     L'autre fournisseur, si sa clef est posee. Sert a proposer une bascule
@@ -2359,6 +2401,13 @@ def ai_diagnostic():
 class AIError(Exception):
     """Erreur remontee a l'utilisateur, deja formulee en francais."""
 
+    # Le code HTTP et le message brut du fournisseur, pour le diagnostic
+    # administrateur seulement : un membre ne voit que la phrase.
+    def __init__(self, message="", statut=None, detail=""):
+        super().__init__(message)
+        self.statut = statut
+        self.detail = detail
+
 
 async def ai_verifier_clef():
     """
@@ -2366,16 +2415,16 @@ async def ai_verifier_clef():
     « clef qui marche » : une clef revoquee, un quota epuise, ou un modele
     auquel le compte n'a pas droit donnent tous les trois une clef *presente*.
 
-    Retourne (ok, message deja formule en francais).
+    Retourne (ok, message deja formule en francais, erreur ou None).
     """
     if not ai_available():
-        return False, "Aucune clef n'est chargée dans ce processus."
+        return False, "Aucune clef n'est chargée dans ce processus.", None
     try:
         await ask_ai([{"role": "user", "content": "ping"}],
                      "Réponds exactement : pong", max_tokens=8, detailler=True)
-        return True, f"Clef acceptée, modèle `{AI_MODEL}` joignable sur {AI_LABEL}."
+        return True, f"Clef acceptée, modèle `{AI_MODEL}` joignable sur {AI_LABEL}.", None
     except AIError as ex:
-        return False, str(ex)
+        return False, str(ex), ex
 
 
 def ai_message_erreur(status, detail="", detailler=False):
@@ -2537,7 +2586,8 @@ async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=Fa
                 if reponse.status >= 400:
                     detail = ai_detail_erreur(donnees)
                     print(f"{AI_LABEL} {reponse.status}: {detail}")
-                    raise AIError(ai_message_erreur(reponse.status, detail, detailler))
+                    raise AIError(ai_message_erreur(reponse.status, detail, detailler),
+                                  statut=reponse.status, detail=detail)
 
         texte = _extraire_texte(donnees)
         if not texte:
@@ -18435,9 +18485,45 @@ async def security_ia_test(i: discord.Interaction):
             f"La variable `{AI_ENV_KEY}` n'est pas posee sur cet hebergement.",
             gid), ephemeral=True)
 
-    ok, message = await ai_verifier_clef()
+    ok, message, erreur = await ai_verifier_clef()
     embed = (embed_success("La clef fonctionne", message, gid) if ok
              else embed_error("La clef est refusee", message, gid))
+
+    if not ok:
+        # « Refusee » seul laissait deviner. On dit ce que le bot a LU —
+        # jamais la clef, pas meme son debut : ce message part sur Discord.
+        statut = getattr(erreur, "statut", None)
+        detail = str(getattr(erreur, "detail", "") or "")[:200]
+        lu = [f"Variable lue : `{AI_ENV_KEY}`, {len(AI_API_KEY)} caractères",
+              f"Variables lues au démarrage du bot : <t:{int(PROCESS_STARTED_AT.timestamp())}:f>. "
+              "Une clef changée après cette heure n'est pas encore lue"]
+        if detail:
+            lu.append(f"Réponse de {AI_LABEL} : « {detail} »")
+        similaires = ai_diagnostic()["similar_names"]
+        if similaires:
+            lu.append("Autres variables proches : " + ", ".join(f"`{n}`" for n in similaires[:5])
+                      + f". Le bot ne lit que `{AI_ENV_KEY}`")
+        embed.add_field(name="🔎 Ce que le bot a lu",
+                        value="\n".join(f"• {l}" for l in lu)[:1024], inline=False)
+
+        defauts = ai_defauts_de_clef(os.environ.get(AI_ENV_KEY, ""), AI_PROVIDER)
+        if defauts:
+            embed.add_field(name="✂️ La clef collée est abîmée",
+                            value="\n".join(f"• {x}" for x in defauts)[:1024], inline=False)
+        elif statut == 403:
+            embed.add_field(name="💳 La clef est reconnue, pas le compte",
+                            value=(f"L'espace de travail n'a pas de formule active. Choisis-en une "
+                                   f"sur {AI_REGLAGES.get('console', '')}, puis relance ce test."), inline=False)
+        elif statut == 401:
+            causes = ["elle a été supprimée sur la console du fournisseur",
+                      "elle vient d'être créée : attends quelques minutes, puis relance ce test",
+                      "la nouvelle valeur n'est pas encore appliquée sur l'hébergeur "
+                      "(sur Railway, il faut cliquer sur Deploy après l'avoir changée)"]
+            if AI_PROVIDER == "mistral":
+                causes.insert(1, "c'est une clef Codestral : elle ne sert qu'à codestral.mistral.ai, "
+                                 "il faut une clef de la rubrique API Keys")
+            embed.add_field(name="🧩 La forme est bonne : la clef est inconnue",
+                            value="\n".join(f"• {c}" for c in causes)[:1024], inline=False)
 
     # Ce qui empecherait quand meme l'assistant de repondre ICI : autant
     # le dire dans le meme souffle, plutot que de le decouvrir apres.

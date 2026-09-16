@@ -111,6 +111,59 @@ verifier("quota mistral mentionne le palier gratuit", "gratuit" in msg, msg[:70]
 msg = b.ai_message_erreur(401, "unauthorized")
 verifier("clef refusee cite MISTRAL_API_KEY", "MISTRAL_API_KEY" in msg, msg[:70])
 
+print("\n--- Une clef mal collee se nomme, sans etre montree ---")
+BONNE = "Q7XK2M9RTB4HWZ8NPL3VCD6JFG5YAS1E"
+b = charger(MISTRAL_API_KEY=BONNE)
+
+
+def defauts(clef, fournisseur="mistral"):
+    return b.ai_defauts_de_clef(clef, fournisseur)
+
+
+def cite(messages, mot):
+    return any(mot in m for m in messages)
+
+
+verifier("une clef propre n'a aucun defaut", defauts(BONNE) == [], str(defauts(BONNE)))
+verifier("des espaces autour ne comptent pas (retires a la lecture)",
+         defauts("  " + BONNE + "\n") == [])
+verifier("guillemets nommes", cite(defauts('"' + BONNE + '"'), "guillemets"))
+verifier("guillemets francais nommes", cite(defauts("«" + BONNE + "»"), "guillemets"))
+verifier("nom de variable colle avec", cite(defauts("MISTRAL_API_KEY=" + BONNE), "nom de variable"))
+verifier("mot Bearer colle avec", cite(defauts("Bearer " + BONNE), "Bearer"))
+verifier("espace au milieu nomme", cite(defauts(BONNE[:16] + " " + BONNE[16:]), "espace"))
+verifier("version masquee reconnue (etoiles)", cite(defauts("Q7XK" + "*" * 24 + "YAS1E"), "masquée"))
+verifier("version masquee reconnue (points)", cite(defauts("Q7XK...YAS1E"), "masquée"))
+verifier("caractere invisible nomme", cite(defauts(BONNE[:10] + "​" + BONNE[10:]), "invisible"))
+verifier("clef coupee nommee", cite(defauts(BONNE[:12]), "12 caractères"))
+verifier("clef anthropic sans sk-ant- nommee", cite(defauts(BONNE, "anthropic"), "sk-ant-"))
+verifier("clef anthropic correcte sans defaut",
+         defauts("sk-ant-api03-" + BONNE, "anthropic") == [])
+
+# Ces messages partent sur Discord : aucun ne doit citer un morceau de clef.
+fuites = []
+for essai in ('"' + BONNE + '"', "MISTRAL_API_KEY=" + BONNE, "Bearer " + BONNE,
+              BONNE[:16] + " " + BONNE[16:], "Q7XK" + "*" * 24 + "YAS1E", BONNE[:12]):
+    for message in defauts(essai):
+        fuites += [message for i in range(len(BONNE) - 3) if BONNE[i:i + 4] in message]
+verifier("aucun message ne cite quatre caracteres de la clef", not fuites, str(fuites[:1]))
+
+erreur = b.AIError("phrase", statut=401, detail="Invalid API Key")
+verifier("l'erreur garde le code HTTP", erreur.statut == 401)
+verifier("l'erreur garde le message du fournisseur", erreur.detail == "Invalid API Key")
+verifier("l'erreur s'affiche toujours comme sa phrase", str(erreur) == "phrase")
+verifier("une erreur sans detail reste possible", str(b.AIError("seule")) == "seule")
+
+source = open("bot.py", encoding="utf-8").read()
+commande = source[source.index("async def security_ia_test"):]
+commande = commande[:commande.index("\n@", 1)]
+verifier("/securite ia-test nomme les defauts de la clef", "ai_defauts_de_clef(" in commande)
+verifier("/securite ia-test donne la reponse du fournisseur", '"detail"' in commande)
+verifier("/securite ia-test donne l'heure de lecture des variables", "PROCESS_STARTED_AT" in commande)
+verifier("/securite ia-test ne montre jamais la clef",
+         "AI_API_KEY[" not in commande and "{AI_API_KEY}" not in commande
+         and '"prefix"' not in commande)
+
 reussis = sum(resultats)
 print("\n" + "=" * 56)
 print(f"RESULTAT : {reussis}/{len(resultats)} verifications passees")
