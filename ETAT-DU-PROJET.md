@@ -5546,3 +5546,92 @@ page vide.
 - **Les quatre traductions sont invisibles pour Google** : une seule URL,
   langue changée en JavaScript. Corriger demanderait des URL par langue.
   C'est un choix, pas un oubli.
+
+## 75. Livré le 16 septembre 2026 — le bot ne se mettait plus à jour, et l'audit complet
+
+### La panne : on_ready plantait depuis quatre jours
+
+« Le site ne se met plus à jour, et le bot non plus. » Le site allait bien ;
+le bot, non. **Du 12 au 16 septembre, on_ready a planté à chaque
+démarrage.**
+
+`_rappels_membres_task` était assignée dans on_ready sans figurer dans ses
+déclarations `global`. Python la tenait pour une variable **locale** de
+toute la fonction : la lire (`if not _rappels_membres_task`) levait
+`UnboundLocalError`, et on_ready s'arrêtait là. Tout ce qui suivait ne
+tournait plus jamais : l'envoi des commandes à Discord (d'où
+`/securite ia-test` introuvable, et `/ban` sans durée), la boucle des
+rappels, le statut, puis les bannissements temporaires et le rapport.
+
+**Rien ne le montrait** : un gestionnaire d'événement discord.py qui lève
+n'arrête pas le bot. Il reste « prêt » et répond aux commandes déjà
+enregistrées. Introduit par « La vie du serveur » (4b22d90).
+
+La page de santé l'a trouvé en deux lectures : le démarrage restait figé
+sur `etape_boucles`, une étape qui ne fait que créer des tâches — elle ne
+pouvait pas traîner, seulement planter.
+
+### Le démarrage, réordonné et visible
+
+1. la configuration (90 s au plus) ;
+2. les vues, puis **toutes** les boucles — instantané ;
+3. les commandes (3 min au plus) ;
+4. l'entretien **en arrière-plan**, chaque passage borné.
+
+Aucun entretien n'est plus attendu dans on_ready : le plus lent décidait
+de l'heure à laquelle tout le reste démarrait — ou de s'il démarrait.
+
+### L'audit
+
+| Zone | Vérifié | Trouvé |
+|---|---|---|
+| Code du bot | pyflakes, 12 modules | 0 erreur bloquante, 8 remarques de style sans effet |
+| API du bot | 94 adresses, sans connexion | 0 plantage ; 7 publiques, 74 protégées |
+| CORS | site, domaine tiers, `null` | seul le site est accepté |
+| Boucles de fond | les 15, dans l'arbre syntaxique | **4 non protégées** — corrigé |
+| Boutons | 10 vues persistantes | 0 orphelin au redémarrage |
+| Paiements | secret du webhook | **refus silencieux possible** — rendu visible |
+| Confidentialité | 5 adresses publiques | aucune donnée personnelle ni secret |
+| Site, JavaScript | 14 pages en ligne | 0 erreur |
+| Site, contenus | stats, prix, partenaires, connexion | tout se remplit |
+| Site, fichiers | 26 adresses + traductions + images | tout répond 200 |
+| Langues | fr, en, es, de, ar | chargées, appliquées, arabe de droite à gauche |
+| Affichage | 14 pages × 360, 768, 1280 px | 0 débordement |
+
+### Les boucles qui mouraient en silence
+
+Une tâche asyncio qui lève s'arrête pour toujours. Quatre boucles n'étaient
+pas entièrement protégées : **messages programmés, compteurs, relais de
+réseaux sociaux, statut**. Un seul serveur mal réglé arrêtait la fonction
+pour tous, jusqu'au prochain redémarrage.
+
+- Dans les trois boucles qui parcourent les serveurs, **chaque serveur est
+  isolé** dans son propre `try`.
+- Un **superviseur** (`boucle_surveillee`) lance les quinze boucles et
+  relance celle qui tombe, après 30 s. Il laisse passer une annulation.
+
+### Ce que /api/health dit désormais
+
+- `startup` — l'étape du démarrage ; `demarrage_termine` quand tout est lancé ;
+- `commands` — combien de commandes Discord a acceptées, et son refus éventuel ;
+- `loops` — les boucles tombées, leurs chutes, la dernière erreur ;
+- `stripe` — clé et secret posés (booléens), confirmations acceptées,
+  rejets consécutifs.
+
+**C'est le premier endroit à lire** quand quelque chose « ne se met plus à
+jour ».
+
+### Les garde-fous
+
+- `test_analyse.py` — pyflakes à chaque envoi ; bloque sur ce qui plante à
+  l'exécution. Essayé sur le code d'avant : il nomme `_rappels_membres_task`.
+- `test_demarrage_ordre.py` — l'ordre d'on_ready, et toute variable de
+  module assignée dans on_ready déclarée `global`.
+- `test_boucles.py` — quinze boucles surveillées, serveurs isolés, relance réelle.
+- `test_boutique.py` — un rejet de signature est compté.
+
+### Ce qui reste hors de portée d'un audit automatique
+
+Les actions du tableau de bord une fois connecté, un vrai paiement, et une
+commande tapée dans Discord. Les suites de la CI couvrent leur code ; seul
+un essai réel prouve le reste.
