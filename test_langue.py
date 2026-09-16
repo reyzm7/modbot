@@ -81,9 +81,13 @@ def tester_releve():
 
     print("\n--- Phrase ou identifiant ---")
     for identifiant in ("salon_tickets", "modbot:traduire", "https://discord.gg/abc",
-                        "%d/%m/%Y a %H:%M", "TOKEN", "embedColor", "SELECT * FROM x"):
+                        "%d/%m/%Y a %H:%M", "TOKEN", "embedColor", "SELECT * FROM x",
+                        # Traduits, ils sortaient « Mistral-Small-Neueste » en allemand.
+                        "mistral-small-latest", "claude-sonnet-5", "open-mistral-nemo",
+                        "ministral-8b-latest"):
         verifier(f"« {identifiant} » n'est pas a traduire", not lb.a_traduire(identifiant))
-    for phrase in ("Fermer le ticket", "Salons", "Raison : ⟦0⟧", "⟦0⟧ membres"):
+    for phrase in ("Fermer le ticket", "Salons", "Raison : ⟦0⟧", "⟦0⟧ membres",
+                   "anti-raid", "Mistral"):
         verifier(f"« {phrase} » est a traduire", lb.a_traduire(phrase))
     verifier("un modele trop maigre ne happe pas la phrase d'un membre",
              not lb.a_traduire("⟦0⟧ dans ⟦1⟧"))

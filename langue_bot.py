@@ -94,6 +94,12 @@ _LETTRES = re.compile(r"[^\W\d_]+")
 _ECARTES = re.compile(r"https?://\S+|<[^<>\s]*>|`[^`]*`")
 _IDENTIFIANT = re.compile(r"[_./\\@#=<>{}\[\]|$%&^~]|:\S")
 _SQL = re.compile(r"(?i)\s*(select|insert|update|delete|create|drop|pragma|alter)\s")
+# Les noms de modeles d'IA : « mistral-small-latest », « claude-sonnet-5 ».
+# Traduits, ils sortaient deformes (« Mistral-Small-Neueste ») partout ou
+# le bot les cite, puisqu'une valeur egale a une entree du dictionnaire
+# est traduite elle aussi.
+_MODELE_IA = re.compile(r"(?:claude|mistral|ministral|open-mistral|codestral|pixtral"
+                        r"|magistral|devstral)(?:-[a-z0-9.]+)+")
 
 
 def _litteral(modele):
@@ -120,6 +126,8 @@ def a_traduire(modele):
         if _IDENTIFIANT.search(brut) or re.search(r"[a-z][A-Z]", brut):
             return False
         if brut.isascii() and brut.isupper():      # GET, TOKEN, ADMIN
+            return False
+        if _MODELE_IA.fullmatch(brut):             # mistral-small-latest
             return False
     if _SQL.match(brut):
         return False

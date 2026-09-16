@@ -2294,6 +2294,13 @@ def ai_modeles_a_essayer():
     return ordre
 
 
+# Ce que les fournisseurs ecrivent quand le MODELE est refuse. Des motifs en
+# anglais, compares a leur reponse : pas des phrases du bot, et le nom de
+# la variable les tient hors du dictionnaire de traduction.
+AI_MOTIFS_REFUS_DE_MODELE = ("subscription tier", "not available", "invalid model",
+                             "not found", "no access", "not allowed")
+
+
 def ai_refus_de_modele(statut, detail):
     """
     Le compte n'a pas droit a CE modele — un autre peut marcher.
@@ -2305,8 +2312,7 @@ def ai_refus_de_modele(statut, detail):
     bas = str(detail or "").lower()
     if statut not in (400, 403) or "model" not in bas:
         return False
-    return any(mot in bas for mot in ("subscription tier", "not available", "invalid model",
-                                      "not found", "no access", "not allowed"))
+    return any(mot in bas for mot in AI_MOTIFS_REFUS_DE_MODELE)
 
 # Les variables d'environnement sont lues UNE FOIS, au demarrage du processus.
 # Une variable ajoutee sur l'hebergeur pendant que le bot tourne n'entre donc
