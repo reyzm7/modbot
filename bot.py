@@ -6932,6 +6932,9 @@ async def api_health(request):
         # Rien de secret : ce sont des noms de commandes et un message
         # d'erreur de Discord, pas une clef.
         "commands": dict(SYNCHRO_COMMANDES),
+        # Ou le demarrage en est. « demarrage_termine » : tout est lance. Toute autre
+        # valeur, longtemps apres « started_at », dit l'etape qui bloque.
+        "startup": dict(DEMARRAGE),
         "client_id": DISCORD_CLIENT_ID,
         # Sans volume, le disque est efface a chaque redeploiement : les
         # sessions du dashboard partent avec, et tout le monde doit se
@@ -20401,6 +20404,77 @@ async def voter_suggestion(interaction, vue, sens):
 
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  LE DEMARRAGE
+# ══════════════════════════════════════════════════════════════════════
+#
+# Le bot restait bloque avant d'envoyer ses commandes a Discord. Tout etant
+# attendu a la file, TOUT ce qui suivait ne demarrait jamais : giveaways,
+# sauvegardes, rappels, anniversaires, bannissements temporaires, rapport,
+# statut. De l'exterieur il etait « pret » et repondait — il ne se mettait
+# simplement plus a jour, et rien ne disait ou il s'etait arrete.
+#
+# L'ordre compte : configuration, puis tout ce qui est instantane (vues,
+# boucles), puis les commandes, puis l'entretien EN ARRIERE-PLAN. Et
+# chaque etape note son nom : /api/health dit ou le demarrage en est.
+
+DEMARRAGE = {"debut": "", "etape": "", "fini": ""}
+
+
+def _etape_demarrage(nom):
+    DEMARRAGE["etape"] = nom
+
+
+async def synchroniser_commandes():
+    """Envoie les commandes a Discord, traduites si Discord les accepte."""
+    if bot.tree.translator is None:
+        await bot.tree.set_translator(lb.traducteur_commandes(TRADUCTEUR))
+    try:
+        synced = await bot.tree.sync()
+        SYNCHRO_COMMANDES["traduites"] = True
+    except discord.HTTPException as err:
+        # Une traduction refusee par Discord ne doit pas priver le bot
+        # de ses commandes : on resynchronise sans les traductions.
+        print(f"sync traduite refusee, nouvel essai sans : {err}")
+        SYNCHRO_COMMANDES.update(etape="sync_traduite", erreur=str(err)[:300])
+        await bot.tree.set_translator(None)
+        synced = await bot.tree.sync()
+    SYNCHRO_COMMANDES["commandes"] = len(synced)
+
+
+async def entretien_du_demarrage():
+    """
+    Les passages d'entretien, un par un, chacun borne dans le temps.
+
+    Aucun n'est indispensable a ce que le bot fonctionne. Ils etaient
+    pourtant attendus AVANT les commandes et les boucles : le plus lent
+    decidait donc de l'heure a laquelle tout le reste demarrait — ou de
+    s'il demarrait.
+    """
+    passages = [
+        ("vocaux_orphelins", nettoyer_vocaux_orphelins),
+        ("reconciliation_licences", reconcilier_licences),
+        ("roles_premium", balayer_roles_acheteurs),
+    ]
+    for nom, fonction in passages:
+        try:
+            await asyncio.wait_for(fonction(), timeout=120)
+        except asyncio.TimeoutError:
+            print(f"entretien : {nom} trop long, abandonne")
+        except Exception as err:
+            print(f"entretien : {nom} : {err}")
+    # Un serveur support injoignable est une panne silencieuse : le role
+    # premium ne parait jamais et rien ne le dit. On le dit.
+    if bot.get_guild(SERVEUR_SUPPORT) is None:
+        print(f"role premium: ModBot n'est pas sur le serveur support "
+              f"({SERVEUR_SUPPORT}) — aucun role d'acheteur ne sera pose")
+    for guild in list(bot.guilds):
+        try:
+            await asyncio.wait_for(cleanup_configured_system_messages(guild), timeout=30)
+        except Exception as err:
+            print(f"cleanup doublons {guild.id}: {err}")
+
+
 @bot.event
 async def on_ready():
     global _dashboard_recurring_task, _dashboard_social_task, _compteurs_task
@@ -20412,18 +20486,25 @@ async def on_ready():
     global _presence_task
     global _sauvegarde_a_faire
     BOT_STATUS.update({"state": "connecte", "detail": ""})
-    # Avant tout le reste : si le disque a ete efface par un redeploiement,
-    # on recupere les reglages dans Discord. Tout ce qui suit lit la
-    # configuration, donc elle doit etre en place des maintenant.
+    DEMARRAGE.update(debut=now().isoformat(), etape="", fini="")
+
+    # ── 1. La configuration, avant tout. Tout ce qui suit la lit : si le
+    #       disque a ete efface, on la reprend dans Discord. Bornee dans le
+    #       temps — attendre sans fin, c'etait bloquer tout le reste.
+    _etape_demarrage("etape_reprise")
     try:
-        await reprendre_sauvegarde_discord()
+        await asyncio.wait_for(reprendre_sauvegarde_discord(), timeout=90)
+    except asyncio.TimeoutError:
+        print("reprise des reglages : trop longue, on continue sans")
     except Exception as err:
         print(f"reprise des reglages : {err}")
     # Sans cela, une installation qui ne change aucun reglage ne serait jamais
     # sauvegardee — et le redeploiement suivant l'effacerait sans filet. La
     # comparaison d'empreinte se charge de ne rien poster si c'est deja fait.
     _sauvegarde_a_faire = True
-    # Vues persistantes uniquement (timeout=None + custom_id partout)
+
+    # ── 2. Les vues persistantes (timeout=None + custom_id partout).
+    _etape_demarrage("etape_vues")
     for v in [VueSuggestion(), VueReport(), VueTicket(), VueNotation(),
               VueEvenement(),
               VueChoixCategorie(), VueSelectionReport(), VueSuggestionLauncher(),
@@ -20432,35 +20513,21 @@ async def on_ready():
             bot.add_view(v)
         except Exception as err:
             print(f"add_view {type(v).__name__}: {err}")
+
+    _etape_demarrage("etape_api")
     try:
         await start_dashboard_api()
     except Exception as err:
         print(f"Erreur API dashboard : {err}")
+
+    # ── 3. TOUTES les boucles, tout de suite. Les creer est instantane ; les
+    #       attendre derriere une etape lente, c'etait les perdre toutes si
+    #       cette etape ne rendait jamais la main.
+    _etape_demarrage("etape_boucles")
     if not _dashboard_recurring_task or _dashboard_recurring_task.done():
         _dashboard_recurring_task = asyncio.create_task(dashboard_recurring_loop())
     if not _compteurs_task or _compteurs_task.done():
         _compteurs_task = asyncio.create_task(compteurs_loop())
-    try:
-        await nettoyer_vocaux_orphelins()
-    except Exception as err:
-        print(f"nettoyage des vocaux : {err}")
-    # Une sauvegarde restauree peut etre anterieure a une activation :
-    # les licences font foi, on reconstruit le premium a partir d'elles.
-    try:
-        await reconcilier_licences()
-    except Exception as err:
-        print(f"reconciliation des licences : {err}")
-    # Une echeance ne previent personne : sans ce passage, un role
-    # premium resterait pose apres la fin de l'abonnement.
-    # Un serveur support injoignable est une panne silencieuse : le role
-    # ne parait jamais et rien ne le dit. On le dit.
-    if bot.get_guild(SERVEUR_SUPPORT) is None:
-        print(f"role premium: ModBot n'est pas sur le serveur support "
-              f"({SERVEUR_SUPPORT}) — aucun role d'acheteur ne sera pose")
-    try:
-        await balayer_roles_acheteurs()
-    except Exception as err:
-        print(f"balayage des roles premium : {err}")
     if not _dashboard_social_task or _dashboard_social_task.done():
         _dashboard_social_task = asyncio.create_task(dashboard_social_loop())
     if not _security_task or _security_task.done():
@@ -20485,40 +20552,35 @@ async def on_ready():
         _tempbans_task = asyncio.create_task(tempbans_loop())
     if not _rapports_task or _rapports_task.done():
         _rapports_task = asyncio.create_task(rapports_loop())
+    if not _presence_task or _presence_task.done():
+        _presence_task = asyncio.create_task(presence_loop())
+
+    # ── 4. Les commandes. Discord ne connait qu'une liste pour tous les
+    #       serveurs : la resynchroniser serveur par serveur, comme on le
+    #       faisait, ne changeait rien — et effacait au passage les
+    #       commandes propres a chaque serveur.
+    _etape_demarrage("etape_commandes")
+    SYNCHRO_COMMANDES.update(le=now().isoformat(), commandes=0,
+                             traduites=False, etape="", erreur="")
     try:
-        # Les descriptions des commandes, dans chaque langue de Discord.
-        # Discord ne connait qu'une liste de commandes pour tous les
-        # serveurs : la resynchroniser serveur par serveur, comme on le
-        # faisait, ne changeait rien — et effacait au passage les commandes
-        # propres a chaque serveur.
-        if bot.tree.translator is None:
-            await bot.tree.set_translator(lb.traducteur_commandes(TRADUCTEUR))
-        SYNCHRO_COMMANDES.update(le=now().isoformat(), commandes=0,
-                                 traduites=False, etape="", erreur="")
-        try:
-            synced = await bot.tree.sync()
-            SYNCHRO_COMMANDES["traduites"] = True
-        except discord.HTTPException as err:
-            # Une traduction refusee par Discord ne doit pas priver le bot
-            # de ses commandes : on resynchronise sans les traductions.
-            print(f"sync traduite refusee, nouvel essai sans : {err}")
-            SYNCHRO_COMMANDES.update(etape="sync_traduite", erreur=str(err)[:300])
-            await bot.tree.set_translator(None)
-            synced = await bot.tree.sync()
-        SYNCHRO_COMMANDES["commandes"] = len(synced)
-        for guild in bot.guilds:
-            try:
-                await cleanup_configured_system_messages(guild)
-            except Exception as err:
-                print(f"cleanup doublons {guild.id}: {err}")
+        await asyncio.wait_for(synchroniser_commandes(), timeout=180)
         print(f"ModBot connecte : {bot.user}")
-        print(f"{len(synced)} commandes synchronisees")
+        print(f"{SYNCHRO_COMMANDES['commandes']} commandes synchronisees")
+    except asyncio.TimeoutError:
+        print("sync : trop longue, abandonnee")
+        SYNCHRO_COMMANDES.update(etape="sync_trop_longue",
+                                 erreur="timeout_180s")
     except Exception as e:
         print(f"Erreur sync : {e}")
         # Les deux essais ont echoue : Discord garde les commandes d'AVANT.
         SYNCHRO_COMMANDES.update(etape="sync_complete", erreur=str(e)[:300])
-    if not _presence_task or _presence_task.done():
-        _presence_task = asyncio.create_task(presence_loop())
+
+    # ── 5. L'entretien, en arriere-plan. Utile, mais rien n'en depend : il
+    #       tourne a cote, chaque passage borne dans le temps.
+    _etape_demarrage("etape_entretien")
+    asyncio.create_task(entretien_du_demarrage())
+    _etape_demarrage("demarrage_termine")
+    DEMARRAGE["fini"] = now().isoformat()
 
 
 @bot.tree.context_menu(name="🌍 Traduire")
