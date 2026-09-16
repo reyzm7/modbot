@@ -15,6 +15,7 @@ import security_core as sc
 import premium_core as pc
 import security_score as sc_score
 import reseaux_sociaux as rs
+import invitation
 import compteurs as cpt
 import langue_bot as lb
 import boutique as bq
@@ -6991,6 +6992,9 @@ async def api_health(request):
         "startup": dict(DEMARRAGE),
         # Les boucles de fond tombees et relancees. Vide = aucune chute.
         "loops": {nom: dict(etat) for nom, etat in BOUCLES.items() if etat["chutes"]},
+        # Peut-on encore inviter le bot ? « problemes » vide = rien a regler.
+        # Des booleens, des scopes et un nombre de serveurs : aucun secret.
+        "invitation": dict(ETAT_APPLICATION),
         "client_id": DISCORD_CLIENT_ID,
         # Sans volume, le disque est efface a chaque redeploiement : les
         # sessions du dashboard partent avec, et tout le monde doit se
@@ -20608,6 +20612,34 @@ async def synchroniser_commandes():
     SYNCHRO_COMMANDES["commandes"] = len(synced)
 
 
+# Ce que Discord dit de l'application : public ou non, bouton du profil,
+# quarantaine... Lu au demarrage, montre par /api/health. Vide tant que
+# la lecture n'a pas eu lieu.
+ETAT_APPLICATION = {"le": "", "erreur": ""}
+
+
+async def lire_etat_application():
+    """
+    « Je ne peux plus inviter le bot » ne se voyait de nulle part : le lien
+    du site reste bon, et le bot tourne sur les serveurs ou il est deja.
+    Les causes vivent dans les reglages de l'application et dans les
+    drapeaux du compte du bot. Deux lectures, avec son propre jeton.
+    """
+    from discord.http import Route
+    try:
+        application = await bot.http.request(Route("GET", "/applications/@me"))
+        compte = await bot.http.request(Route("GET", "/users/@me"))
+    except Exception as erreur:
+        ETAT_APPLICATION.update(le=now().isoformat(),
+                                erreur=f"{type(erreur).__name__}: {erreur}"[:200])
+        return
+    etat = invitation.analyser(application, compte, lien=lien_invitation_bot())
+    ETAT_APPLICATION.clear()
+    ETAT_APPLICATION.update(etat, le=now().isoformat(), erreur="")
+    for probleme in etat["problemes"]:
+        print(f"invitation : {probleme}")
+
+
 async def entretien_du_demarrage():
     """
     Les passages d'entretien, un par un, chacun borne dans le temps.
@@ -20618,6 +20650,9 @@ async def entretien_du_demarrage():
     s'il demarrait.
     """
     passages = [
+        # En premier : deux requetes, et c'est ce qu'on cherche quand plus
+        # personne n'arrive a ajouter le bot.
+        ("etat_application", lire_etat_application),
         ("vocaux_orphelins", nettoyer_vocaux_orphelins),
         ("reconciliation_licences", reconcilier_licences),
         ("roles_premium", balayer_roles_acheteurs),
