@@ -189,9 +189,10 @@ import aiohttp as _aiohttp
 
 
 class FausseReponse:
-    def __init__(self, statut, donnees):
+    def __init__(self, statut, donnees, entetes=None):
         self.status = statut
         self._donnees = donnees
+        self.headers = dict(entetes or {})
 
     async def json(self, content_type=None):
         return self._donnees
@@ -228,7 +229,9 @@ def fausse_api(refuses, limites=None):
             reste = limites.get(json["model"], 0)
             if reste:
                 limites[json["model"]] = reste - 1 if reste > 0 else reste
-                return FausseReponse(429, {"message": "Requests rate limit exceeded"})
+                return FausseReponse(429, {"message": "Rate limit exceeded"},
+                                     {"Content-Type": "application/json",
+                                      "x-ratelimitbysize-remaining-month": "0"})
             return FausseReponse(200, {"choices": [{"message": {"content": "pong"}}]})
 
     return FausseSession, appels
@@ -309,19 +312,39 @@ try:
     verifier("la pause avant de redemander est celle du quota",
              b.AI_PAUSE_QUOTA in pauses, str(pauses))
 
+    # Le cas reel du 17/09/2026 : large hors formule, medium limite a chaque fois.
+    b = charger(MISTRAL_API_KEY="Q7XK2M9RTB4HWZ8NPL3VCD6JFG5YAS1E")
+    Session, appels = fausse_api({"mistral-large-latest"}, {"mistral-medium-latest": -1})
+    _aiohttp.ClientSession = Session
+    texte = _asyncio.run(b.ask_ai([{"role": "user", "content": "ping"}], "consigne", 8))
+    verifier("un modele limite a chaque fois : on passe au suivant, et ca repond",
+             texte == "pong" and appels == ["mistral-large-latest", "mistral-medium-latest",
+                                           "mistral-medium-latest", "mistral-small-latest"],
+             str(appels))
+    verifier("le modele qui repond est retenu", b.ai_modele() == "mistral-small-latest",
+             b.ai_modele())
+    verifier("un modele limite n'est pas pris pour hors formule",
+             "mistral-medium-latest" not in b._AI_MODELES_HORS_FORMULE)
+
     b = charger(MISTRAL_API_KEY="Q7XK2M9RTB4HWZ8NPL3VCD6JFG5YAS1E")
     Session, appels = fausse_api({"mistral-large-latest", "mistral-medium-latest"},
-                                 {"mistral-small-latest": -1})
+                                 {"mistral-small-latest": -1, "ministral-8b-latest": -1,
+                                  "open-mistral-nemo": -1})
     _aiohttp.ClientSession = Session
     try:
         _asyncio.run(b.ask_ai([{"role": "user", "content": "ping"}], "consigne", 8))
-        verifier("une limite qui dure : erreur 429", False)
+        verifier("une limite partout : erreur 429", False)
     except b.AIError as ex:
-        verifier("une limite qui dure : erreur 429", ex.statut == 429, str(ex.statut))
+        verifier("une limite partout : erreur 429", ex.statut == 429, str(ex.statut))
         verifier("l'erreur garde chaque essai, dans l'ordre",
                  ex.essais == [("mistral-large-latest", 403), ("mistral-medium-latest", 403),
-                               ("mistral-small-latest", 429), ("mistral-small-latest", 429)],
+                               ("mistral-small-latest", 429), ("mistral-small-latest", 429),
+                               ("ministral-8b-latest", 429), ("ministral-8b-latest", 429),
+                               ("open-mistral-nemo", 429), ("open-mistral-nemo", 429)],
                  str(ex.essais))
+        verifier("les limites annoncees sont relevees, et seulement elles",
+                 ex.limites.get("mistral-small-latest") == {"x-ratelimitbysize-remaining-month": "0"},
+                 str(ex.limites))
         verifier("le message parle de limite, pas de clef",
                  "limite" in str(ex) and "refusée" not in str(ex), str(ex)[:80])
     verifier("les modeles hors formule ne sont plus redemandes",
@@ -352,6 +375,7 @@ verifier("/securite ia-test ne titre plus « refusee » une limite de requetes",
          "elif statut == 429:" in commande
          and commande.index("elif statut == 429:") < commande.index('"La clef est refusee"'))
 verifier("/securite ia-test liste les modeles essayes", "Modèles essayés" in commande)
+verifier("/securite ia-test montre les limites annoncees", "Limites annoncées pour" in commande)
 verifier("/securite ia-test distingue un modele refuse d'un compte sans formule",
          "elif ai_refus_de_modele(statut, detail):" in commande
          and commande.index("ai_refus_de_modele(statut, detail)") < commande.index("elif statut == 403:"))

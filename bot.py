@@ -2314,6 +2314,20 @@ AI_MOTIFS_REFUS_DE_MODELE = ("subscription tier", "not available", "invalid mode
                              "not found", "no access", "not allowed")
 
 
+def ai_entetes_de_limite(entetes):
+    """
+    Les en-tetes de quota d'une reponse (« x-ratelimitbysize-remaining-month »…).
+    Ils disent QUELLE limite est atteinte : par minute, par mois, ou nulle
+    parce que la formule n'inclut pas le modele.
+    """
+    trouves = {}
+    for nom, valeur in dict(entetes or {}).items():
+        bas = str(nom).lower()
+        if "ratelimit" in bas and len(trouves) < 12:
+            trouves[bas] = str(valeur)[:40]
+    return trouves
+
+
 def ai_issue_d_essai(code):
     """Ce qu'un code HTTP veut dire pour un modele essaye, en quatre mots."""
     if code == 429:
@@ -2481,12 +2495,15 @@ class AIError(Exception):
 
     # Le code HTTP et le message brut du fournisseur, pour le diagnostic
     # administrateur seulement : un membre ne voit que la phrase.
-    def __init__(self, message="", statut=None, detail="", essais=None):
+    def __init__(self, message="", statut=None, detail="", essais=None, limites=None):
         super().__init__(message)
         self.statut = statut
         self.detail = detail
         # [(modele, code HTTP)], dans l'ordre ou ils ont ete essayes.
         self.essais = list(essais or [])
+        # {modele: {en-tete: valeur}} : les limites que le fournisseur
+        # annonce quand il refuse pour quota. Des nombres, aucun secret.
+        self.limites = dict(limites or {})
 
 
 async def ai_verifier_clef():
@@ -2666,6 +2683,7 @@ async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=Fa
 
     modeles = ai_modeles_a_essayer()
     essais = []
+    limites = {}
     try:
         timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -2679,6 +2697,10 @@ async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=Fa
                     async with session.post(AI_URL, json=charge, headers=entetes) as reponse:
                         donnees = await reponse.json(content_type=None)
                         statut = reponse.status
+                        if statut == 429:
+                            annoncees = ai_entetes_de_limite(getattr(reponse, "headers", {}))
+                            if annoncees:
+                                limites[modele] = annoncees
                     essais.append((modele, statut))
                     if statut != 429 or tentative == 2:
                         break
@@ -2692,8 +2714,16 @@ async def ask_ai(messages, system_prompt, max_tokens=AI_MAX_TOKENS, detailler=Fa
                         _AI_MODELES_HORS_FORMULE.add(modele)
                         if rang + 1 < len(modeles):
                             continue
+                    # Encore limite apres une pause : ce n'est plus la limite
+                    # par seconde, mais celle de CE modele dans la formule
+                    # (constate sur mistral-medium, 17/09/2026). Un autre
+                    # modele a souvent sa propre enveloppe. Pas retenu comme
+                    # hors formule : cette limite-la se recharge.
+                    if statut == 429 and rang + 1 < len(modeles):
+                        continue
                     raise AIError(ai_message_erreur(statut, detail, detailler),
-                                  statut=statut, detail=detail, essais=essais)
+                                  statut=statut, detail=detail, essais=essais,
+                                  limites=limites)
                 if modele != ai_modele():
                     print(f"{AI_LABEL} : {ai_modele()} refuse par la formule du compte, "
                           f"le bot utilise {modele}")
@@ -18637,6 +18667,10 @@ async def security_ia_test(i: discord.Interaction):
         if essais:
             liste = ", ".join(f"`{modele}` ({ai_issue_d_essai(code)})" for modele, code in essais)
             lu.append(f"Modèles essayés : {liste}")
+        for modele, annoncees in list((getattr(erreur, "limites", None) or {}).items())[:2]:
+            valeurs = ", ".join(f"{nom.replace('x-ratelimitbysize-', '')}={valeur}"
+                               for nom, valeur in list(annoncees.items())[:6])
+            lu.append(f"Limites annoncées pour `{modele}` : {valeurs}")
         similaires = ai_diagnostic()["similar_names"]
         if similaires:
             lu.append("Autres variables proches : " + ", ".join(f"`{n}`" for n in similaires[:5])
