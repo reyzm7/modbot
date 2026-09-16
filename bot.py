@@ -6925,6 +6925,10 @@ async def api_health(request):
         # Booleen seul : cette route est publique, aucun detail sur la clef.
         # Le diagnostic complet est au dashboard, reserve aux admins.
         "ai_configured": ai_available(),
+        # Booleens seuls : jamais une clef. « webhook: false » = aucune
+        # confirmation de paiement ne peut etre acceptee.
+        "stripe": {"cle": bool(STRIPE_SECRET_KEY), "webhook": bool(STRIPE_WEBHOOK_SECRET),
+                   **WEBHOOKS_STRIPE},
         # Permet de voir depuis un navigateur si le service a bien redemarre
         # apres un changement de variable, sans attendre Discord.
         "started_at": PROCESS_STARTED_AT.isoformat(),
@@ -8991,6 +8995,14 @@ def nom_utilisateur(user_id):
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "").strip()
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
 STRIPE_API = "https://api.stripe.com/v1"
+
+# Ce que les webhooks Stripe ont donne jusqu'ici. Un secret de webhook
+# absent ou faux fait refuser TOUTES les confirmations de paiement : le
+# client est debite, sa commande reste « en attente », son premium
+# n'arrive jamais — et rien ne le montrait. Refuser est juste ; se taire,
+# non. Aucun secret ici : des dates et des compteurs.
+WEBHOOKS_STRIPE = {"dernier": "", "signature_valide": None,
+                   "rejets_consecutifs": 0, "acceptes": 0}
 
 # Les tarifs sont resolus une fois depuis les identifiants de produit :
 # un produit peut porter plusieurs tarifs, seul l'actif nous interesse.
@@ -11437,8 +11449,16 @@ async def api_stripe_webhook(request):
     s'offrir le premium.
     """
     corps = await request.read()
-    if not stripe_signature_valide(corps, request.headers.get("Stripe-Signature", "")):
+    valide = stripe_signature_valide(corps, request.headers.get("Stripe-Signature", ""))
+    WEBHOOKS_STRIPE["dernier"] = now().isoformat()
+    WEBHOOKS_STRIPE["signature_valide"] = valide
+    if not valide:
+        # Des rejets qui s'enchainent, c'est presque toujours le secret :
+        # un attaquant isole ne ressemble pas a Stripe qui reessaie.
+        WEBHOOKS_STRIPE["rejets_consecutifs"] += 1
         raise web.HTTPUnauthorized(text="Signature Stripe invalide.")
+    WEBHOOKS_STRIPE["rejets_consecutifs"] = 0
+    WEBHOOKS_STRIPE["acceptes"] += 1
 
     try:
         evenement = json.loads(corps.decode("utf-8", "ignore"))

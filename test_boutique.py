@@ -503,6 +503,11 @@ async def scenario():
         passe = False
     verifier("une signature fausse ne credite rien",
              not passe and bot_mod.commandes_tout()[numero]["statut"] == "en_attente")
+    # Un secret de webhook faux fait refuser TOUS les paiements, en silence.
+    # Le rejet doit au moins se compter, pour se voir dans /api/health.
+    verifier("un rejet de signature est compte",
+             bot_mod.WEBHOOKS_STRIPE["rejets_consecutifs"] >= 1
+             and bot_mod.WEBHOOKS_STRIPE["signature_valide"] is False)
 
     impaye = json.loads(json.dumps(evenement))
     impaye["data"]["object"]["payment_status"] = "unpaid"
@@ -514,6 +519,9 @@ async def scenario():
     await bot_mod.api_stripe_webhook(FausseRequete(entetes={"Stripe-Signature": signer(corps)}, brut=corps))
     fiche = bot_mod.commandes_tout()[numero]
     verifier("un paiement confirme passe la commande a « payee »", fiche["statut"] == "payee")
+    verifier("un webhook accepte est compte, et remet les rejets a zero",
+             bot_mod.WEBHOOKS_STRIPE["acceptes"] >= 1
+             and bot_mod.WEBHOOKS_STRIPE["rejets_consecutifs"] == 0)
     verifier("l'e-mail donne a Stripe est retenu", fiche["email"] == "client@exemple.fr")
     verifier("la commande est annoncee", annonces == [numero], str(annonces))
 
