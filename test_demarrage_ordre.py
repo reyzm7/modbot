@@ -57,10 +57,11 @@ verifier("l'entretien part en arriere-plan",
 
 # Chaque boucle doit etre creee AVANT la synchronisation : une sync qui
 # traine ne doit pas retenir les giveaways ni les sauvegardes.
-for boucle in ("giveaway_loop()", "auto_backup_loop()", "rappels_loop()",
-               "anniversaires_loop()", "tempbans_loop()", "rapports_loop()",
-               "presence_loop()", "sauvegarde_discord_loop()"):
-    pos = position(boucle)
+# Les boucles passent par le superviseur : on cherche leur lancement.
+for boucle in ("giveaway_loop", "auto_backup_loop", "rappels_loop",
+               "anniversaires_loop", "tempbans_loop", "rapports_loop",
+               "presence_loop", "sauvegarde_discord_loop"):
+    pos = position(f'boucle_surveillee("{boucle}"')
     verifier(f"« {boucle} » demarre avant les commandes",
              pos is not None and sync is not None and pos < sync, str(pos))
 

@@ -6935,6 +6935,8 @@ async def api_health(request):
         # Ou le demarrage en est. « demarrage_termine » : tout est lance. Toute autre
         # valeur, longtemps apres « started_at », dit l'etape qui bloque.
         "startup": dict(DEMARRAGE),
+        # Les boucles de fond tombees et relancees. Vide = aucune chute.
+        "loops": {nom: dict(etat) for nom, etat in BOUCLES.items() if etat["chutes"]},
         "client_id": DISCORD_CLIENT_ID,
         # Sans volume, le disque est efface a chaque redeploiement : les
         # sessions du dashboard partent avec, et tout le monde doit se
@@ -13079,44 +13081,50 @@ async def dashboard_recurring_loop():
     while not bot.is_closed():
         current_ts = now().timestamp()
         for guild in list(bot.guilds):
-            cfg = get_cfg(guild.id)
-            messages = cfg.get("recurring_messages")
-            if not isinstance(messages, list) or not messages:
-                continue
-            # Le verrou se pose ici, au point d'effet : le serveur garde
-            # ses messages programmes, ils repartent tels quels le jour
-            # ou l'abonnement revient.
-            if not est_premium(guild.id):
-                continue
-            changed = False
-            for message in messages:
-                if not isinstance(message, dict) or not message.get("enabled", True):
+            # Un serveur mal regle ne doit pas priver tous les autres : son
+            # erreur le fait sauter pour ce tour, et la boucle continue.
+            try:
+                cfg = get_cfg(guild.id)
+                messages = cfg.get("recurring_messages")
+                if not isinstance(messages, list) or not messages:
                     continue
-                channel_id = parse_int(message.get("channel_id"))
-                channel = guild.get_channel(channel_id) if channel_id else None
-                if not channel:
+                # Le verrou se pose ici, au point d'effet : le serveur garde
+                # ses messages programmes, ils repartent tels quels le jour
+                # ou l'abonnement revient.
+                if not est_premium(guild.id):
                     continue
-                perms = channel.permissions_for(guild.me)
-                if not perms.send_messages:
-                    continue
-                interval = recurring_interval_seconds(message)
-                if current_ts - recurring_last_sent_ts(message.get("last_sent")) < interval:
-                    continue
-                content = clean_short_text(message.get("content"), "", 1900)
-                if not content:
-                    continue
-                try:
-                    await channel.send(content, allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True))
-                except Exception:
-                    continue
-                message["last_sent"] = now().isoformat()
-                # Un message « une seule fois » ne doit plus jamais repartir.
-                if str(message.get("mode")) == "once":
-                    message["enabled"] = False
-                changed = True
-            if changed:
-                cfg["recurring_messages"] = messages
-                set_cfg(guild.id, cfg)
+                changed = False
+                for message in messages:
+                    if not isinstance(message, dict) or not message.get("enabled", True):
+                        continue
+                    channel_id = parse_int(message.get("channel_id"))
+                    channel = guild.get_channel(channel_id) if channel_id else None
+                    if not channel:
+                        continue
+                    perms = channel.permissions_for(guild.me)
+                    if not perms.send_messages:
+                        continue
+                    interval = recurring_interval_seconds(message)
+                    if current_ts - recurring_last_sent_ts(message.get("last_sent")) < interval:
+                        continue
+                    content = clean_short_text(message.get("content"), "", 1900)
+                    if not content:
+                        continue
+                    try:
+                        await channel.send(content, allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True))
+                    except Exception:
+                        continue
+                    message["last_sent"] = now().isoformat()
+                    # Un message « une seule fois » ne doit plus jamais repartir.
+                    if str(message.get("mode")) == "once":
+                        message["enabled"] = False
+                    changed = True
+                if changed:
+                    cfg["recurring_messages"] = messages
+                    set_cfg(guild.id, cfg)
+            except Exception as erreur:
+                print(f"dashboard_recurring_loop : serveur {getattr(guild, 'id', '?')} "
+                      f"saute ({type(erreur).__name__}: {erreur})")
         await asyncio.sleep(60)
 
 # Un tour de veille par minute : une publication est vue en moins de
@@ -13656,29 +13664,35 @@ async def compteurs_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
         for guild in list(bot.guilds):
-            liste = get_cfg(guild.id).get("compteurs")
-            if not isinstance(liste, list) or not liste:
-                continue
-            faits = faits_du_serveur(guild)
-            porteurs = porteurs_des_roles(
-                guild, [c.get("template", "") for c in liste])
-            for compteur in liste:
-                if not isinstance(compteur, dict) or not compteur.get("enabled", True):
+            # Un serveur mal regle ne doit pas priver tous les autres : son
+            # erreur le fait sauter pour ce tour, et la boucle continue.
+            try:
+                liste = get_cfg(guild.id).get("compteurs")
+                if not isinstance(liste, list) or not liste:
                     continue
-                salon = salon_du_serveur(guild, compteur.get("channel_id"))
-                if salon is None:
-                    continue
-                voulu = cpt.rendre(compteur.get("template"), faits, porteurs)
-                if not cpt.doit_renommer(salon.name, voulu):
-                    continue
-                if not salon.permissions_for(guild.me).manage_channels:
-                    continue
-                try:
-                    await salon.edit(name=voulu, reason="[ModBot] Compteur de serveur")
-                except discord.HTTPException as ex:
-                    print(f"compteur {guild.id}/{salon.id}: {ex}")
-                except Exception as ex:
-                    print(f"compteur {guild.id}: {type(ex).__name__}: {ex}")
+                faits = faits_du_serveur(guild)
+                porteurs = porteurs_des_roles(
+                    guild, [c.get("template", "") for c in liste])
+                for compteur in liste:
+                    if not isinstance(compteur, dict) or not compteur.get("enabled", True):
+                        continue
+                    salon = salon_du_serveur(guild, compteur.get("channel_id"))
+                    if salon is None:
+                        continue
+                    voulu = cpt.rendre(compteur.get("template"), faits, porteurs)
+                    if not cpt.doit_renommer(salon.name, voulu):
+                        continue
+                    if not salon.permissions_for(guild.me).manage_channels:
+                        continue
+                    try:
+                        await salon.edit(name=voulu, reason="[ModBot] Compteur de serveur")
+                    except discord.HTTPException as ex:
+                        print(f"compteur {guild.id}/{salon.id}: {ex}")
+                    except Exception as ex:
+                        print(f"compteur {guild.id}: {type(ex).__name__}: {ex}")
+            except Exception as erreur:
+                print(f"compteurs_loop : serveur {getattr(guild, 'id', '?')} "
+                      f"saute ({type(erreur).__name__}: {erreur})")
         await asyncio.sleep(COMPTEURS_CADENCE)
 
 
@@ -13809,15 +13823,21 @@ async def dashboard_social_loop():
             # et « /Flux.XML » demande en « /flux.xml » repond 404.
             a_relever = {}
             for guild in list(bot.guilds):
-                if not est_premium(guild.id):
-                    continue
-                for relay in (get_cfg(guild.id).get("social_relays") or []):
-                    if not isinstance(relay, dict) or not relay.get("enabled"):
+                # Un serveur mal regle ne doit pas priver tous les autres : son
+                # erreur le fait sauter pour ce tour, et la boucle continue.
+                try:
+                    if not est_premium(guild.id):
                         continue
-                    lien = clean_short_text(relay.get("link"), "", 500)
-                    if lien and parse_int(relay.get("channel_id")):
-                        a_relever.setdefault(lien.strip().lower().rstrip("/"),
-                                             lien.strip())
+                    for relay in (get_cfg(guild.id).get("social_relays") or []):
+                        if not isinstance(relay, dict) or not relay.get("enabled"):
+                            continue
+                        lien = clean_short_text(relay.get("link"), "", 500)
+                        if lien and parse_int(relay.get("channel_id")):
+                            a_relever.setdefault(lien.strip().lower().rstrip("/"),
+                                                 lien.strip())
+                except Exception as erreur:
+                    print(f"dashboard_social_loop : serveur {getattr(guild, 'id', '?')} "
+                          f"saute ({type(erreur).__name__}: {erreur})")
 
             # Deuxieme temps : tous les relevés partent ensemble. Un
             # compte n'est interroge QU'UNE FOIS, meme si dix serveurs le
@@ -13827,88 +13847,94 @@ async def dashboard_social_loop():
             # Troisieme temps : on annonce. Plus aucun appel vers
             # l'exterieur, seulement des envois Discord.
             for guild in list(bot.guilds):
-                # Regarder cinq plateformes chaque minute coute du temps
-                # machine : c'est du premium. Les reglages restent
-                # enregistres et repartent seuls au retour de l'abonnement.
-                if not est_premium(guild.id):
-                    continue
-                cfg = get_cfg(guild.id)
-                relays = cfg.get("social_relays")
-                if not isinstance(relays, list) or not relays:
-                    continue
-                states = cfg.get("social_relays_state")
-                if not isinstance(states, dict):
-                    states = {}
-                changed = False
-                vus_ce_tour = set()
-
-                for relay in relays:
-                    if not isinstance(relay, dict) or not relay.get("enabled"):
+                # Un serveur mal regle ne doit pas priver tous les autres : son
+                # erreur le fait sauter pour ce tour, et la boucle continue.
+                try:
+                    # Regarder cinq plateformes chaque minute coute du temps
+                    # machine : c'est du premium. Les reglages restent
+                    # enregistres et repartent seuls au retour de l'abonnement.
+                    if not est_premium(guild.id):
                         continue
-                    link = clean_short_text(relay.get("link"), "", 500)
-                    channel_id = parse_int(relay.get("channel_id"))
-                    if not link or not channel_id:
+                    cfg = get_cfg(guild.id)
+                    relays = cfg.get("social_relays")
+                    if not isinstance(relays, list) or not relays:
                         continue
-                    # Marquee des maintenant : la purge de fin de tour ne
-                    # doit pas effacer l'etat d'un relais dont le salon est
-                    # seulement momentanement indisponible.
-                    key = cle_relais(relay)
-                    vus_ce_tour.add(key)
-                    channel = salon_du_serveur(guild, channel_id)
-                    if channel is None:
-                        continue
-                    if not channel.permissions_for(guild.me).send_messages:
-                        continue
+                    states = cfg.get("social_relays_state")
+                    if not isinstance(states, dict):
+                        states = {}
+                    changed = False
+                    vus_ce_tour = set()
 
-                    publication = releves.get(link.strip().lower().rstrip("/"))
-                    if not publication:
-                        continue
+                    for relay in relays:
+                        if not isinstance(relay, dict) or not relay.get("enabled"):
+                            continue
+                        link = clean_short_text(relay.get("link"), "", 500)
+                        channel_id = parse_int(relay.get("channel_id"))
+                        if not link or not channel_id:
+                            continue
+                        # Marquee des maintenant : la purge de fin de tour ne
+                        # doit pas effacer l'etat d'un relais dont le salon est
+                        # seulement momentanement indisponible.
+                        key = cle_relais(relay)
+                        vus_ce_tour.add(key)
+                        channel = salon_du_serveur(guild, channel_id)
+                        if channel is None:
+                            continue
+                        if not channel.permissions_for(guild.me).send_messages:
+                            continue
 
-                    maintenant = now().timestamp()
-                    annoncer, raison = rs.doit_annoncer(states.get(key), publication)
-                    if not annoncer:
-                        # On memorise quand meme : sans cela, le premier
-                        # relevé recommencerait a chaque tour et rien ne
-                        # serait jamais annonce.
-                        nouvel_etat = rs.memoriser(
-                            states.get(key), publication, maintenant, False)
-                        if nouvel_etat != states.get(key):
-                            states[key] = nouvel_etat
-                            changed = True
-                        continue
+                        publication = releves.get(link.strip().lower().rstrip("/"))
+                        if not publication:
+                            continue
 
-                    valeurs = valeurs_annonce(guild, relay, publication)
-                    embed = embed_annonce(guild, relay, publication)
-                    view = bouton_annonce(publication, link)
+                        maintenant = now().timestamp()
+                        annoncer, raison = rs.doit_annoncer(states.get(key), publication)
+                        if not annoncer:
+                            # On memorise quand meme : sans cela, le premier
+                            # relevé recommencerait a chaque tour et rien ne
+                            # serait jamais annonce.
+                            nouvel_etat = rs.memoriser(
+                                states.get(key), publication, maintenant, False)
+                            if nouvel_etat != states.get(key):
+                                states[key] = nouvel_etat
+                                changed = True
+                            continue
 
-                    contenu, autorisees = mentions_relais(guild, relay)
-                    # Mentions et message d'annonce voyagent ensemble dans
-                    # le CONTENU : une mention placee dans l'embed s'affiche
-                    # en bleu mais ne previent personne.
-                    modele = relay.get("message") or rs.message_par_defaut(
-                        link, bool(publication.get("live")))
-                    annonce = rs.rendre_message(modele, valeurs)
-                    corps = "\n".join(x for x in (contenu, annonce) if x)
+                        valeurs = valeurs_annonce(guild, relay, publication)
+                        embed = embed_annonce(guild, relay, publication)
+                        view = bouton_annonce(publication, link)
 
-                    try:
-                        await channel.send(content=corps or None, embed=embed,
-                                           view=view, allowed_mentions=autorisees)
-                    except Exception as ex:
-                        print(f"relais {guild.id} {link}: envoi impossible : {ex}")
-                        continue
-                    states[key] = rs.memoriser(
-                        states.get(key), publication, maintenant, True)
-                    changed = True
+                        contenu, autorisees = mentions_relais(guild, relay)
+                        # Mentions et message d'annonce voyagent ensemble dans
+                        # le CONTENU : une mention placee dans l'embed s'affiche
+                        # en bleu mais ne previent personne.
+                        modele = relay.get("message") or rs.message_par_defaut(
+                            link, bool(publication.get("live")))
+                        annonce = rs.rendre_message(modele, valeurs)
+                        corps = "\n".join(x for x in (contenu, annonce) if x)
 
-                # Les relais supprimes laissaient leur etat derriere eux, et
-                # la configuration grossissait a chaque changement de compte.
-                for orpheline in [k for k in states if k not in vus_ce_tour]:
-                    states.pop(orpheline, None)
-                    changed = True
+                        try:
+                            await channel.send(content=corps or None, embed=embed,
+                                               view=view, allowed_mentions=autorisees)
+                        except Exception as ex:
+                            print(f"relais {guild.id} {link}: envoi impossible : {ex}")
+                            continue
+                        states[key] = rs.memoriser(
+                            states.get(key), publication, maintenant, True)
+                        changed = True
 
-                if changed:
-                    cfg["social_relays_state"] = states
-                    set_cfg(guild.id, cfg)
+                    # Les relais supprimes laissaient leur etat derriere eux, et
+                    # la configuration grossissait a chaque changement de compte.
+                    for orpheline in [k for k in states if k not in vus_ce_tour]:
+                        states.pop(orpheline, None)
+                        changed = True
+
+                    if changed:
+                        cfg["social_relays_state"] = states
+                        set_cfg(guild.id, cfg)
+                except Exception as erreur:
+                    print(f"dashboard_social_loop : serveur {getattr(guild, 'id', '?')} "
+                          f"saute ({type(erreur).__name__}: {erreur})")
             # Dormir soixante secondes EN PLUS du travail donnait une
             # periode de « travail + 60 s ». On dort ce qui reste de la
             # minute, et jamais moins de cinq secondes : un tour qui
@@ -20405,6 +20431,40 @@ async def voter_suggestion(interaction, vue, sens):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  LES BOUCLES DE FOND, SURVEILLEES
+# ══════════════════════════════════════════════════════════════════════
+#
+# Une tache asyncio qui leve une exception s'arrete — pour toujours, et
+# sans un mot : rien ne la relance, et personne ne regarde son resultat.
+# Quatre boucles n'etaient pas entierement protegees : les messages
+# programmes, les compteurs, les relais de reseaux sociaux et le statut.
+# Une seule erreur y arretait la fonction pour TOUS les serveurs, jusqu'au
+# prochain redemarrage.
+#
+# Le superviseur relance une boucle tombee, et /api/health le montre.
+
+BOUCLES = {}
+
+
+async def boucle_surveillee(nom, fonction, pause=30):
+    """Fait tourner une boucle de fond, et la relance si elle tombe."""
+    etat = BOUCLES.setdefault(nom, {"chutes": 0, "derniere_erreur": "", "le": ""})
+    while not bot.is_closed():
+        try:
+            await fonction()
+            return  # sortie normale : le bot se ferme
+        except asyncio.CancelledError:
+            raise
+        except Exception as erreur:
+            etat["chutes"] += 1
+            etat["derniere_erreur"] = f"{type(erreur).__name__}: {erreur}"[:300]
+            etat["le"] = now().isoformat()
+            print(f"boucle {nom} tombee ({etat['derniere_erreur']}), "
+                  f"relance dans {pause} s")
+            await asyncio.sleep(pause)
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  LE DEMARRAGE
 # ══════════════════════════════════════════════════════════════════════
 #
@@ -20530,35 +20590,35 @@ async def on_ready():
     #       cette etape ne rendait jamais la main.
     _etape_demarrage("etape_boucles")
     if not _dashboard_recurring_task or _dashboard_recurring_task.done():
-        _dashboard_recurring_task = asyncio.create_task(dashboard_recurring_loop())
+        _dashboard_recurring_task = asyncio.create_task(boucle_surveillee("dashboard_recurring_loop", dashboard_recurring_loop))
     if not _compteurs_task or _compteurs_task.done():
-        _compteurs_task = asyncio.create_task(compteurs_loop())
+        _compteurs_task = asyncio.create_task(boucle_surveillee("compteurs_loop", compteurs_loop))
     if not _dashboard_social_task or _dashboard_social_task.done():
-        _dashboard_social_task = asyncio.create_task(dashboard_social_loop())
+        _dashboard_social_task = asyncio.create_task(boucle_surveillee("dashboard_social_loop", dashboard_social_loop))
     if not _security_task or _security_task.done():
-        _security_task = asyncio.create_task(security_maintenance_loop())
+        _security_task = asyncio.create_task(boucle_surveillee("security_maintenance_loop", security_maintenance_loop))
     if not _licences_task or _licences_task.done():
-        _licences_task = asyncio.create_task(licences_maintenance_loop())
+        _licences_task = asyncio.create_task(boucle_surveillee("licences_maintenance_loop", licences_maintenance_loop))
     if not _autobackup_task or _autobackup_task.done():
-        _autobackup_task = asyncio.create_task(auto_backup_loop())
+        _autobackup_task = asyncio.create_task(boucle_surveillee("auto_backup_loop", auto_backup_loop))
     if not _giveaway_task or _giveaway_task.done():
-        _giveaway_task = asyncio.create_task(giveaway_loop())
+        _giveaway_task = asyncio.create_task(boucle_surveillee("giveaway_loop", giveaway_loop))
     if not _sauvegarde_task or _sauvegarde_task.done():
-        _sauvegarde_task = asyncio.create_task(sauvegarde_discord_loop())
+        _sauvegarde_task = asyncio.create_task(boucle_surveillee("sauvegarde_discord_loop", sauvegarde_discord_loop))
     if not _battement_task or _battement_task.done():
-        _battement_task = asyncio.create_task(battement_loop())
+        _battement_task = asyncio.create_task(boucle_surveillee("battement_loop", battement_loop))
     if not _rappels_task or _rappels_task.done():
-        _rappels_task = asyncio.create_task(rappels_boutique_loop())
+        _rappels_task = asyncio.create_task(boucle_surveillee("rappels_boutique_loop", rappels_boutique_loop))
     if not _anniversaires_task or _anniversaires_task.done():
-        _anniversaires_task = asyncio.create_task(anniversaires_loop())
+        _anniversaires_task = asyncio.create_task(boucle_surveillee("anniversaires_loop", anniversaires_loop))
     if not _rappels_membres_task or _rappels_membres_task.done():
-        _rappels_membres_task = asyncio.create_task(rappels_loop())
+        _rappels_membres_task = asyncio.create_task(boucle_surveillee("rappels_loop", rappels_loop))
     if not _tempbans_task or _tempbans_task.done():
-        _tempbans_task = asyncio.create_task(tempbans_loop())
+        _tempbans_task = asyncio.create_task(boucle_surveillee("tempbans_loop", tempbans_loop))
     if not _rapports_task or _rapports_task.done():
-        _rapports_task = asyncio.create_task(rapports_loop())
+        _rapports_task = asyncio.create_task(boucle_surveillee("rapports_loop", rapports_loop))
     if not _presence_task or _presence_task.done():
-        _presence_task = asyncio.create_task(presence_loop())
+        _presence_task = asyncio.create_task(boucle_surveillee("presence_loop", presence_loop))
 
     # ── 4. Les commandes. Discord ne connait qu'une liste pour tous les
     #       serveurs : la resynchroniser serveur par serveur, comme on le

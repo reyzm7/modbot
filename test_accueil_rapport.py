@@ -328,8 +328,8 @@ asyncio.run(scenario_rapport())
 verifier("le rapport ne montre pas les compteurs a zero",
          "if valeur:" in source[source.index("def embed_rapport"):][:1200])
 verifier("les deux boucles sont lancees au demarrage",
-         "asyncio.create_task(tempbans_loop())" in source
-         and "asyncio.create_task(rapports_loop())" in source)
+         'boucle_surveillee("tempbans_loop", tempbans_loop)' in source
+         and 'boucle_surveillee("rapports_loop", rapports_loop)' in source)
 
 
 # ══════════════════════════════════════════════════════════════════════
