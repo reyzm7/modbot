@@ -175,6 +175,13 @@ langue = io.open("langue_bot.py", encoding="utf-8").read()
 verifier("les phrases de croissance.py sont traduites",
          '"croissance.py"' in langue[langue.index("FICHIERS_SOURCE"):][:300])
 
+print("\n--- Le serveur de test de top.gg ---")
+verifier("le serveur de test de top.gg est nomme",
+         'SERVEURS_EXAMEN = {"333949691962195969"}' in source)
+verifier("le premium y est ouvert, sans faire circuler de clef",
+         "str(gid) in SERVEURS_EXAMEN" in corps("def est_premium("))
+verifier("aucun autre serveur n'y gagne rien", source.count("SERVEURS_EXAMEN") == 2)
+
 print("\n" + "=" * 62)
 rates = [nom for nom, ok, _ in resultats if not ok]
 print(f"RESULTAT : {len(resultats) - len(rates)}/{len(resultats)} verifications passees")

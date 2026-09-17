@@ -9265,8 +9265,16 @@ def premium_etat(gid):
     return pc.etat_premium(premium_fiche(gid))
 
 
+# Le serveur de test de top.gg (« Verification Center »). Leurs regles
+# demandent de pouvoir essayer les fonctions premium ; elles proposent soit
+# d'envoyer une clef a leurs verificateurs, soit d'ouvrir le premium a ce
+# serveur. La seconde solution ne fait circuler aucune clef, et ne donne
+# rien a personne d'autre : le premium n'y vaut que la, et seulement la.
+SERVEURS_EXAMEN = {"333949691962195969"}
+
+
 def est_premium(gid):
-    return premium_etat(gid)["active"]
+    return str(gid) in SERVEURS_EXAMEN or premium_etat(gid)["active"]
 
 
 def premium_ecrire(gid, fiche):
