@@ -16,6 +16,7 @@ import premium_core as pc
 import security_score as sc_score
 import reseaux_sociaux as rs
 import invitation
+import croissance as cr
 import compteurs as cpt
 import langue_bot as lb
 import boutique as bq
@@ -338,6 +339,9 @@ F_SEMAINE = chemin_donnees("semaine.json")
 # les perdre, c'est laisser quelqu'un banni pour toujours alors qu'on lui
 # avait dit « une semaine ».
 F_TEMPBANS = chemin_donnees("tempbans.json")
+# Les essais, les codes de parrainage, les votes : un essai offert deux
+# fois apres un redeploiement serait un essai sans fin.
+F_CROISSANCE = chemin_donnees("croissance.json")
 F_DATABASE = os.environ.get("MODBOT_DATABASE", chemin_donnees("modbot_dashboard.db"))
 
 
@@ -468,6 +472,9 @@ FICHIERS_SAUVEGARDES = (
     # et le prix qu'on lui a propose.
     "devis.json",
     "sav.json",
+    # Qui a deja eu son essai, qui a parraine qui : perdus, chacun pourrait
+    # tout recommencer au premier redeploiement.
+    "croissance.json",
     # Le compteur de visites : le perdre le ferait repartir a son
     # chiffre de depart, ce qui serait faux.
     "visites.json",
@@ -7135,6 +7142,8 @@ async def api_health(request):
         # Peut-on encore inviter le bot ? « problemes » vide = rien a regler.
         # Des booleens, des scopes et un nombre de serveurs : aucun secret.
         "invitation": dict(ETAT_APPLICATION),
+        # Le webhook top.gg : configure ou non, et ce qu'il a recu. Jamais le secret.
+        "topgg": {"configure": bool(TOPGG_WEBHOOK_SECRET), **VOTES_TOPGG},
         "client_id": DISCORD_CLIENT_ID,
         # Sans volume, le disque est efface a chaque redeploiement : les
         # sessions du dashboard partent avec, et tout le monde doit se
@@ -9786,7 +9795,8 @@ async def api_premium_etat(request):
     """Etat premium d'un serveur, pour son dashboard."""
     identity = await api_identity(request)
     guild = await api_guild_from_request(request, identity)
-    return api_json({"ok": True, "premium": premium_etat(guild.id)}, request=request)
+    return api_json({"ok": True, "premium": premium_etat(guild.id),
+                     "croissance": etat_croissance(guild)}, request=request)
 
 
 async def api_premium_checkout(request):
@@ -12901,6 +12911,9 @@ async def start_dashboard_api():
     app.router.add_post("/api/me/licences/activer", api_activer_licence)
     app.router.add_post("/api/stripe/webhook", api_stripe_webhook)
     app.router.add_get("/api/guilds/{guild_id}/premium", api_premium_etat)
+    app.router.add_post("/api/guilds/{guild_id}/premium/essai", api_premium_essai)
+    app.router.add_post("/api/guilds/{guild_id}/premium/parrainage", api_premium_parrainage)
+    app.router.add_post("/api/topgg/vote", api_topgg_vote)
     # L'achat n'appartient plus a un serveur : la bonne adresse est
     # celle-ci. L'ancienne reste ouverte le temps que les pages en cache
     # chez les visiteurs finissent de tourner — elle mene au meme
@@ -20054,6 +20067,432 @@ def premier_salon_ecrivable(guild):
     return None
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  FAIRE GRANDIR MODBOT : l'essai, le parrainage, les votes top.gg
+# ══════════════════════════════════════════════════════════════════════
+#
+# Les regles vivent dans croissance.py, sans Discord : un essai par
+# serveur ET par proprietaire, un parrainage venu d'un vrai serveur, un
+# vote qui ne remplace jamais un achat. Ici, on constate et on applique.
+
+TOPGG_WEBHOOK_SECRET = os.environ.get("TOPGG_WEBHOOK_SECRET", "").strip()
+TOPGG_PAGE = f"https://top.gg/bot/{DISCORD_CLIENT_ID}"
+ROLE_VOTANT_NOM = "⭐ Votant ModBot"
+PAGE_PREMIUM = (DASHBOARD_SITE_URL or "").rsplit("/", 1)[0] + "/premium.html"
+# Ce que les votes top.gg ont donne. Rien de secret : des dates, des nombres.
+VOTES_TOPGG = {"dernier": "", "acceptes": 0, "tests": 0, "rejets": 0}
+
+
+def croissance_lire():
+    return cr.normaliser(jload(F_CROISSANCE))
+
+
+def croissance_ecrire(donnees):
+    jsave(F_CROISSANCE, cr.normaliser(donnees))
+
+
+def humains_du_serveur(guild):
+    """Les membres qui ne sont pas des bots, autant qu'on les voie."""
+    membres = getattr(guild, "members", None) or []
+    if membres:
+        return sum(1 for membre in membres if not membre.bot)
+    return int(guild.member_count or 0)
+
+
+def premium_offrir_jours(gid, jours, source, auteur=""):
+    """
+    Ajoute des jours au premium d'un serveur.
+
+    Un serveur deja abonne garde sa source : les jours s'ajoutent a son
+    echeance, mais il reste « stripe ». Sinon, un parrainage recu en
+    cours d'abonnement se ferait passer pour la raison de son premium.
+    """
+    etat = premium_etat(gid)
+    retenue = etat["source"] if etat["active"] and etat["source"] else source
+    return premium_prolonger(gid, jours, retenue, auteur=str(auteur or ""))
+
+
+def demarrer_essai(guild, auteur_id):
+    """(ok, message) : sept jours de premium, une fois par serveur et par proprietaire."""
+    donnees = croissance_lire()
+    refus = cr.refus_essai(donnees, guild.id, guild.owner_id, est_premium(guild.id))
+    if refus:
+        return False, cr.REFUS_ESSAI[refus]
+    premium_prolonger(guild.id, cr.ESSAI_JOURS, "essai", plan="essai", auteur=str(auteur_id))
+    croissance_ecrire(cr.commencer_essai(croissance_lire(), guild.id, guild.owner_id, auteur_id))
+    dashboard_log("premium_essai", guild=guild, detail=f"essai de {cr.ESSAI_JOURS} jours")
+    return True, (f"ModBot Premium est actif sur **{guild.name}** pendant {cr.ESSAI_JOURS} jours. "
+                  "Tout est ouvert : score de sécurité, journal complet, assistant IA, "
+                  "relais réseaux, rôles automatiques.")
+
+
+def valider_parrainage(guild, code, auteur_id):
+    """(ok, message, gid du parrain)."""
+    donnees = croissance_lire()
+    parrain_gid = cr.parrain_du_code(donnees, code)
+    parrain = bot.get_guild(int(parrain_gid)) if parrain_gid and parrain_gid.isdigit() else None
+    refus = cr.refus_parrainage(
+        donnees, code, guild.id, guild.owner_id,
+        parrain.owner_id if parrain else None, parrain is not None,
+        humains_du_serveur(guild), getattr(guild.me, "joined_at", None))
+    if refus:
+        return False, cr.REFUS_PARRAINAGE[refus], None
+    donnees, parrain_gid = cr.noter_parrainage(donnees, code, guild.id, auteur_id)
+    croissance_ecrire(donnees)
+    premium_offrir_jours(parrain_gid, cr.PARRAINAGE_JOURS, "parrainage", auteur_id)
+    dashboard_log("premium_parrainage", guild=guild, detail=f"parrain {parrain_gid}")
+    return True, (f"Merci ! **{parrain.name}** reçoit {cr.PARRAINAGE_JOURS} jours de ModBot "
+                  "Premium pour t'avoir fait découvrir ModBot."), parrain_gid
+
+
+async def prevenir_proprietaire(guild, embed):
+    """En prive au proprietaire ; a defaut, dans le premier salon ou ecrire."""
+    proprietaire = getattr(guild, "owner", None)
+    if proprietaire is not None:
+        try:
+            await proprietaire.send(embed=embed)
+            return True
+        except Exception:
+            pass
+    salon = premier_salon_ecrivable(guild)
+    if salon is not None:
+        try:
+            await salon.send(embed=embed)
+            return True
+        except Exception:
+            pass
+    return False
+
+
+async def prevenir_parrain(parrain_gid, filleul):
+    parrain = bot.get_guild(int(parrain_gid)) if str(parrain_gid).isdigit() else None
+    if parrain is None:
+        return
+    embed = E("🎁 Un parrainage de plus !",
+              f"**{filleul.name}** a installé ModBot grâce à **{parrain.name}**.\n"
+              f"Ton serveur reçoit **{cr.PARRAINAGE_JOURS} jours de ModBot Premium**.",
+              Palette.SUCCESS)
+    embed.add_field(name="Continuer", value="`/premium parrainage` redonne ton code.", inline=False)
+    await prevenir_proprietaire(parrain, embed)
+
+
+def embed_fin_d_essai(guild, quoi):
+    if quoi == "veille":
+        embed = E("⏳ Ton essai Premium se termine demain",
+                  f"Sur **{guild.name}**, ModBot Premium s'arrête dans 24 heures. Pour garder "
+                  f"le score de sécurité, le journal complet et l'assistant IA : {PAGE_PREMIUM}",
+                  Palette.WARNING)
+    else:
+        embed = E("🔒 Ton essai Premium est terminé",
+                  f"Sur **{guild.name}**, les fonctionnalités Premium sont refermées. Tes "
+                  f"réglages sont conservés : ils reviennent dès que Premium est réactivé. "
+                  f"{PAGE_PREMIUM}", Palette.INFO)
+    embed.add_field(
+        name="🤝 Des jours gratuits",
+        value=(f"Chaque serveur que tu fais passer à ModBot t'offre {cr.PARRAINAGE_JOURS} jours : "
+               "`/premium parrainage`."), inline=False)
+    return embed
+
+
+async def prevenir_fins_d_essai():
+    donnees = croissance_lire()
+    a_faire = cr.essais_a_prevenir(donnees)
+    faits = []
+    for gid, quoi in a_faire:
+        guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
+        if guild is not None:
+            etat = premium_etat(gid)
+            fin = pc.lire_date(etat["until"]) if etat["active"] else None
+            # Abonne, ou prolonge par un parrainage entre-temps : il n'y a
+            # rien a annoncer, le premium continue.
+            continue_apres = (quoi == "fin" and etat["active"]) or (
+                quoi == "veille" and fin is not None and fin - now() > timedelta(days=2))
+            if not continue_apres:
+                await prevenir_proprietaire(guild, embed_fin_d_essai(guild, quoi))
+        faits.append((gid, quoi))
+    if faits:
+        # Relu apres les envois : un vote ou un essai a pu s'ecrire entre-temps.
+        donnees = croissance_lire()
+        for gid, quoi in faits:
+            donnees = cr.marquer_prevenu(donnees, gid, quoi)
+        croissance_ecrire(donnees)
+
+
+async def poser_role_de_vote(uid, poser):
+    """Pose ou retire le role de votant sur le serveur ModBot. Discret en cas d'echec."""
+    guild = bot.get_guild(SERVEUR_SUPPORT)
+    if guild is None or not guild.me.guild_permissions.manage_roles:
+        return False
+    membre = guild.get_member(int(uid)) if str(uid).isdigit() else None
+    if membre is None:
+        return False
+    role = discord.utils.get(guild.roles, name=ROLE_VOTANT_NOM)
+    if role is None:
+        if not poser:
+            return False
+        try:
+            role = await guild.create_role(name=ROLE_VOTANT_NOM, colour=discord.Colour(0x5865F2),
+                                           reason="Votes top.gg")
+        except Exception:
+            return False
+    if role >= guild.me.top_role:
+        return False
+    try:
+        if poser and role not in membre.roles:
+            await membre.add_roles(role, reason="Vote top.gg")
+        elif not poser and role in membre.roles:
+            await membre.remove_roles(role, reason="Role de vote arrive a terme")
+    except Exception as erreur:
+        print(f"role de vote ({uid}) : {erreur}")
+        return False
+    return True
+
+
+async def retirer_roles_de_vote():
+    a_retirer = cr.roles_de_vote_a_retirer(croissance_lire())
+    for uid in a_retirer:
+        await poser_role_de_vote(uid, False)
+    if a_retirer:
+        donnees = croissance_lire()
+        # Seulement ceux qui n'ont pas revote pendant qu'on retirait.
+        for uid in set(a_retirer) & set(cr.roles_de_vote_a_retirer(donnees)):
+            donnees = cr.role_de_vote_retire(donnees, uid)
+        croissance_ecrire(donnees)
+
+
+async def remercier_votant(uid, total):
+    role_pose = await poser_role_de_vote(uid, True)
+    try:
+        user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+    except Exception:
+        return
+    embed = E("⭐ Merci pour ton vote !",
+              f"C'est ton vote n°{total} pour ModBot. Chaque vote aide d'autres serveurs "
+              "à le découvrir.", Palette.SUCCESS)
+    if role_pose:
+        embed.add_field(name="Ta récompense",
+                        value=(f"Le rôle **{ROLE_VOTANT_NOM}** sur le serveur ModBot, pendant "
+                               f"{cr.VOTE_ROLE_HEURES} heures."), inline=False)
+    embed.add_field(name="Prochain vote",
+                    value=f"Dans {cr.VOTE_ROLE_HEURES} heures : {TOPGG_PAGE}/vote", inline=False)
+    try:
+        await user.send(embed=embed)
+    except Exception:
+        pass
+
+
+async def api_topgg_vote(request):
+    """
+    Le webhook de top.gg, a chaque vote.
+
+    Le secret se choisit sur la page du bot chez top.gg et se pose dans
+    TOPGG_WEBHOOK_SECRET : top.gg le renvoie dans l'en-tete Authorization.
+    """
+    if not TOPGG_WEBHOOK_SECRET:
+        raise web.HTTPServiceUnavailable(text="Les votes top.gg ne sont pas configures.")
+    if not cr.vote_authentique(request.headers.get("Authorization", ""), TOPGG_WEBHOOK_SECRET):
+        VOTES_TOPGG["rejets"] += 1
+        raise web.HTTPUnauthorized(text="Secret top.gg invalide.")
+    try:
+        corps = await request.json()
+    except Exception:
+        raise web.HTTPBadRequest(text="Corps illisible.")
+    corps = corps if isinstance(corps, dict) else {}
+    uid = str(corps.get("user") or "")
+    if not uid.isdigit():
+        raise web.HTTPBadRequest(text="Votant inconnu.")
+    VOTES_TOPGG["dernier"] = now().isoformat()
+    # Le bouton « Test » de top.gg : il prouve que le webhook marche, mais
+    # ce n'est pas un vote.
+    if str(corps.get("type") or "") == "test":
+        VOTES_TOPGG["tests"] += 1
+        return web.json_response({"ok": True, "test": True})
+    donnees, total = cr.noter_vote(croissance_lire(), uid)
+    croissance_ecrire(donnees)
+    VOTES_TOPGG["acceptes"] += 1
+    asyncio.create_task(remercier_votant(uid, total))
+    return web.json_response({"ok": True})
+
+
+def etat_croissance(guild):
+    """Ce que le dashboard montre de l'essai et du parrainage d'un serveur."""
+    donnees = croissance_lire()
+    refus = cr.refus_essai(donnees, guild.id, guild.owner_id, est_premium(guild.id))
+    donnees, code = cr.code_du_serveur(donnees, guild.id)
+    if code not in croissance_lire()["codes"]:
+        croissance_ecrire(donnees)
+    parraine = donnees["parrainages"].get(str(guild.id)) or {}
+    return {
+        "essai": {"possible": refus is None, "raison": cr.REFUS_ESSAI.get(refus, ""),
+                  "jours": cr.ESSAI_JOURS},
+        "parrainage": {"code": code, "filleuls": len(cr.filleuls_de(donnees, guild.id)),
+                       "jours": cr.PARRAINAGE_JOURS, "parraine": bool(parraine),
+                       "fenetre_jours": cr.PARRAINAGE_FENETRE_JOURS,
+                       "min_membres": cr.PARRAINAGE_MIN_HUMAINS},
+    }
+
+
+async def api_premium_essai(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    ok, message = demarrer_essai(guild, identity.get("user_id"))
+    if not ok:
+        raise web.HTTPConflict(text=message)
+    return api_json({"ok": True, "message": message, "premium": premium_etat(guild.id),
+                     "croissance": etat_croissance(guild)}, request=request)
+
+
+async def api_premium_parrainage(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    code = str((payload or {}).get("code") or "") if isinstance(payload, dict) else ""
+    ok, message, parrain_gid = valider_parrainage(guild, code, identity.get("user_id"))
+    if not ok:
+        raise web.HTTPConflict(text=message)
+    asyncio.create_task(prevenir_parrain(parrain_gid, guild))
+    return api_json({"ok": True, "message": message, "croissance": etat_croissance(guild)},
+                    request=request)
+
+
+async def croissance_loop():
+    """Toutes les dix minutes : la fin des essais, et les roles de vote arrives a terme."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await prevenir_fins_d_essai()
+            await retirer_roles_de_vote()
+        except Exception as erreur:
+            print(f"boucle croissance: {erreur}")
+        await asyncio.sleep(600)
+
+
+_croissance_task = None
+
+premium_group = app_commands.Group(
+    name="premium",
+    description="ModBot Premium : essai gratuit, parrainage, etat",
+    guild_only=True,
+)
+
+
+def _gere_le_serveur(i):
+    permissions = getattr(i.user, "guild_permissions", None)
+    return bool(permissions and permissions.manage_guild)
+
+
+@premium_group.command(name="statut", description="Voir le Premium de ce serveur, l'essai et le parrainage")
+async def premium_statut(i: discord.Interaction):
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id)
+    etat = premium_etat(gid)
+    donnees = croissance_lire()
+    if etat["active"]:
+        fin = int(pc.lire_date(etat["until"]).timestamp())
+        embed = embed_success("ModBot Premium est actif",
+                              f"Jusqu'au <t:{fin}:D>, soit {etat['days_left']} jour(s).", gid)
+    else:
+        embed = embed_info("ModBot Premium n'est pas actif",
+                           f"Ce qu'il ouvre : {PAGE_PREMIUM}", gid)
+    refus = cr.refus_essai(donnees, gid, i.guild.owner_id, etat["active"])
+    embed.add_field(
+        name="🎁 Essai gratuit",
+        value=(f"Disponible : `/premium essai` ouvre tout pendant {cr.ESSAI_JOURS} jours."
+               if refus is None else cr.REFUS_ESSAI[refus]), inline=False)
+    embed.add_field(
+        name="🤝 Parrainage",
+        value=(f"Chaque serveur parrainé offre {cr.PARRAINAGE_JOURS} jours à celui-ci : "
+               f"`/premium parrainage`. Serveurs parrainés : {len(cr.filleuls_de(donnees, gid))}."),
+        inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
+@premium_group.command(name="essai", description="Activer 7 jours de ModBot Premium gratuits")
+async def premium_essai(i: discord.Interaction):
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id)
+    if not _gere_le_serveur(i):
+        return await i.followup.send(embed=embed_error(
+            "Permission requise",
+            "Il faut la permission « Gérer le serveur » pour activer l'essai.", gid), ephemeral=True)
+    ok, message = demarrer_essai(i.guild, i.user.id)
+    if not ok:
+        return await i.followup.send(embed=embed_warning("Essai impossible", message, gid),
+                                     ephemeral=True)
+    embed = embed_success("Essai Premium activé", message, gid)
+    embed.add_field(name="Et après ?",
+                    value=f"On te prévient la veille de la fin. Pour garder Premium : {PAGE_PREMIUM}",
+                    inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
+@premium_group.command(name="parrainage", description="Obtenir le code de parrainage de ce serveur")
+async def premium_parrainage(i: discord.Interaction):
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id)
+    if not _gere_le_serveur(i):
+        return await i.followup.send(embed=embed_error(
+            "Permission requise",
+            "Il faut la permission « Gérer le serveur » pour voir le code de parrainage.", gid),
+            ephemeral=True)
+    donnees, code = cr.code_du_serveur(croissance_lire(), gid)
+    croissance_ecrire(donnees)
+    embed = embed_info("🤝 Ton code de parrainage", f"**`{code}`**", gid)
+    embed.add_field(
+        name="Comment ça marche",
+        value=("**1.** Fais installer ModBot sur un autre serveur\n"
+               f"**2.** Un administrateur de ce serveur tape `/premium code {code}`\n"
+               f"**3.** Ton serveur reçoit **{cr.PARRAINAGE_JOURS} jours de Premium**"),
+        inline=False)
+    embed.add_field(
+        name="Conditions",
+        value=(f"Le serveur parrainé a au moins {cr.PARRAINAGE_MIN_HUMAINS} membres, un autre "
+               f"propriétaire, et déclare le code dans les {cr.PARRAINAGE_FENETRE_JOURS} jours "
+               f"qui suivent l'installation. Jusqu'à {cr.PARRAINAGE_PLAFOND_AN} parrainages par an."),
+        inline=False)
+    embed.add_field(name="Serveurs parrainés", value=str(len(cr.filleuls_de(donnees, gid))),
+                    inline=True)
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
+@premium_group.command(name="code", description="Déclarer le code du serveur qui t'a fait découvrir ModBot")
+@app_commands.describe(code="Le code de parrainage reçu (6 caractères)")
+async def premium_code(i: discord.Interaction, code: str):
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id)
+    if not _gere_le_serveur(i):
+        return await i.followup.send(embed=embed_error(
+            "Permission requise",
+            "Il faut la permission « Gérer le serveur » pour déclarer un parrainage.", gid),
+            ephemeral=True)
+    ok, message, parrain_gid = valider_parrainage(i.guild, code, i.user.id)
+    if not ok:
+        return await i.followup.send(embed=embed_warning("Parrainage impossible", message, gid),
+                                     ephemeral=True)
+    await prevenir_parrain(parrain_gid, i.guild)
+    await i.followup.send(embed=embed_success("Parrainage validé", message, gid), ephemeral=True)
+
+
+bot.tree.add_command(premium_group)
+
+
+@bot.tree.command(name="voter", description="Voter pour ModBot sur top.gg")
+async def voter(i: discord.Interaction):
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id) if i.guild else None
+    fiche = croissance_lire()["votes"].get(str(i.user.id)) or {}
+    embed = embed_info(
+        "⭐ Voter pour ModBot",
+        f"Un vote fait remonter ModBot sur top.gg, et d'autres serveurs le découvrent. "
+        f"Tu peux voter toutes les {cr.VOTE_ROLE_HEURES} heures : {TOPGG_PAGE}/vote", gid)
+    embed.add_field(
+        name="Ta récompense",
+        value=(f"Le rôle **{ROLE_VOTANT_NOM}** sur le serveur ModBot pendant "
+               f"{cr.VOTE_ROLE_HEURES} heures, et un grand merci."), inline=False)
+    embed.add_field(name="Tes votes", value=str(int(fiche.get("total") or 0)), inline=True)
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
 def embed_bienvenue_serveur(guild):
     """Ce que lit un serveur qui vient d'installer ModBot."""
     embed = E("👋 Merci pour l'installation !",
@@ -20069,6 +20508,12 @@ def embed_bienvenue_serveur(guild):
     embed.add_field(
         name="🎛️ Tout se règle au tableau de bord",
         value="Connecte-toi avec Discord, choisis ce serveur, et coche ce que tu veux.",
+        inline=False)
+    embed.add_field(
+        name=f"🎁 Premium offert pendant {cr.ESSAI_JOURS} jours",
+        value=("`/premium essai` ouvre tout : score de sécurité, journal complet, assistant IA. "
+               f"Quelqu'un t'a conseillé ModBot ? `/premium code` avec son code lui offre "
+               f"{cr.PARRAINAGE_JOURS} jours."),
         inline=False)
     embed.add_field(name="📚 Pour découvrir", value="`/aide` liste toutes les commandes.",
                     inline=False)
@@ -20868,6 +21313,7 @@ async def on_ready():
     global _tempbans_task, _rapports_task
     global _licences_task
     global _presence_task
+    global _croissance_task
     global _sauvegarde_a_faire
     BOT_STATUS.update({"state": "connecte", "detail": ""})
     DEMARRAGE.update(debut=now().isoformat(), etape="", fini="")
@@ -20938,6 +21384,8 @@ async def on_ready():
         _rapports_task = asyncio.create_task(boucle_surveillee("rapports_loop", rapports_loop))
     if not _presence_task or _presence_task.done():
         _presence_task = asyncio.create_task(boucle_surveillee("presence_loop", presence_loop))
+    if not _croissance_task or _croissance_task.done():
+        _croissance_task = asyncio.create_task(boucle_surveillee("croissance_loop", croissance_loop))
 
     # ── 4. Les commandes. Discord ne connait qu'une liste pour tous les
     #       serveurs : la resynchroniser serveur par serveur, comme on le

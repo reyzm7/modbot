@@ -36,10 +36,24 @@ jobs:
       # `test_api.py` croise le wiki du site avec les commandes reelles.
       # Sans le site a cote, ce croisement est saute en silence, et c'est
       # exactement ainsi qu'un wiki perime a deja survecu sept commits.
+      #
+      # Le site sur la branche du MEME NOM quand elle existe : une commande
+      # nouvelle et sa page de wiki se testent ensemble, sur leurs branches,
+      # avant que l'une ou l'autre n'atteigne main. Sinon, le site en ligne.
+      - name: La branche du site
+        id: branche_site
+        run: |
+          if git ls-remote --exit-code --heads https://github.com/reyzm7/modbot-site.git "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            echo "ref=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Le site, a cote
         uses: actions/checkout@v4
         with:
           repository: reyzm7/modbot-site
+          ref: ${{ steps.branche_site.outputs.ref }}
           path: modbot-site
 
       - uses: actions/setup-python@v5

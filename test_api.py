@@ -735,7 +735,14 @@ def verifier_commandes():
     absentes = sorted(c for c in reelles if not couverte(c))
     fantomes = sorted(c for c in citees if c not in reelles)
     verifier("le wiki ne cite aucune commande inexistante", not fantomes, str(fantomes))
-    verifier("le wiki couvre toutes les commandes reelles", not absentes, str(absentes))
+    # Sur une branche, le wiki de la branche du meme nom doit tout couvrir.
+    # Sur main, le bot passe AVANT le site (ordre de deploiement) : pendant
+    # ces quelques minutes, le wiki en ligne ne connait pas encore la
+    # commande. On le signale sans bloquer — la branche l'a deja exige.
+    if absentes and os.environ.get("GITHUB_REF_NAME") == "main":
+        print(f"  ATTENTION le wiki en ligne ne couvre pas encore {absentes}")
+    else:
+        verifier("le wiki couvre toutes les commandes reelles", not absentes, str(absentes))
 
 
 async def verifier_carte_bienvenue():
