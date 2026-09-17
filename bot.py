@@ -17,6 +17,7 @@ import security_score as sc_score
 import reseaux_sociaux as rs
 import invitation
 import croissance as cr
+import vigilance as vg
 import compteurs as cpt
 import langue_bot as lb
 import boutique as bq
@@ -342,6 +343,9 @@ F_TEMPBANS = chemin_donnees("tempbans.json")
 # Les essais, les codes de parrainage, les votes : un essai offert deux
 # fois apres un redeploiement serait un essai sans fin.
 F_CROISSANCE = chemin_donnees("croissance.json")
+# Le reseau de confiance et les empreintes de bannis. Perdus, un serveur
+# ne serait plus prevenu d'un raider qu'un autre a deja signale.
+F_RESEAU = chemin_donnees("reseau.json")
 F_DATABASE = os.environ.get("MODBOT_DATABASE", chemin_donnees("modbot_dashboard.db"))
 
 
@@ -475,6 +479,7 @@ FICHIERS_SAUVEGARDES = (
     # Qui a deja eu son essai, qui a parraine qui : perdus, chacun pourrait
     # tout recommencer au premier redeploiement.
     "croissance.json",
+    "reseau.json",
     # Le compteur de visites : le perdre le ferait repartir a son
     # chiffre de depart, ce qui serait faux.
     "visites.json",
@@ -16292,6 +16297,13 @@ async def on_member_join(member):
     # Anti-raid : comptes suspects + detection de vagues d'arrivees
     await handle_raid_join(member)
 
+    # Le reseau de confiance et les doubles comptes : des alertes, jamais
+    # une sanction. Une erreur ici ne doit rien casser de l'arrivee.
+    try:
+        await verifier_vigilance(member)
+    except Exception as erreur:
+        print(f"vigilance (arrivee) : {erreur}")
+
 @bot.event
 async def on_member_remove(member):
     await send_dashboard_member_event(member, departure=True)
@@ -17612,6 +17624,10 @@ async def punish_nuker(guild, actor, action_label, detail):
     try:
         if punishment == "ban":
             await guild.ban(member, reason=reason, delete_message_days=0)
+            try:
+                signaler_au_reseau(guild.id, member.id, "piratage")
+            except Exception as erreur:
+                print(f"reseau (anti-nuke) : {erreur}")
             return {"label": "banni", "type": "ban", "roles": []}
         if punishment == "kick":
             await member.kick(reason=reason)
@@ -17980,6 +17996,10 @@ async def on_guild_role_update(before, after):
 
 @bot.event
 async def on_member_ban(guild, user):
+    try:
+        noter_banni_pour_doubles(guild, user)
+    except Exception as erreur:
+        print(f"doubles comptes (ban) : {erreur}")
     actor, entry = await fetch_audit_actor(guild, discord.AuditLogAction.ban, user.id)
     reason = getattr(entry, "reason", None) or "Aucune raison fournie"
     await log_event(
@@ -17994,6 +18014,10 @@ async def on_member_ban(guild, user):
 
 @bot.event
 async def on_member_unban(guild, user):
+    try:
+        oublier_un_debanni(guild, user)
+    except Exception as erreur:
+        print(f"vigilance (deban) : {erreur}")
     actor, entry = await fetch_audit_actor(guild, discord.AuditLogAction.unban, user.id)
     await log_event(
         guild, "moderation", "Membre debanni",
@@ -18876,6 +18900,179 @@ class SecurityPanelView(discord.ui.View):
         await release_safe_mode(interaction.guild, automatic=False)
         await interaction.followup.send(
             embed=embed_success("Mode securite leve", "Le serveur revient a la normale.", gid), ephemeral=True)
+
+# ══════════════════════════════════════════════════════════════════════
+#  VIGILANCE : le reseau de confiance, les doubles comptes
+# ══════════════════════════════════════════════════════════════════════
+#
+# Les regles vivent dans vigilance.py. Aucune des deux ne sanctionne : elles
+# previennent le salon des alertes de securite, et les moderateurs decident.
+
+def reseau_lire():
+    return vg.normaliser(jload(F_RESEAU))
+
+
+def reseau_ecrire(donnees):
+    jsave(F_RESEAU, vg.normaliser(donnees))
+
+
+def reseau_participe(gid):
+    """On ne partage et on ne recoit qu'apres l'avoir choisi."""
+    return get_cfg(gid).get("reseau_confiance") is True
+
+
+def doubles_comptes_actifs(gid):
+    """Actif par defaut : ces donnees ne quittent pas le serveur."""
+    return get_cfg(gid).get("doubles_comptes", True) is not False
+
+
+def participants_du_reseau():
+    config = jload(F_CONFIG)
+    if not isinstance(config, dict):
+        return set()
+    return {str(gid) for gid, reglages in config.items()
+            if isinstance(reglages, dict) and reglages.get("reseau_confiance") is True}
+
+
+def signaler_au_reseau(gid, uid, motif):
+    """Rend True si le signalement est parti : serveur participant, motif connu."""
+    if motif not in vg.MOTIFS or not reseau_participe(gid):
+        return False
+    reseau_ecrire(vg.signaler(reseau_lire(), uid, gid, motif))
+    return True
+
+
+def noms_de(user):
+    """Les noms sous lesquels on peut reconnaitre quelqu'un."""
+    return sorted({str(n) for n in (getattr(user, "name", ""), getattr(user, "global_name", ""),
+                                    getattr(user, "display_name", "")) if n})
+
+
+def cle_avatar(user):
+    avatar = getattr(user, "avatar", None)
+    return str(getattr(avatar, "key", "") or "") if avatar else ""
+
+
+def noter_banni_pour_doubles(guild, user):
+    if getattr(user, "bot", False) or not doubles_comptes_actifs(guild.id):
+        return
+    fiche = vg.empreinte(user.id, noms_de(user), cle_avatar(user), getattr(user, "created_at", None))
+    reseau_ecrire(vg.noter_banni(reseau_lire(), guild.id, fiche))
+
+
+def oublier_un_debanni(guild, user):
+    """Debannir, c'est changer d'avis : ni double compte guette, ni signalement."""
+    donnees = vg.oublier_banni(reseau_lire(), guild.id, user.id)
+    reseau_ecrire(vg.retirer(donnees, user.id, guild.id))
+
+
+async def verifier_vigilance(member):
+    """A l'arrivee : ce que le reseau dit de ce membre, et a quel banni il ressemble."""
+    guild = member.guild
+    gid = str(guild.id)
+    donnees = reseau_lire()
+
+    if reseau_participe(gid):
+        trouves = vg.signalements_ailleurs(donnees, member.id, gid, participants_du_reseau())
+        if trouves:
+            bilan = vg.resume(trouves)
+            motifs = ", ".join(f"{vg.MOTIFS[m]} ({n})" for m, n in sorted(bilan["motifs"].items()))
+            await log_event(
+                guild, "security", "Membre signalé par le réseau de confiance",
+                f"{member.mention} a été signalé par {bilan['serveurs']} autre(s) serveur(s) "
+                "ModBot. Rien n'a été fait automatiquement : à vous de juger.",
+                fields=[("🚩 Motifs", motifs),
+                        ("📅 Dernier signalement", f"<t:{int(bilan['dernier'].timestamp())}:R>"),
+                        ("👤 Membre", f"{member} (`{member.id}`)")],
+                severity="danger", target=member, thumbnail=member.display_avatar.url)
+
+    if doubles_comptes_actifs(gid):
+        arrivant = {"id": str(member.id), "noms": noms_de(member), "avatar": cle_avatar(member),
+                    "cree_le": member.created_at}
+        proches = vg.ressemblances(donnees, gid, arrivant)
+        if proches:
+            proche = proches[0]
+            await log_event(
+                guild, "security", "Double compte possible",
+                f"{member.mention} ressemble à un membre banni récemment. "
+                "Rien n'a été fait automatiquement : à vous de vérifier.",
+                fields=[("🔁 Ressemble à", f"<@{proche['id']}> (`{proche['id']}`)"),
+                        ("🔎 Indices", ", ".join(proche["raisons"])),
+                        ("⛔ Banni", f"<t:{int(proche['banni_le'].timestamp())}:R>"),
+                        ("📅 Compte créé", f"<t:{int(member.created_at.timestamp())}:R>")],
+                severity="warning", target=member, thumbnail=member.display_avatar.url)
+
+
+def avertissement_salon_securite(guild):
+    """Une alerte sans salon ou arriver ne previent personne : le dire tout de suite."""
+    if log_channel_for(guild, "security") is None:
+        return ("⚠️ Aucun salon de journal ne reçoit les alertes de sécurité : choisis-en un au "
+                "tableau de bord (rubrique Logs), sinon ces alertes n'arriveront nulle part.")
+    return ""
+
+
+@security_group.command(name="reseau", description="Participer au réseau de confiance ModBot")
+@app_commands.describe(actif="Participer (true) ou quitter le réseau (false)")
+async def security_reseau(i: discord.Interaction, actif: bool):
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id)
+    update_cfg(gid, "reseau_confiance", bool(actif))
+    if not actif:
+        # Quitter, c'est retirer sa parole : ce serveur ne signale plus personne.
+        donnees = reseau_lire()
+        for uid in list(donnees["signalements"]):
+            donnees = vg.retirer(donnees, uid, gid)
+        reseau_ecrire(donnees)
+        return await i.followup.send(embed=embed_info(
+            "Réseau de confiance quitté",
+            "Ce serveur ne reçoit plus d'alertes du réseau et ne partage plus rien. "
+            "Ses signalements passés ont été retirés.", gid), ephemeral=True)
+
+    embed = embed_success(
+        "Réseau de confiance activé",
+        "Quand un membre signalé par un autre serveur ModBot rejoint celui-ci, une alerte "
+        "arrive dans le salon des alertes de sécurité. Rien n'est jamais sanctionné "
+        "automatiquement : vos modérateurs décident.", gid)
+    embed.add_field(
+        name="Ce que ce serveur partage",
+        value=("Quand un modérateur bannit avec `/ban` en choisissant un motif réseau (arnaque, "
+               "raid, piratage), et quand l'anti-nuke bannit un compte destructeur : "
+               "l'identifiant du membre, le motif et la date. Jamais la raison écrite, jamais "
+               "le nom du serveur."), inline=False)
+    embed.add_field(name="Serveurs participants", value=str(len(participants_du_reseau())),
+                    inline=True)
+    embed.add_field(name="Durée", value="180 jours, ou jusqu'au débannissement.", inline=True)
+    avertissement = avertissement_salon_securite(i.guild)
+    if avertissement:
+        embed.add_field(name="À régler", value=avertissement, inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
+@security_group.command(name="doubles-comptes", description="Signaler les comptes qui ressemblent à un banni récent")
+@app_commands.describe(actif="Activer (true) ou désactiver (false) la détection")
+async def security_doubles_comptes(i: discord.Interaction, actif: bool):
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id)
+    update_cfg(gid, "doubles_comptes", bool(actif))
+    if not actif:
+        donnees = reseau_lire()
+        donnees["bannis"].pop(gid, None)
+        reseau_ecrire(donnees)
+        return await i.followup.send(embed=embed_info(
+            "Détection des doubles comptes désactivée",
+            "ModBot ne garde plus l'empreinte des bannis de ce serveur, et celles qu'il "
+            "gardait ont été effacées.", gid), ephemeral=True)
+    embed = embed_success(
+        "Détection des doubles comptes activée",
+        f"À chaque bannissement, ModBot garde pendant {vg.DOUBLES_FENETRE_JOURS} jours de quoi "
+        "reconnaître la personne : noms et avatar. Un compte de moins de "
+        f"{vg.DOUBLES_AGE_MAX_JOURS} jours qui lui ressemble est signalé dans le salon des "
+        "alertes de sécurité. Ces données ne quittent pas ce serveur.", gid)
+    avertissement = avertissement_salon_securite(i.guild)
+    if avertissement:
+        embed.add_field(name="À régler", value=avertissement, inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+
 
 bot.tree.add_command(security_group)
 
@@ -19785,6 +19982,9 @@ async def security_maintenance_loop():
                 purge_tick = 0
                 for guild in bot.guilds:
                     db_purge_guild_logs(guild.id)
+                # Les signalements de plus de 180 jours et les empreintes de
+                # plus de 30 : ce qui a depasse sa duree est oublie.
+                reseau_ecrire(vg.purger(reseau_lire()))
         except Exception as ex:
             print(f"security_maintenance_loop: {ex}")
         await asyncio.sleep(30)
@@ -21873,11 +22073,19 @@ async def cmd_warn(i: discord.Interaction, membre: discord.Member):
 
 @bot.tree.command(name="ban", description="🔨 Bannir un membre, pour toujours ou pour un temps")
 @app_commands.describe(membre="Le membre à bannir", raison="Raison du bannissement",
-                       duree="Durée du bannissement : 7j, 24h, 1h30… (vide = définitif)")
+                       duree="Durée du bannissement : 7j, 24h, 1h30… (vide = définitif)",
+                       reseau="Prévenir les autres serveurs du réseau de confiance")
+@app_commands.choices(reseau=[
+    app_commands.Choice(name="Arnaque", value="arnaque"),
+    app_commands.Choice(name="Raid", value="raid"),
+    app_commands.Choice(name="Compte piraté ou destructeur", value="piratage"),
+])
 @app_commands.checks.has_permissions(ban_members=True)
 async def cmd_ban(i: discord.Interaction, membre: discord.Member,
-                  raison: str = "Aucune raison fournie", duree: str = ""):
+                  raison: str = "Aucune raison fournie", duree: str = "",
+                  reseau: app_commands.Choice[str] = None):
     gid = str(i.guild.id)
+    motif_reseau = reseau.value if reseau else ""
 
     # Entre vingt-huit jours d'exclusion — le plafond de Discord — et
     # « pour toujours », il n'y avait rien. C'est pourtant la sanction la
@@ -21923,7 +22131,7 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member,
             ("📋 Raison", raison),
             ("⏳ Durée", duree_lisible or "Définitif"),
             ("📅 Arrive le", fmt(membre.joined_at) if membre.joined_at else "inconnu"),
-        ],
+        ] + ([("🌐 Réseau de confiance", vg.MOTIFS[motif_reseau])] if motif_reseau else []),
     )
     if not confirmed:
         return
@@ -21951,6 +22159,9 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member,
 
     add_ban(gid, str(membre.id), str(membre), raison,
             duree_lisible or "Permanent", "manual_ban", i.user)
+    # Apres le bannissement, jamais avant : on ne signale pas quelqu'un que
+    # Discord a refuse de bannir.
+    partage_reseau = signaler_au_reseau(gid, membre.id, motif_reseau) if motif_reseau else False
     if limite:
         # Inscrit APRES le bannissement : une levee programmee pour
         # quelqu'un qui n'a jamais ete banni ferait un debannissement
@@ -21965,6 +22176,12 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member,
     e.add_field(name="⏳ Durée", value=duree_lisible or "Définitif", inline=True)
     e.add_field(name="📋 Raison", value=raison, inline=False)
     e.add_field(name="👮 Par", value=str(i.user), inline=True)
+    if motif_reseau:
+        e.add_field(
+            name="🌐 Réseau de confiance",
+            value=(f"Signalé : {vg.MOTIFS[motif_reseau]}." if partage_reseau else
+                   "Non partagé : ce serveur ne participe pas au réseau (`/securite reseau`)."),
+            inline=False)
     await target.followup.send(embed=e, ephemeral=True)
 
     await log_event(i.guild, "moderation", "Bannissement manuel",
