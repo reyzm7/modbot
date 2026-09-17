@@ -20115,11 +20115,11 @@ def premium_offrir_jours(gid, jours, source, auteur=""):
 def demarrer_essai(guild, auteur_id):
     """(ok, message) : sept jours de premium, une fois par serveur et par proprietaire."""
     donnees = croissance_lire()
-    refus = cr.refus_essai(donnees, guild.id, guild.owner_id, est_premium(guild.id))
+    refus = cr.refus_essai(donnees, guild.id, getattr(guild, "owner_id", None), est_premium(guild.id))
     if refus:
         return False, cr.REFUS_ESSAI[refus]
     premium_prolonger(guild.id, cr.ESSAI_JOURS, "essai", plan="essai", auteur=str(auteur_id))
-    croissance_ecrire(cr.commencer_essai(croissance_lire(), guild.id, guild.owner_id, auteur_id))
+    croissance_ecrire(cr.commencer_essai(croissance_lire(), guild.id, getattr(guild, "owner_id", None), auteur_id))
     dashboard_log("premium_essai", guild=guild, detail=f"essai de {cr.ESSAI_JOURS} jours")
     return True, (f"ModBot Premium est actif sur **{guild.name}** pendant {cr.ESSAI_JOURS} jours. "
                   "Tout est ouvert : score de sécurité, journal complet, assistant IA, "
@@ -20132,8 +20132,8 @@ def valider_parrainage(guild, code, auteur_id):
     parrain_gid = cr.parrain_du_code(donnees, code)
     parrain = bot.get_guild(int(parrain_gid)) if parrain_gid and parrain_gid.isdigit() else None
     refus = cr.refus_parrainage(
-        donnees, code, guild.id, guild.owner_id,
-        parrain.owner_id if parrain else None, parrain is not None,
+        donnees, code, guild.id, getattr(guild, "owner_id", None),
+        getattr(parrain, "owner_id", None), parrain is not None,
         humains_du_serveur(guild), getattr(guild.me, "joined_at", None))
     if refus:
         return False, cr.REFUS_PARRAINAGE[refus], None
@@ -20317,7 +20317,7 @@ async def api_topgg_vote(request):
 def etat_croissance(guild):
     """Ce que le dashboard montre de l'essai et du parrainage d'un serveur."""
     donnees = croissance_lire()
-    refus = cr.refus_essai(donnees, guild.id, guild.owner_id, est_premium(guild.id))
+    refus = cr.refus_essai(donnees, guild.id, getattr(guild, "owner_id", None), est_premium(guild.id))
     donnees, code = cr.code_du_serveur(donnees, guild.id)
     if code not in croissance_lire()["codes"]:
         croissance_ecrire(donnees)
@@ -22217,6 +22217,7 @@ CATEGORIES_COMMANDES = [
                          "anniversaire", "rappel"]),
     ("💾", "Sauvegardes", ["backup"]),
     ("📊", "Statistiques", ["serverstats", "modstats", "profilestats"]),
+    ("⭐", "Premium", ["premium", "voter"]),
     ("🧰", "Outils", ["panel", "aide", "info-bot"]),
 ]
 
