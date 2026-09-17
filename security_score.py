@@ -233,6 +233,26 @@ CRITERES = [
 
 TOTAL_POSSIBLE = sum(critere["points"] for critere in CRITERES)
 
+# Ce que ModBot peut regler lui-meme, en un clic. Le reste demande une
+# main humaine : choisir le salon et le role du captcha, donner une
+# permission a ModBot (il ne peut pas se la donner), exiger la double
+# authentification (seul le proprietaire le peut).
+CORRIGEABLES = ("antiraid", "antinuke", "filtre", "antiscam", "sauvegarde",
+                "logs", "logs_complets", "discord_verif", "discord_contenu")
+
+
+def a_corriger(faits):
+    """
+    (corrigeables, manuels) : les identifiants des criteres manques, les
+    plus rentables d'abord. Le salon de journal passe avant le journal
+    detaille : on n'active pas des categories qui n'ont nulle part ou ecrire.
+    """
+    manques = [c for c in calculer(faits)["conseils"]]
+    ordre = {ident: rang for rang, ident in enumerate(CORRIGEABLES)}
+    corrigeables = sorted((c["id"] for c in manques if c["id"] in ordre), key=ordre.get)
+    manuels = [c["id"] for c in manques if c["id"] not in ordre]
+    return corrigeables, manuels
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  §2. Le rang

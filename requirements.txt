@@ -3,3 +3,6 @@ aiohttp>=3.9.0
 # >= 10.1 : ImageFont.load_default(size=...) n'existe pas avant. Sans lui,
 # la police de secours sort en ~11 px quelle que soit la taille demandee.
 Pillow>=10.1.0
+# Les fuseaux horaires de la garde de nuit. zoneinfo lit ceux du systeme ;
+# une image minimale n'en a pas, et « 23 h a Paris » tomberait en UTC.
+tzdata

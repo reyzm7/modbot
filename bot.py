@@ -18,6 +18,7 @@ import reseaux_sociaux as rs
 import invitation
 import croissance as cr
 import vigilance as vg
+import garde_nuit as gn
 import compteurs as cpt
 import langue_bot as lb
 import boutique as bq
@@ -346,6 +347,9 @@ F_CROISSANCE = chemin_donnees("croissance.json")
 # Le reseau de confiance et les empreintes de bannis. Perdus, un serveur
 # ne serait plus prevenu d'un raider qu'un autre a deja signale.
 F_RESEAU = chemin_donnees("reseau.json")
+# Ce que la garde de nuit a pose : sans lui, un redemarrage en pleine nuit
+# laisserait le mode lent en place pour toujours.
+F_GARDE_NUIT = chemin_donnees("garde_nuit.json")
 F_DATABASE = os.environ.get("MODBOT_DATABASE", chemin_donnees("modbot_dashboard.db"))
 
 
@@ -480,6 +484,7 @@ FICHIERS_SAUVEGARDES = (
     # tout recommencer au premier redeploiement.
     "croissance.json",
     "reseau.json",
+    "garde_nuit.json",
     # Le compteur de visites : le perdre le ferait repartir a son
     # chiffre de depart, ce qui serait faux.
     "visites.json",
@@ -12912,6 +12917,7 @@ async def start_dashboard_api():
     app.router.add_get("/api/admin/premium/acheteurs", api_admin_premium_acheteurs)
     app.router.add_post("/api/admin/premium/{guild_id}/litige", api_admin_premium_litige)
     app.router.add_get("/api/guilds/{guild_id}/security/score", api_score_securite)
+    app.router.add_post("/api/guilds/{guild_id}/security/corriger", api_corriger_securite)
     app.router.add_get("/api/me/licences", api_mes_licences)
     app.router.add_post("/api/me/licences/activer", api_activer_licence)
     app.router.add_post("/api/stripe/webhook", api_stripe_webhook)
@@ -16304,6 +16310,12 @@ async def on_member_join(member):
     except Exception as erreur:
         print(f"vigilance (arrivee) : {erreur}")
 
+    # La garde de nuit : un compte tout neuf attend le matin pour ecrire.
+    try:
+        await garde_accueillir(member)
+    except Exception as erreur:
+        print(f"garde de nuit (arrivee) : {erreur}")
+
 @bot.event
 async def on_member_remove(member):
     await send_dashboard_member_event(member, departure=True)
@@ -19074,6 +19086,332 @@ async def security_doubles_comptes(i: discord.Interaction, actif: bool):
     await i.followup.send(embed=embed, ephemeral=True)
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  LA GARDE DE NUIT
+# ══════════════════════════════════════════════════════════════════════
+#
+# Les horaires vivent dans garde_nuit.py. Ici : poser le mode lent, le
+# retirer le matin, filtrer les liens, mettre les comptes neufs en pause.
+# Ce qui est pose est note dans garde_nuit.json : un redemarrage au milieu
+# de la nuit ne doit ni oublier de rendre le mode lent, ni ecraser celui
+# qu'un moderateur a change entre-temps.
+
+LIEN_NUIT_RE = re.compile(r"https?://|www\.|discord(?:app)?\.(?:gg|com/invite)/", re.I)
+
+
+def garde_reglages(gid):
+    return gn.reglages(get_cfg(gid).get("garde_de_nuit"))
+
+
+def garde_etats():
+    donnees = jload(F_GARDE_NUIT)
+    return donnees if isinstance(donnees, dict) else {}
+
+
+def garde_etat(gid):
+    etat = garde_etats().get(str(gid))
+    return etat if isinstance(etat, dict) else {}
+
+
+def garde_noter(gid, etat):
+    donnees = garde_etats()
+    donnees[str(gid)] = etat
+    jsave(F_GARDE_NUIT, donnees)
+
+
+def garde_en_service(gid):
+    """La garde est-elle POSEE sur ce serveur, en ce moment ?"""
+    return bool(garde_etat(gid).get("active"))
+
+
+async def commencer_la_garde(guild, r):
+    lents = {}
+    if r["lent"] and guild.me.guild_permissions.manage_channels:
+        for salon in guild.text_channels:
+            try:
+                if (salon.permissions_for(guild.me).manage_channels
+                        and salon.permissions_for(guild.default_role).send_messages
+                        and (salon.slowmode_delay or 0) < r["lent"]):
+                    lents[str(salon.id)] = int(salon.slowmode_delay or 0)
+                    await salon.edit(slowmode_delay=r["lent"], reason="ModBot : garde de nuit")
+            except Exception as erreur:
+                lents.pop(str(salon.id), None)
+                print(f"garde de nuit ({guild.id}, {salon.id}) : {erreur}")
+    fin = gn.fin_de_nuit(r, now())
+    garde_noter(guild.id, {"active": True, "lents": lents, "lent_pose": r["lent"],
+                           "depuis": now().isoformat()})
+    await log_event(
+        guild, "security", "🌙 Garde de nuit en service",
+        "Règles renforcées jusqu'au matin : personne n'est sanctionné de plus, "
+        "le serveur est seulement plus difficile à attaquer.",
+        fields=[("⏰ Jusqu'à", f"<t:{int(fin.timestamp())}:t>"),
+                ("🐢 Mode lent", f"{r['lent']} s sur {len(lents)} salon(s)" if lents else "non"),
+                ("🔗 Liens des membres", "retirés" if r["liens"] else "autorisés"),
+                ("🆕 Comptes récents", "en pause jusqu'au matin" if r["nouveaux"] else "normaux")],
+        severity="info")
+
+
+async def terminer_la_garde(guild, etat):
+    rendus = 0
+    pose = int(etat.get("lent_pose") or 0)
+    for cid, avant in (etat.get("lents") or {}).items():
+        salon = guild.get_channel(int(cid)) if str(cid).isdigit() else None
+        # Un moderateur a change le mode lent pendant la nuit : c'est son
+        # choix qui compte, on n'y touche pas.
+        if salon is None or int(salon.slowmode_delay or 0) != pose:
+            continue
+        try:
+            await salon.edit(slowmode_delay=int(avant or 0), reason="ModBot : fin de la garde de nuit")
+            rendus += 1
+        except Exception as erreur:
+            print(f"garde de nuit, fin ({guild.id}, {cid}) : {erreur}")
+    garde_noter(guild.id, {"active": False, "fin": now().isoformat()})
+    await log_event(guild, "security", "☀️ Garde de nuit terminée",
+                    f"Les règles habituelles reprennent. Mode lent rendu sur {rendus} salon(s).",
+                    severity="success")
+
+
+async def appliquer_garde_de_nuit(guild):
+    r = garde_reglages(guild.id)
+    etat = garde_etat(guild.id)
+    action = gn.a_faire(r, etat, now())
+    if action == "commencer":
+        await commencer_la_garde(guild, r)
+    elif action == "terminer":
+        await terminer_la_garde(guild, etat)
+
+
+async def garde_nuit_loop():
+    """Chaque minute : commencer ou terminer la garde, serveur par serveur."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        for guild in list(bot.guilds):
+            try:
+                await appliquer_garde_de_nuit(guild)
+            except Exception as erreur:
+                print(f"boucle garde de nuit ({guild.id}) : {erreur}")
+        await asyncio.sleep(60)
+
+
+_garde_nuit_task = None
+
+
+async def garde_filtrer_lien(message, immunise):
+    """Rend True si le message a ete retire pour la garde de nuit."""
+    gid = str(message.guild.id)
+    if immunise or not garde_en_service(gid):
+        return False
+    r = garde_reglages(gid)
+    if not r["liens"] or message.author.guild_permissions.manage_messages:
+        return False
+    if not LIEN_NUIT_RE.search(texte_complet_message(message)):
+        return False
+    try:
+        await message.delete()
+    except Exception:
+        return False
+    try:
+        await message.channel.send(
+            embed=EG("🌙 Garde de nuit",
+                     f"{message.author.mention}, les liens sont en pause jusqu'au matin.",
+                     Palette.INFO, gid),
+            delete_after=8, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass
+    return True
+
+
+async def garde_accueillir(member):
+    """Un compte tout neuf, la nuit : il attend le matin pour ecrire."""
+    gid = str(member.guild.id)
+    if not garde_en_service(gid):
+        return
+    r = garde_reglages(gid)
+    if not r["nouveaux"] or not gn.compte_neuf(r, member.created_at, now()):
+        return
+    if not member.guild.me.guild_permissions.moderate_members:
+        return
+    fin = gn.fin_de_nuit(r, now())
+    try:
+        await member.timeout(fin, reason="ModBot : garde de nuit, compte récent")
+    except Exception as erreur:
+        print(f"garde de nuit, arrivee ({gid}) : {erreur}")
+        return
+    try:
+        await member.send(embed=E(
+            "🌙 Bienvenue !",
+            f"**{member.guild.name}** est en garde de nuit : les comptes récents peuvent "
+            f"écrire à partir de <t:{int(fin.timestamp())}:t>. À tout à l'heure !",
+            Palette.INFO))
+    except Exception:
+        pass
+    await log_event(member.guild, "security", "Compte récent mis en pause pour la nuit",
+                    f"{member.mention} pourra écrire à <t:{int(fin.timestamp())}:t>.",
+                    severity="info", target=member)
+
+
+@security_group.command(name="garde-nuit", description="Des règles plus strictes quand l'équipe dort")
+@app_commands.describe(
+    actif="Activer (true) ou désactiver (false) la garde de nuit",
+    debut="Heure de début, de 0 à 23 (défaut : 23)",
+    fin="Heure de fin, de 0 à 23 (défaut : 7)",
+    lent="Mode lent en secondes pendant la nuit, 0 pour aucun (défaut : 10)",
+    liens="Retirer les liens des membres pendant la nuit (défaut : oui)",
+    nouveaux="Mettre en pause les comptes de moins de 7 jours jusqu'au matin (défaut : oui)",
+    fuseau="Fuseau horaire, par exemple Europe/Paris (défaut)")
+async def security_garde_nuit(i: discord.Interaction, actif: bool,
+                              debut: app_commands.Range[int, 0, 23] = None,
+                              fin: app_commands.Range[int, 0, 23] = None,
+                              lent: app_commands.Range[int, 0, 120] = None,
+                              liens: bool = None, nouveaux: bool = None, fuseau: str = None):
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id)
+    brut = dict(get_cfg(gid).get("garde_de_nuit") or {})
+    brut["enabled"] = bool(actif)
+    for clef, valeur in (("debut", debut), ("fin", fin), ("lent", lent), ("liens", liens),
+                         ("nouveaux", nouveaux), ("fuseau", fuseau)):
+        if valeur is not None:
+            brut[clef] = valeur
+    r = gn.reglages(brut)
+    if fuseau and not gn.fuseau_valide(fuseau):
+        return await i.followup.send(embed=embed_error(
+            "Fuseau inconnu", "Écris-le comme `Europe/Paris`, `Europe/Brussels` ou `America/Montreal`.",
+            gid), ephemeral=True)
+    update_cfg(gid, "garde_de_nuit", r)
+    if not r["enabled"]:
+        return await i.followup.send(embed=embed_info(
+            "Garde de nuit désactivée",
+            "Si elle était en service, les règles habituelles reviennent dans la minute.", gid),
+            ephemeral=True)
+    if r["debut"] == r["fin"]:
+        return await i.followup.send(embed=embed_warning(
+            "Horaires à revoir", "Le début et la fin sont à la même heure : la garde ne prendrait jamais son service.",
+            gid), ephemeral=True)
+    embed = embed_success(
+        "Garde de nuit activée",
+        f"Chaque nuit de {r['debut']} h à {r['fin']} h ({r['fuseau']}), ModBot renforce les règles, "
+        "puis les rend le matin. Personne n'est sanctionné de plus.", gid)
+    embed.add_field(name="🐢 Mode lent", value=f"{r['lent']} s" if r["lent"] else "aucun", inline=True)
+    embed.add_field(name="🔗 Liens des membres", value="retirés" if r["liens"] else "autorisés", inline=True)
+    embed.add_field(name="🆕 Comptes récents", value="en pause" if r["nouveaux"] else "normaux", inline=True)
+    manque = [nom for nom, ok in (
+        ("Gérer les salons (mode lent)", i.guild.me.guild_permissions.manage_channels or not r["lent"]),
+        ("Exclure temporairement (comptes récents)", i.guild.me.guild_permissions.moderate_members or not r["nouveaux"]),
+        ("Gérer les messages (liens)", i.guild.me.guild_permissions.manage_messages or not r["liens"]),
+    ) if not ok]
+    if manque:
+        embed.add_field(name="⚠️ Permissions manquantes pour ModBot", value="\n".join(f"• {m}" for m in manque),
+                        inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  TOUT CORRIGER, EN UN CLIC
+# ══════════════════════════════════════════════════════════════════════
+
+async def corriger_la_securite(guild):
+    """
+    Regle ce que ModBot peut regler seul, et dit ce qui reste.
+
+    Ne touche jamais a ce qui demande un choix : le salon et le role du
+    captcha, les permissions de ModBot, la double authentification du
+    proprietaire. Rend {"avant", "apres", "faits", "echecs", "score"}.
+    """
+    gid = str(guild.id)
+    faits_avant = collecter_faits_securite(guild)
+    avant = sc_score.calculer(faits_avant)["score"]
+    corrigeables, _manuels = sc_score.a_corriger(faits_avant)
+    permissions = guild.me.guild_permissions
+    faits, echecs = [], []
+
+    for ident in corrigeables:
+        titre = next((c["titre"] for c in sc_score.CRITERES if c["id"] == ident), ident)
+        try:
+            if ident == "antiraid":
+                set_raid_cfg(gid, enabled=True)
+            elif ident == "antinuke":
+                set_nuke_cfg(gid, enabled=True)
+            elif ident == "filtre":
+                update_cfg(gid, "insultes_enabled", True)
+            elif ident == "antiscam":
+                reglages = get_cfg(gid).get("antiscam")
+                update_cfg(gid, "antiscam", {**(reglages if isinstance(reglages, dict) else {}),
+                                             "enabled": True})
+            elif ident == "sauvegarde":
+                update_cfg(gid, "auto_backup_enabled", True)
+            elif ident == "logs_complets":
+                update_cfg(gid, "logs_enabled", {clef: True for clef in LOG_CATEGORIES})
+            elif ident == "logs":
+                if not (permissions.manage_channels and permissions.manage_roles):
+                    echecs.append(f"{titre} : ModBot n'a pas le droit de créer un salon")
+                    continue
+                salon = await guild.create_text_channel(
+                    "modbot-logs", reason="ModBot : correction du score de sécurité",
+                    overwrites={guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                                      embed_links=True)})
+                update_cfg(gid, "salon_logs", str(salon.id))
+            elif ident == "discord_verif":
+                if not permissions.manage_guild:
+                    echecs.append(f"{titre} : ModBot n'a pas le droit de gérer le serveur")
+                    continue
+                await guild.edit(verification_level=discord.VerificationLevel.medium,
+                                 reason="ModBot : correction du score de sécurité")
+            elif ident == "discord_contenu":
+                if not permissions.manage_guild:
+                    echecs.append(f"{titre} : ModBot n'a pas le droit de gérer le serveur")
+                    continue
+                await guild.edit(explicit_content_filter=discord.ContentFilter.all_members,
+                                 reason="ModBot : correction du score de sécurité")
+            else:
+                continue
+            faits.append(titre)
+        except Exception as erreur:
+            echecs.append(f"{titre} : {type(erreur).__name__}")
+
+    score = sc_score.calculer(collecter_faits_securite(guild))
+    if faits:
+        dashboard_log("securite_corrigee", guild=guild, detail=", ".join(faits))
+    return {"avant": avant, "apres": score["score"], "faits": faits, "echecs": echecs, "score": score}
+
+
+async def api_corriger_securite(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    await exiger_premium(guild, "security_score")
+    rapport = await corriger_la_securite(guild)
+    return api_json({"ok": True, **rapport}, request=request)
+
+
+@security_group.command(name="corriger", description="Régler en un clic ce que le score de sécurité signale")
+async def security_corriger(i: discord.Interaction):
+    await _safe_defer(i, ephemeral=True)
+    gid = str(i.guild.id)
+    if not est_premium(gid):
+        return await i.followup.send(embed=embed_warning(
+            "Réservé à ModBot Premium",
+            "La correction en un clic accompagne le score de sécurité. Essaie-la gratuitement "
+            "pendant 7 jours : `/premium essai`.", gid), ephemeral=True)
+    rapport = await corriger_la_securite(i.guild)
+    embed = embed_success(
+        "Score de sécurité : corrigé",
+        f"**{rapport['avant']}** → **{rapport['apres']}** sur 100.", gid) if rapport["faits"] else embed_info(
+        "Rien à corriger automatiquement",
+        f"Score : **{rapport['apres']}** sur 100. Ce qui reste demande une action de ta part.", gid)
+    if rapport["faits"]:
+        embed.add_field(name="✅ Corrigé", value="\n".join(f"• {f}" for f in rapport["faits"])[:1024],
+                        inline=False)
+    if rapport["echecs"]:
+        embed.add_field(name="⚠️ Pas pu", value="\n".join(f"• {e}" for e in rapport["echecs"])[:1024],
+                        inline=False)
+    restants = rapport["score"]["conseils"][:5]
+    if restants:
+        embed.add_field(name="🧭 À faire toi-même",
+                        value="\n".join(f"• **{c['titre']}** — {c['conseil']}" for c in restants)[:1024],
+                        inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
 bot.tree.add_command(security_group)
 
 # ════════════════════════════════════════════════
@@ -21513,7 +21851,7 @@ async def on_ready():
     global _tempbans_task, _rapports_task
     global _licences_task
     global _presence_task
-    global _croissance_task
+    global _croissance_task, _garde_nuit_task
     global _sauvegarde_a_faire
     BOT_STATUS.update({"state": "connecte", "detail": ""})
     DEMARRAGE.update(debut=now().isoformat(), etape="", fini="")
@@ -21586,6 +21924,8 @@ async def on_ready():
         _presence_task = asyncio.create_task(boucle_surveillee("presence_loop", presence_loop))
     if not _croissance_task or _croissance_task.done():
         _croissance_task = asyncio.create_task(boucle_surveillee("croissance_loop", croissance_loop))
+    if not _garde_nuit_task or _garde_nuit_task.done():
+        _garde_nuit_task = asyncio.create_task(boucle_surveillee("garde_nuit_loop", garde_nuit_loop))
 
     # ── 4. Les commandes. Discord ne connait qu'une liste pour tous les
     #       serveurs : la resynchroniser serveur par serveur, comme on le
@@ -21713,6 +22053,10 @@ async def on_message(message):
         # Anti-arnaque : avant l'anti-lien, parce qu'une publicite de nuke
         # merite mieux qu'une simple suppression de lien.
         if await verifier_arnaque(message):
+            return
+
+        # La garde de nuit : les liens des membres attendent le matin.
+        if await garde_filtrer_lien(message, immunise):
             return
 
         # Anti-lien. Il lit desormais les embeds : la publicite qui est

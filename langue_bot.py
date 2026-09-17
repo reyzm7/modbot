@@ -54,7 +54,7 @@ LANGUES_CIBLES = tuple(code for code in LANGUES if code != LANGUE_SOURCE)
 
 FICHIERS_SOURCE = ("bot.py", "security_core.py", "premium_core.py",
                    "security_score.py", "reseaux_sociaux.py", "compteurs.py",
-                   "croissance.py", "vigilance.py")
+                   "croissance.py", "vigilance.py", "garde_nuit.py")
 DOSSIER = os.path.dirname(os.path.abspath(__file__))
 DOSSIER_TRADUCTIONS = os.path.join(DOSSIER, "traductions")
 
