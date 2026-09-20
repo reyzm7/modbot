@@ -21,6 +21,8 @@ Trois regles ont guide les baremes :
     minutes doit savoir quoi faire de ces dix minutes.
 """
 
+from datetime import datetime, timedelta, timezone
+
 # ══════════════════════════════════════════════════════════════════════
 #  §1. Les criteres
 #
@@ -275,6 +277,74 @@ RANGS = [
      "Le serveur est peu protégé. Les trois premiers conseils prennent "
      "quelques minutes et changent beaucoup."),
 ]
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §1 bis. Les permissions qui manquent VRAIMENT
+#
+#  Un conseil du score dit « vous gagneriez des points ». Ceci dit autre
+#  chose : une protection est ACTIVE, et elle ne peut pas agir. Elle
+#  echouera en silence, une seule fois, le jour ou elle servait. C'est une
+#  panne annoncee, pas une suggestion — d'ou une liste separee.
+# ══════════════════════════════════════════════════════════════════════
+
+BESOINS = [
+    {"fonction": "Anti-raid", "actif": ("antiraid", "enabled"),
+     "permissions": [("kick_members", "Expulser des membres")]},
+    {"fonction": "Anti-nuke", "actif": ("antinuke", "enabled"),
+     "permissions": [("ban_members", "Bannir des membres"),
+                     ("view_audit_log", "Voir le journal d'audit")]},
+    {"fonction": "Filtre de langage", "actif": ("filter", "enabled"),
+     "permissions": [("manage_messages", "Gérer les messages")]},
+    {"fonction": "Anti-arnaque", "actif": ("antiscam", "enabled"),
+     "permissions": [("manage_messages", "Gérer les messages")]},
+    {"fonction": "Vérification à l'arrivée", "actif": ("captcha", "enabled"),
+     "permissions": [("manage_roles", "Gérer les rôles")]},
+    {"fonction": "Garde de nuit (mode lent)", "actif": ("garde_nuit", "lent"),
+     "permissions": [("manage_channels", "Gérer les salons")]},
+    {"fonction": "Garde de nuit (liens)", "actif": ("garde_nuit", "liens"),
+     "permissions": [("manage_messages", "Gérer les messages")]},
+    {"fonction": "Garde de nuit (comptes récents)", "actif": ("garde_nuit", "nouveaux"),
+     "permissions": [("moderate_members", "Exclure temporairement")]},
+]
+
+# Tant que la permission n'est pas rendue, on le redit — mais pas tous les
+# jours : une alerte qui revient trop souvent devient un bruit qu'on ferme.
+RAPPEL_PERMISSIONS_JOURS = 7
+
+
+def permissions_manquantes(faits):
+    """[{fonction, permission, libelle}] pour ce qui est actif et sans droit."""
+    manques = []
+    for besoin in BESOINS:
+        if not _n(faits, *besoin["actif"]):
+            continue
+        for clef, libelle in besoin["permissions"]:
+            if not _n(faits, "permissions", clef):
+                manques.append({"fonction": besoin["fonction"], "permission": clef,
+                                "libelle": libelle})
+    return manques
+
+
+def doit_prevenir(etat, manques, instant, rappel_jours=RAPPEL_PERMISSIONS_JOURS):
+    """
+    (prevenir, signature) : prevenir des que la liste CHANGE — une
+    permission vient d'etre retiree, il faut le savoir tout de suite — puis
+    une fois par semaine tant qu'elle manque. Rien quand il ne manque rien.
+    """
+    signature = sorted({f"{m['fonction']}|{m['permission']}" for m in manques})
+    if not signature:
+        return False, []
+    etat = etat if isinstance(etat, dict) else {}
+    if sorted(etat.get("manques") or []) != signature:
+        return True, signature
+    dernier = etat.get("le")
+    try:
+        date = datetime.fromisoformat(str(dernier))
+        date = date if date.tzinfo else date.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return True, signature
+    return (instant - date) >= timedelta(days=rappel_jours), signature
 
 
 def rang_du_score(score):

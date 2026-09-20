@@ -168,6 +168,34 @@ langue = io.open("langue_bot.py", encoding="utf-8").read()
 verifier("les motifs et indices sont traduits",
          '"vigilance.py"' in langue[langue.index("FICHIERS_SOURCE"):][:300])
 
+# ══════════════════════════════════════════════════════════════════════
+print("\n--- Les menus contextuels ---")
+menus = re.findall(r'@bot\.tree\.context_menu\(name="([^"]+)"\)', source)
+verifier("trois menus de moderation sont poses, en plus de la traduction",
+         {"⚠️ Avertir l'auteur", "📋 Ses infractions", "🌐 Bannir et signaler"} <= set(menus),
+         str(menus))
+verifier("Discord n'en accepte pas plus de cinq par type", len(menus) <= 10, str(len(menus)))
+for nom, permission in (("menu_avertir_auteur", "manage_messages"),
+                        ("menu_infractions", "manage_messages"),
+                        ("menu_signaler_au_reseau", "ban_members")):
+    entete = source[source.index("async def " + nom) - 400:source.index("async def " + nom)]
+    verifier(f"« {nom} » exige {permission}", f"has_permissions({permission}=True)" in entete)
+
+bannir = corps("async def bannir_et_signaler(")
+verifier("on ne bannit ni soi-meme, ni le proprietaire, ni ModBot",
+         "auteur.id, guild.owner_id" in bannir)
+verifier("la hierarchie est verifiee avant de bannir",
+         bannir.index("top_role >= auteur.top_role") < bannir.index("await guild.ban("))
+verifier("le reseau n'est prevenu qu'APRES un bannissement reussi",
+         bannir.index("await guild.ban(") < bannir.index("signaler_au_reseau("))
+verifier("un bannissement refuse par Discord ne signale rien",
+         bannir.index("Bannissement refusé") < bannir.index("signaler_au_reseau("))
+verifier("le motif vient de la liste fermee du reseau", "vg.MOTIFS[motif]" in bannir)
+vue = corps("class VueSignalerAuReseau(")
+verifier("la fenetre n'obeit qu'a celui qui l'a ouverte", "interaction.user.id != self.par.id" in vue)
+verifier("les trois motifs du reseau, et eux seuls",
+         sorted(re.findall(r'\("(\w+)", "[^"]+", "', vue)) == ["arnaque", "piratage", "raid"])
+
 print("\n" + "=" * 62)
 rates = [nom for nom, ok, _ in resultats if not ok]
 print(f"RESULTAT : {len(resultats) - len(rates)}/{len(resultats)} verifications passees")

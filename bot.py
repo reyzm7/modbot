@@ -19,6 +19,7 @@ import invitation
 import croissance as cr
 import vigilance as vg
 import garde_nuit as gn
+import statut as st
 import compteurs as cpt
 import langue_bot as lb
 import boutique as bq
@@ -350,6 +351,11 @@ F_RESEAU = chemin_donnees("reseau.json")
 # Ce que la garde de nuit a pose : sans lui, un redemarrage en pleine nuit
 # laisserait le mode lent en place pour toujours.
 F_GARDE_NUIT = chemin_donnees("garde_nuit.json")
+# L'histoire des coupures, montree publiquement. Et ce qu'on a deja dit au
+# proprietaire sur les permissions manquantes, pour ne pas le repeter chaque
+# dix minutes.
+F_STATUT = chemin_donnees("statut.json")
+F_PERMISSIONS = chemin_donnees("permissions_bot.json")
 F_DATABASE = os.environ.get("MODBOT_DATABASE", chemin_donnees("modbot_dashboard.db"))
 
 
@@ -485,6 +491,7 @@ FICHIERS_SAUVEGARDES = (
     "croissance.json",
     "reseau.json",
     "garde_nuit.json",
+    "statut.json",
     # Le compteur de visites : le perdre le ferait repartir a son
     # chiffre de depart, ce qui serait faux.
     "visites.json",
@@ -7611,6 +7618,7 @@ def collecter_faits_securite(guild):
     gid = str(guild.id)
     cfg = get_cfg(gid)
     perms = guild.me.guild_permissions
+    nuit = garde_reglages(gid)
 
     # Le nombre de categories de journal REELLEMENT actives, verrou
     # premium compris : une categorie fermee par le verrou ne trace
@@ -7640,7 +7648,14 @@ def collecter_faits_securite(guild):
             "manage_channels": perms.manage_channels,
             "moderate_members": perms.moderate_members,
             "view_audit_log": perms.view_audit_log,
+            # Pas note par le score — aucun critere ne la demande — mais
+            # le filtre, l'anti-arnaque et la garde de nuit en dependent.
+            "manage_messages": perms.manage_messages,
         },
+        "garde_nuit": {"enabled": nuit["enabled"],
+                       "lent": nuit["enabled"] and bool(nuit["lent"]),
+                       "liens": nuit["enabled"] and nuit["liens"],
+                       "nouveaux": nuit["enabled"] and nuit["nouveaux"]},
         "discord": {
             "verification_level": niveau_discord(guild.verification_level),
             "explicit_content_filter": niveau_discord(
@@ -10759,6 +10774,7 @@ async def battement_loop():
     reponse toute la nuit.
     """
     await bot.wait_until_ready()
+    coupure = None
     try:
         coupure = bq.duree_hors_ligne(battement_lire(), now())
         if coupure is not None:
@@ -10771,6 +10787,12 @@ async def battement_loop():
                 0xFAA61A)
     except Exception as erreur:
         print(f"battement: retour de coupure non annonce : {erreur}")
+    # Note le demarrage et la coupure AVANT d'ecrire le battement suivant :
+    # apres, l'ecart serait perdu, et la page de statut mentirait par omission.
+    try:
+        noter_le_demarrage(coupure)
+    except Exception as erreur:
+        print(f"statut: demarrage non note ({erreur})")
     while not bot.is_closed():
         try:
             battement_ecrire()
@@ -12864,6 +12886,7 @@ async def start_dashboard_api():
     app.router.add_route("*", "/api/health", api_health)
     # Route publique : chiffres agreges affiches sur la page d'accueil
     app.router.add_get("/api/public/stats", api_public_stats)
+    app.router.add_get("/api/public/statut", api_public_statut)
     app.router.add_get("/api/auth/discord/login", api_login)
     app.router.add_get("/api/auth/discord/callback", api_oauth_callback)
     app.router.add_post("/api/auth/logout", api_logout)
@@ -19420,6 +19443,165 @@ async def security_corriger(i: discord.Interaction):
     await i.followup.send(embed=embed, ephemeral=True)
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  LES MENUS CONTEXTUELS : MODERER SANS RIEN TAPER
+# ══════════════════════════════════════════════════════════════════════
+#
+# Un moderateur voit le message, pas la commande. Le clic droit met la
+# sanction a l'endroit ou le probleme se presente — c'est ce qui fait la
+# difference entre une regle appliquee et une regle oubliee.
+#
+# Discord accepte cinq menus par type. Ceux-ci sont reserves au staff par
+# les memes permissions que les commandes equivalentes.
+
+async def bannir_et_signaler(interaction, membre, motif):
+    """Bannit, puis signale au reseau si ce serveur y participe."""
+    guild = interaction.guild
+    gid = str(guild.id)
+    auteur = interaction.user
+
+    if membre.id in (auteur.id, guild.owner_id, getattr(bot.user, "id", None)):
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Action impossible",
+            "On ne bannit ni soi-même, ni le propriétaire du serveur, ni ModBot.", gid))
+    if isinstance(auteur, discord.Member) and membre.top_role >= auteur.top_role \
+            and auteur.id != guild.owner_id:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Hiérarchie insuffisante",
+            f"{membre.mention} a un rôle supérieur ou égal au tien.", gid))
+    if membre.top_role >= guild.me.top_role:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "ModBot ne peut pas bannir ce membre",
+            "Déplace le rôle **ModBot** plus haut dans la liste des rôles.", gid))
+
+    raison = vg.MOTIFS[motif].capitalize()
+    try:
+        dm = EG("🔨 Tu as été banni", couleur=Palette.DANGER, gid=gid)
+        dm.description = (f"Tu as été banni de **{guild.name}**.\n\n"
+                          f"📋 **Raison :** {raison}\n\n🔓 **Conteste :** {LIEN_DEBAN}")
+        await membre.send(embed=dm)
+    except Exception:
+        pass  # MP fermes : on bannit quand meme
+
+    try:
+        await guild.ban(membre, reason=f"[Manuel] {raison}", delete_message_days=0)
+    except discord.Forbidden:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Bannissement refusé",
+            "Discord a refusé l'action : vérifie les permissions de ModBot.", gid))
+
+    add_ban(gid, str(membre.id), str(membre), raison, "Permanent", "manual_ban", auteur)
+    partage = signaler_au_reseau(gid, membre.id, motif)
+    await log_event(guild, "moderation", "Bannissement manuel",
+                    f"**{membre}** a été banni par {auteur.mention}.",
+                    fields=[("📋 Raison", raison)], severity="danger", actor=auteur,
+                    target=membre, thumbnail=membre.display_avatar.url)
+    track_mod(str(auteur.id), gid, "bans")
+
+    embed = embed_success("Membre banni", f"{membre} ({membre.id})", gid)
+    embed.add_field(
+        name="🌐 Réseau de confiance",
+        value=(f"Signalé : {vg.MOTIFS[motif]}." if partage else
+               "Non partagé : ce serveur ne participe pas au réseau (`/securite reseau`)."),
+        inline=False)
+    await safe_ephemeral(interaction, embed=embed)
+
+
+class VueSignalerAuReseau(discord.ui.View):
+    """
+    Le motif en un clic : trois boutons, et rien d'autre.
+
+    Le menu contextuel ne peut pas poser de question ; cette vue le fait,
+    en restant ephemere. Elle n'obeit qu'a celui qui l'a ouverte : une vue
+    ephemere reste cliquable tant qu'elle est affichee.
+    """
+
+    MOTIFS = (("arnaque", "Arnaque", "🎣"), ("raid", "Raid", "🌊"),
+              ("piratage", "Compte piraté", "💥"))
+
+    def __init__(self, membre, par):
+        super().__init__(timeout=120)
+        self.membre = membre
+        self.par = par
+        for motif, libelle, emoji in self.MOTIFS:
+            bouton = discord.ui.Button(label=libelle, emoji=emoji,
+                                       style=discord.ButtonStyle.danger)
+            bouton.callback = self._pour(motif)
+            self.add_item(bouton)
+
+    def _pour(self, motif):
+        async def callback(interaction):
+            if interaction.user.id != self.par.id:
+                return await safe_ephemeral(interaction, embed=embed_error(
+                    "Ce n'est pas ta fenêtre", "Ouvre le menu toi-même pour l'utiliser."))
+            for enfant in self.children:
+                enfant.disabled = True
+            await bannir_et_signaler(interaction, self.membre, motif)
+        return callback
+
+
+@bot.tree.context_menu(name="⚠️ Avertir l'auteur")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def menu_avertir_auteur(interaction: discord.Interaction, message: discord.Message):
+    """Clic droit sur un message → Applications → Avertir l'auteur."""
+    membre = interaction.guild.get_member(message.author.id) if interaction.guild else None
+    if membre is None or membre.bot:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Personne à avertir",
+            "L'auteur a quitté le serveur, ou c'est un bot.",
+            str(interaction.guild.id) if interaction.guild else None))
+    await interaction.response.send_modal(ModalWarn(membre))
+
+
+@bot.tree.context_menu(name="📋 Ses infractions")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def menu_infractions(interaction: discord.Interaction, membre: discord.Member):
+    """Le casier d'un membre, sans rien taper ni deranger le salon."""
+    gid = str(interaction.guild.id)
+    historique = INFRACTIONS.history(gid, membre.id)
+    points = INFRACTIONS.points(gid, membre.id)
+    if not historique:
+        return await safe_ephemeral(interaction, embed=embed_success(
+            "Casier vierge", f"{membre.mention} n'a aucune infraction enregistrée.", gid))
+    palier = sc.resolve_sanction(points, get_filter_cfg(gid)["ladder"])
+    embed = embed_base(f"Infractions de {membre.display_name}", "",
+                       Palette.WARNING if points < 4 else Palette.DANGER, gid, ICONS["warn"])
+    embed.set_thumbnail(url=membre.display_avatar.url)
+    embed.add_field(name="📊 Points cumulés", value=f"`{points}`", inline=True)
+    embed.add_field(name="📋 Infractions", value=f"`{len(historique)}`", inline=True)
+    embed.add_field(name="⚖️ Palier actuel", value=palier["fr"], inline=True)
+    dernieres = []
+    for ligne in historique[-5:][::-1]:
+        quand = ligne.get("date") or ligne.get("le") or ""
+        dernieres.append(f"• {str(ligne.get('reason') or ligne.get('raison') or '—')[:80]}"
+                         + (f" — {quand[:10]}" if quand else ""))
+    embed.add_field(name="🕑 Les dernières", value="\n".join(dernieres)[:1024], inline=False)
+    embed.set_footer(text="Historique complet : /infractions")
+    await safe_ephemeral(interaction, embed=embed)
+
+
+@bot.tree.context_menu(name="🌐 Bannir et signaler")
+@app_commands.checks.has_permissions(ban_members=True)
+async def menu_signaler_au_reseau(interaction: discord.Interaction, membre: discord.Member):
+    """
+    Bannir en choisissant un motif du reseau de confiance.
+
+    Deux gestes en un, la ou ils vont toujours ensemble : on bannit un
+    arnaqueur, et on prévient les autres serveurs. Le motif se choisit
+    dans la liste fermee du reseau — jamais un texte libre.
+    """
+    gid = str(interaction.guild.id)
+    rappel = ("" if reseau_participe(gid) else
+              "\n\n⚠️ Ce serveur ne participe pas au réseau : le bannissement aura bien lieu, "
+              "mais rien ne sera partagé. `/securite reseau` pour y participer.")
+    await interaction.response.send_message(
+        embed=embed_warning(
+            f"Bannir {membre.display_name} ?",
+            "Choisis le motif : il sera partagé avec les autres serveurs du réseau "
+            "de confiance (identifiant, motif et date — jamais la raison écrite)." + rappel, gid),
+        view=VueSignalerAuReseau(membre, interaction.user), ephemeral=True)
+
+
 bot.tree.add_command(security_group)
 
 # ════════════════════════════════════════════════
@@ -20907,7 +21089,9 @@ async def croissance_loop():
     while not bot.is_closed():
         try:
             await prevenir_fins_d_essai()
+            await relancer_apres_les_essais()
             await retirer_roles_de_vote()
+            await veiller_sur_les_permissions()
         except Exception as erreur:
             print(f"boucle croissance: {erreur}")
         await asyncio.sleep(600)
@@ -21037,6 +21221,162 @@ async def voter(i: discord.Interaction):
                f"{cr.VOTE_ROLE_HEURES} heures, et un grand merci."), inline=False)
     embed.add_field(name="Tes votes", value=str(int(fiche.get("total") or 0)), inline=True)
     await i.followup.send(embed=embed, ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  LA PAGE DE STATUT, ET LES PERMISSIONS QUI MANQUENT
+# ══════════════════════════════════════════════════════════════════════
+#
+# Deux facons de dire la verite sur le service : son histoire (les
+# coupures des trente derniers jours, publiques) et ses pannes silencieuses
+# (une protection active sans la permission qu'elle demande).
+
+def statut_lire():
+    return st.normaliser(jload(F_STATUT))
+
+
+def statut_ecrire(donnees):
+    jsave(F_STATUT, donnees)
+
+
+def noter_le_demarrage(coupure=None):
+    """Au retour du bot : le demarrage, et la coupure s'il y en a eu une."""
+    minutes = int(coupure.total_seconds() // 60) if coupure else 0
+    statut_ecrire(st.noter_demarrage(statut_lire(), now(), minutes, battement_lire()))
+
+
+async def api_public_statut(request):
+    """
+    Route PUBLIQUE : l'histoire du service, sans rien de personnel.
+
+    Des minutes, des dates et un pourcentage. Aucun serveur, aucun membre.
+    """
+    return api_json({"ok": True, "statut": st.resume(statut_lire(), PROCESS_STARTED_AT)},
+                    request=request)
+
+
+def manques_de_permissions(guild):
+    """Les permissions qui manquent a une protection ACTIVE sur ce serveur."""
+    return sc_score.permissions_manquantes(collecter_faits_securite(guild))
+
+
+def permissions_etats():
+    donnees = jload(F_PERMISSIONS)
+    return donnees if isinstance(donnees, dict) else {}
+
+
+def embed_permissions_manquantes(guild, manques):
+    embed = E("⚠️ Il me manque une permission",
+              f"Sur **{guild.name}**, des protections sont actives mais ModBot n'a pas "
+              "le droit d'agir. Elles échoueront en silence, le jour où elles serviront.",
+              Palette.WARNING)
+    lignes = [f"• **{m['fonction']}** a besoin de « {m['libelle']} »" for m in manques[:10]]
+    embed.add_field(name="Ce qui ne peut pas fonctionner", value="\n".join(lignes)[:1024],
+                    inline=False)
+    embed.add_field(
+        name="Comment régler",
+        value=("Paramètres du serveur → Rôles → **ModBot** : coche les permissions manquantes. "
+               "Vérifie aussi que le rôle ModBot est **au-dessus** des rôles qu'il doit gérer."),
+        inline=False)
+    return embed
+
+
+async def veiller_sur_les_permissions():
+    """
+    Previent le proprietaire quand une permission disparait, puis une fois
+    par semaine tant qu'elle manque. Rien a dire quand tout va bien.
+    """
+    etats = permissions_etats()
+    change = False
+    for guild in list(bot.guilds):
+        try:
+            manques = manques_de_permissions(guild)
+            prevenir, signature = sc_score.doit_prevenir(etats.get(str(guild.id)), manques, now())
+            if not signature:
+                if etats.pop(str(guild.id), None) is not None:
+                    change = True
+                continue
+            if not prevenir:
+                continue
+            if await prevenir_proprietaire(guild, embed_permissions_manquantes(guild, manques)):
+                dashboard_log("permissions_manquantes", guild=guild,
+                              detail=", ".join(m["permission"] for m in manques))
+            etats[str(guild.id)] = {"le": now().isoformat(), "manques": signature}
+            change = True
+        except Exception as erreur:
+            print(f"permissions ({guild.id}) : {erreur}")
+    if change:
+        jsave(F_PERMISSIONS, etats)
+
+
+# ── La relance, trois jours apres la fin d'un essai ────────────────────
+
+def chiffres_du_journal(gid, depuis, jusqu_a):
+    """Ce que le journal du serveur a enregistre sur une periode, par categorie."""
+    try:
+        with db_connect() as conn:
+            lignes = conn.execute(
+                "SELECT category, COUNT(*) FROM guild_logs "
+                "WHERE guild_id = ? AND date >= ? AND date <= ? GROUP BY category",
+                (str(gid), str(depuis), str(jusqu_a))).fetchall()
+        return {str(categorie): int(nombre) for categorie, nombre in lignes}
+    except Exception as erreur:
+        print(f"journal: comptage impossible ({erreur})")
+        return {}
+
+
+def embed_relance_essai(guild, chiffres):
+    """
+    Ce que l'essai a donne, trois jours apres sa fin.
+
+    On ne dit que des chiffres CONSTATES. Un essai sans le moindre
+    incident se raconte autrement : c'est une bonne nouvelle, pas un
+    argument creux.
+    """
+    lignes = [(nom, chiffres.get(clef, 0)) for clef, nom in (
+        ("moderation", "sanctions appliquées"), ("security", "alertes de sécurité"),
+        ("tickets", "tickets ouverts"), ("members", "arrivées et départs suivis"))]
+    utiles = [(nom, valeur) for nom, valeur in lignes if valeur]
+    if utiles:
+        corps = "\n".join(f"• **{valeur}** {nom}" for nom, valeur in utiles)
+        embed = E("Ton essai Premium est terminé",
+                  f"Pendant ces {cr.ESSAI_JOURS} jours, ModBot a travaillé sur "
+                  f"**{guild.name}** :", Palette.INFO)
+        embed.add_field(name="Ce qu'il a fait", value=corps, inline=False)
+    else:
+        embed = E("Ton essai Premium est terminé",
+                  f"Ces {cr.ESSAI_JOURS} jours se sont passés sans le moindre incident sur "
+                  f"**{guild.name}**. C'est exactement ce qu'on veut — et c'est le genre de "
+                  "calme qui se prépare avant, pas pendant.", Palette.INFO)
+    embed.add_field(
+        name="Ce qui s'est refermé",
+        value=("Le score de sécurité et sa correction en un clic, le journal complet, "
+               "l'assistant IA, les relais réseaux, les rôles automatiques."), inline=False)
+    embed.add_field(name="Pour rouvrir", value=PAGE_PREMIUM, inline=False)
+    embed.add_field(
+        name="Ou gratuitement",
+        value=(f"`/premium parrainage` : chaque serveur que tu fais passer à ModBot "
+               f"t'offre {cr.PARRAINAGE_JOURS} jours."), inline=False)
+    return embed
+
+
+async def relancer_apres_les_essais():
+    donnees = croissance_lire()
+    a_relancer = cr.essais_a_relancer(donnees)
+    faits = []
+    for gid in a_relancer:
+        guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
+        # Un serveur qui s'est abonne entre-temps n'a rien a relancer.
+        if guild is not None and not est_premium(gid):
+            essai = donnees["essais"].get(str(gid)) or {}
+            chiffres = chiffres_du_journal(gid, essai.get("debut", ""), essai.get("fin", ""))
+            await prevenir_proprietaire(guild, embed_relance_essai(guild, chiffres))
+        faits.append(gid)
+    if faits:
+        donnees = croissance_lire()
+        for gid in faits:
+            donnees = cr.marquer_prevenu(donnees, gid, "relance")
+        croissance_ecrire(donnees)
 
 
 def embed_bienvenue_serveur(guild):

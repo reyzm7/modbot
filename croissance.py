@@ -27,6 +27,11 @@ import random
 from datetime import datetime, timedelta, timezone
 
 ESSAI_JOURS = 7
+# On relance trois jours apres la fin, jamais le jour meme : le jour meme,
+# on insiste ; trois jours apres, il manque quelque chose, et on le dit avec
+# des chiffres. Au-dela de dix jours, c'est du harcelement — on laisse.
+RELANCE_JOURS = 3
+RELANCE_LIMITE_JOURS = 10
 PARRAINAGE_JOURS = 20
 # Un parrainage se declare dans les deux semaines qui suivent l'arrivee du
 # bot : c'est le moment ou l'on sait qui nous l'a conseille. Au-dela, un
@@ -129,6 +134,25 @@ def essais_a_prevenir(donnees, instant=None):
                 a_faire.append((gid, "fin"))
         elif instant >= fin - timedelta(days=1) and not essai.get("prevenu_veille"):
             a_faire.append((gid, "veille"))
+    return a_faire
+
+
+def essais_a_relancer(donnees, instant=None):
+    """
+    Les serveurs dont l'essai s'est termine il y a trois jours, une seule
+    fois chacun. La fenetre se referme : un bot arrete deux semaines ne
+    doit pas relancer, au reveil, des essais oublies depuis longtemps.
+    """
+    donnees = normaliser(donnees)
+    instant = instant or maintenant()
+    a_faire = []
+    for gid, essai in donnees["essais"].items():
+        fin = _date((essai or {}).get("fin"))
+        if fin is None or essai.get("prevenu_relance"):
+            continue
+        age = instant - fin
+        if timedelta(days=RELANCE_JOURS) <= age <= timedelta(days=RELANCE_LIMITE_JOURS):
+            a_faire.append(gid)
     return a_faire
 
 
