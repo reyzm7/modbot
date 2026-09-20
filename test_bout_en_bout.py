@@ -71,7 +71,7 @@ class FauxPermissions:
     def __init__(self, tout=True):
         for nom in ("ban_members", "kick_members", "manage_roles",
                     "manage_channels", "moderate_members", "view_audit_log",
-                    "manage_guild", "administrator"):
+                    "manage_guild", "administrator", "manage_messages"):
             setattr(self, nom, tout)
 
 
