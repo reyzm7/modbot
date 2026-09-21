@@ -5180,7 +5180,9 @@ async def handle_scam_message(message, detection):
         guild, "security", "Publicite d'arnaque bloquee",
         f"Un message a ete retire pour publicite d'arnaque ou de service de nuke.",
         fields=champs, severity="critical", target=auteur)
-    dashboard_log("antiscam", guild, str(auteur), detection["extrait"])
+    # Les signaux disent pourquoi le message a ete bloque ; son texte,
+    # lui, reste sur Discord, dans le salon de logs.
+    dashboard_log("antiscam", guild, str(auteur), ", ".join(detection.get("signaux") or []))
 
     # 3. Un bot qui vend du nuke est une tentative d'attaque, pas du spam :
     #    les administrateurs sont prevenus comme pour un raid.
@@ -16796,6 +16798,51 @@ def init_security_database():
 
 init_security_database()
 
+
+def effacer_contenu_des_journaux():
+    """
+    Efface le texte de message deja enregistre par les versions d'avant.
+
+    Idempotent : une fois vide, rien ne change aux demarrages suivants.
+    Le 21/09/2026, la copie en base du texte des messages supprimes et
+    modifies a ete arretee ; ce qui avait deja ete ecrit ne devait pas
+    rester. Rend le nombre de lignes et d'entrees nettoyees.
+    """
+    nettoyees = 0
+    try:
+        with db_connect() as conn:
+            for requete in (
+                "UPDATE guild_logs SET payload_json = '{}' "
+                "WHERE payload_json IS NOT NULL AND payload_json NOT IN ('', '{}')",
+                "UPDATE dashboard_events SET payload_json = '{}' "
+                "WHERE payload_json IS NOT NULL AND payload_json NOT IN ('', '{}')",
+                # L'extrait d'une arnaque etait range dans le detail.
+                "UPDATE dashboard_events SET detail = '' "
+                "WHERE action = 'antiscam' AND detail IS NOT NULL AND detail != ''",
+            ):
+                nettoyees += conn.execute(requete).rowcount or 0
+    except Exception as ex:
+        print(f"Effacement du contenu des journaux : {ex}")
+    try:
+        journal = jload(F_DASHBOARD_LOGS)
+        if isinstance(journal, list):
+            change = 0
+            for entree in journal:
+                if isinstance(entree, dict) and entree.get("action") == "antiscam" and entree.get("detail"):
+                    entree["detail"] = ""
+                    change += 1
+            if change:
+                jsave(F_DASHBOARD_LOGS, journal)
+                nettoyees += change
+    except Exception as ex:
+        print(f"Effacement du journal du tableau de bord : {ex}")
+    if nettoyees:
+        print(f"Contenu de messages efface des journaux : {nettoyees} ligne(s).")
+    return nettoyees
+
+
+effacer_contenu_des_journaux()
+
 # --- instances partagees ------------------------------------------------------
 F_INFRACTIONS = chemin_donnees("infractions.json")
 D_BACKUPS = os.environ.get("MODBOT_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
@@ -17075,7 +17122,12 @@ async def log_event(guild, category, title, description="", fields=None, color=N
         target=str(target) if target else "",
         target_id=str(getattr(target, "id", "") or ""),
         severity=severity,
-        payload={"fields": [[str(n), str(v)] for n, v in (fields or [])]},
+        # Les champs ne sont PAS enregistres : ils portent le texte des
+        # messages (supprimes, modifies, sanctionnes). Ils partent dans
+        # l'embed du salon de logs, sur Discord, et nulle part ailleurs.
+        # Rien ne relisait cette copie ; elle faisait mentir la politique
+        # de confidentialite.
+        payload={},
     )
 
     if not log_category_enabled(gid, category):
