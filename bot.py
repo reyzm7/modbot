@@ -1795,12 +1795,50 @@ def immuniser_admins(gid):
     return bool(get_cfg(gid).get("immuniser_admins", True))
 
 
+def immuniser_staff(gid):
+    """
+    Le staff echappe-t-il a TOUTES les sanctions automatiques ?
+
+    Actif par defaut. Une annonce du staff porte le lien du serveur et un
+    @everyone : exactement ce qu'une publicite d'arnaque contient aussi.
+    Sans cette immunite, l'anti-arnaque supprimait l'annonce et inscrivait
+    trois points d'infraction a son auteur — c'est arrive le 21/09/2026.
+
+    Ne dit rien de l'anti-nuke, qui a son propre reglage (`trust_staff`).
+    """
+    return bool(get_cfg(gid).get("immuniser_staff", True))
+
+
+def est_du_staff(member, gid):
+    """
+    Le staff, au sens de l'immunite : qui peut deja moderer.
+
+    Les roles staff du serveur et le role support des tickets (voir
+    `is_staff`), mais aussi quiconque a le droit de gerer les messages ou
+    le serveur : un moderateur qui peut supprimer un message n'a pas a
+    voir les siens supprimes par un filtre. Personne n'a a configurer quoi
+    que ce soit pour que son equipe soit reconnue.
+    """
+    if member is None or getattr(member, "bot", False):
+        return False
+    perms = getattr(member, "guild_permissions", None)
+    if perms and (perms.administrator or perms.manage_guild or perms.manage_messages):
+        return True
+    try:
+        return is_staff(member, gid)
+    except Exception:
+        return False
+
+
 def est_immunise(member, gid):
     """
     Exempt des sanctions AUTOMATIQUES : filtre de langage, anti-spam,
-    anti-lien. Ne dit rien de l'anti-nuke, ni des sanctions manuelles d'un
-    moderateur (`/warn`, `/ban`), qui restent volontairement possibles.
+    anti-lien, garde de nuit — et l'anti-arnaque pour le staff. Ne dit
+    rien de l'anti-nuke, ni des sanctions manuelles d'un moderateur
+    (`/warn`, `/ban`), qui restent volontairement possibles.
     """
+    if immuniser_staff(gid) and est_du_staff(member, gid):
+        return True
     if str(member.id) in {str(mid) for mid in get_members_imm(gid)}:
         return True
     immune_roles = {str(rid) for rid in get_roles_imm(gid)}
@@ -5031,6 +5069,11 @@ async def _retirer_bot_malveillant(guild, membre, motif):
     return ", ".join(resultat)
 
 
+def epargne_par_antiarnaque(auteur, gid):
+    """Vrai si ce membre ne doit pas etre inspecte par l'anti-arnaque."""
+    return immuniser_staff(gid) and est_du_staff(auteur, gid)
+
+
 async def verifier_arnaque(message):
     """
     Analyse un message et agit s'il s'agit d'une arnaque.
@@ -5053,6 +5096,12 @@ async def verifier_arnaque(message):
         return False
     # ModBot ne s'analyse pas lui-meme.
     if auteur.id == getattr(bot.user, "id", 0):
+        return False
+    # Le staff, quand son immunite est active. Son annonce porte le lien
+    # du serveur et un @everyone : les signaux memes d'une arnaque. Seul
+    # le staff en est dispense — un membre immunise a la main reste
+    # inspecte, car un compte vole qui poste une arnaque doit etre arrete.
+    if epargne_par_antiarnaque(auteur, gid):
         return False
 
     detection = sc.detect_scam_payload(texte_complet_message(message),
@@ -7548,6 +7597,7 @@ def serialize_security_config(guild):
             "allowlist": filt["allowlist"],
             "custom_words": get_custom(gid),
             "immunize_admins": immuniser_admins(gid),
+            "immunize_staff": immuniser_staff(gid),
         },
         "safe_mode_active": RAID.safe_mode_active(gid),
         "captcha": {
@@ -7714,6 +7764,7 @@ async def api_save_guild_security(request):
         current["auto_restore"] = bool(nuke.get("auto_restore", current.get("auto_restore")))
         current["trust_owner"] = bool(nuke.get("trust_owner", current.get("trust_owner")))
         current["trust_admins"] = bool(nuke.get("trust_admins", current.get("trust_admins", False)))
+        current["trust_staff"] = bool(nuke.get("trust_staff", current.get("trust_staff", False)))
         for field in ("whitelist_users", "whitelist_roles"):
             if isinstance(nuke.get(field), list):
                 current[field] = [str(parse_int(x)) for x in nuke[field] if parse_int(x)][:100]
@@ -7725,6 +7776,8 @@ async def api_save_guild_security(request):
         cfg["insultes_tolerant"] = bool(filt.get("tolerant", cfg.get("insultes_tolerant", True)))
         cfg["immuniser_admins"] = bool(
             filt.get("immunize_admins", cfg.get("immuniser_admins", True)))
+        cfg["immuniser_staff"] = bool(
+            filt.get("immunize_staff", cfg.get("immuniser_staff", True)))
         if isinstance(filt.get("ladder"), list):
             cfg["sanction_ladder"] = sc.normalize_ladder(filt["ladder"])
         if isinstance(filt.get("allowlist"), list):
@@ -17806,7 +17859,8 @@ async def guard_sensitive_action(guild, actor, action_key, detail, restore=None)
     if sc.is_whitelisted(actor.id, role_ids, guild.owner_id,
                          getattr(bot.user, "id", None), cfg,
                          is_admin=bool(perms and perms.administrator),
-                         is_bot=bool(getattr(actor, "bot", False))):
+                         is_bot=bool(getattr(actor, "bot", False)),
+                         is_staff=bool(member and is_staff(member, gid))):
         return
 
     result = NUKE.register(gid, actor.id, action_key, cfg.get("limits"))
@@ -18511,7 +18565,8 @@ def build_security_status_embed(guild):
                f"Restauration auto : {'🟢 oui' if nuke.get('auto_restore') else '🔴 non'}\n"
                f"Whitelist : `{len(nuke.get('whitelist_users') or [])}` membres · "
                f"`{len(nuke.get('whitelist_roles') or [])}` roles\n"
-               f"Admins surveilles : {'🔴 non' if nuke.get('trust_admins') else '🟢 oui'}"),
+               f"Admins surveilles : {'🔴 non' if nuke.get('trust_admins') else '🟢 oui'}\n"
+               f"Staff surveille : {'🔴 non' if nuke.get('trust_staff') else '🟢 oui'}"),
         inline=True,
     )
     embed.add_field(
@@ -18519,7 +18574,8 @@ def build_security_status_embed(guild):
         value=(f"{status_badge(filt['enabled'], gid)}\n"
                f"Detection avancee : {'🟢 oui' if filt['tolerant'] else '🔴 non'}\n"
                f"Paliers : `{len(filt['ladder'])}`\n"
-               f"Admins immunises : {'🟢 oui' if immuniser_admins(gid) else '🔴 non'}"),
+               f"Admins immunises : {'🟢 oui' if immuniser_admins(gid) else '🔴 non'}\n"
+               f"Staff immunise : {'🟢 oui' if immuniser_staff(gid) else '🔴 non'}"),
         inline=True,
     )
 
@@ -18633,6 +18689,49 @@ async def security_antinuke(i: discord.Interaction, actif: bool,
     await log_event(i.guild, "admin", "Configuration anti-nuke modifiee",
                     f"Anti-nuke {'active' if cfg['enabled'] else 'desactive'}.",
                     severity="info", actor=i.user)
+
+@security_group.command(name="staff", description="L'immunite du staff face aux protections automatiques")
+@app_commands.describe(
+    filtres="Le staff echappe au filtre, a l'anti-spam, a l'anti-lien et a l'anti-arnaque",
+    antinuke="DECONSEILLE : le staff n'est plus surveille par l'anti-nuke")
+async def security_staff(i: discord.Interaction, filtres: bool = None, antinuke: bool = None):
+    await _safe_defer(i)
+    gid = str(i.guild.id)
+    if filtres is not None:
+        update_cfg(gid, "immuniser_staff", bool(filtres))
+    if antinuke is not None:
+        set_nuke_cfg(gid, trust_staff=bool(antinuke))
+    nuke = get_nuke_cfg(gid)
+
+    changement = filtres is not None or antinuke is not None
+    embed = (embed_success("Immunite du staff mise a jour", "", gid) if changement
+             else embed_base("Immunite du staff",
+                             "Qui fait partie du staff, et ce qui l'epargne.",
+                             Palette.PRIMARY, gid, ICONS["security"]))
+    embed.add_field(
+        name="👮 Le staff, pour ModBot",
+        value=("Les administrateurs, les roles staff du serveur, le role support "
+               "des tickets, et quiconque peut gerer les messages ou le serveur."),
+        inline=False)
+    embed.add_field(
+        name="🛡️ Sanctions automatiques",
+        value=(f"{'🟢 le staff y echappe' if immuniser_staff(gid) else '🔴 le staff est filtre comme tout le monde'}\n"
+               "Filtre de langage, anti-spam, anti-lien, garde de nuit, anti-arnaque."),
+        inline=False)
+    embed.add_field(
+        name="💥 Anti-nuke",
+        value=("🔴 le staff n'est plus surveille" if nuke.get("trust_staff")
+               else "🟢 le staff reste surveille"),
+        inline=False)
+    if nuke.get("trust_staff"):
+        embed.add_field(
+            name="⚠️ A savoir",
+            value=("Un nuke vient presque toujours d'un compte du staff pirate. "
+                   "Tant que ce reglage est actif, l'anti-nuke ne l'arretera pas. "
+                   "Pour un seul membre de confiance, preferez `/securite whitelist`."),
+            inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+
 
 @security_group.command(name="whitelist", description="Gerer la liste blanche anti-nuke")
 @app_commands.describe(action="Ajouter ou retirer", membre="Membre de confiance", role="Role de confiance")

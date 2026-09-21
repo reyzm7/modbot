@@ -680,6 +680,12 @@ DEFAULT_NUKE_CONFIG = {
     # trois scenarios qu'il existe pour couvrir. Reglage laisse a l'utilisateur,
     # mais jamais actif par defaut.
     "trust_admins": False,
+    # Le staff (administrateurs, roles staff du serveur, role support des
+    # tickets) echappe-t-il a l'anti-nuke ? Faux par defaut, pour la meme
+    # raison que trust_admins : un compte staff vole est precisement le
+    # cas que l'anti-nuke existe pour arreter. Le choix appartient au
+    # serveur, par /securite staff.
+    "trust_staff": False,
     "auto_restore": True,
 }
 
@@ -755,7 +761,7 @@ class NukeGuard:
 
 
 def is_whitelisted(user_id, role_ids, guild_owner_id, bot_id, config=None,
-                   is_admin=False, is_bot=False):
+                   is_admin=False, is_bot=False, is_staff=False):
     """
     Un acteur est de confiance si :
       * c'est le bot lui-meme
@@ -763,8 +769,10 @@ def is_whitelisted(user_id, role_ids, guild_owner_id, bot_id, config=None,
       * son id figure dans whitelist_users
       * un de ses roles figure dans whitelist_roles
       * il est administrateur ET trust_admins est active (desactive par defaut)
+      * il fait partie du staff ET trust_staff est active (desactive par defaut)
 
-    `is_admin` est calcule par l'appelant : ce module ne connait pas discord.py.
+    `is_admin` et `is_staff` sont calcules par l'appelant : ce module ne
+    connait pas discord.py.
 
     Les bots administrateurs ne beneficient jamais de `trust_admins`, meme
     active. Un bot malveillant a qui on vient de donner les pleins pouvoirs
@@ -784,6 +792,9 @@ def is_whitelisted(user_id, role_ids, guild_owner_id, bot_id, config=None,
     if whitelisted_roles and any(str(rid) in whitelisted_roles for rid in (role_ids or [])):
         return True
     if is_admin and not is_bot and cfg.get("trust_admins", False):
+        return True
+    # Meme regle pour le staff : jamais un bot, jamais sans l'avoir demande.
+    if is_staff and not is_bot and cfg.get("trust_staff", False):
         return True
     return False
 

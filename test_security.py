@@ -313,6 +313,23 @@ class TestAntiNuke(unittest.TestCase):
         self.assertFalse(
             sc.is_whitelisted("900", [], None, None, cfg, is_admin=True, is_bot=True))
 
+    def test_staff_surveille_par_defaut(self):
+        """
+        Le staff echappe aux filtres, pas a l'anti-nuke : un compte staff
+        vole est exactement ce que l'anti-nuke existe pour arreter. Ce
+        test doit rester vert tant que trust_staff n'est pas demande.
+        """
+        self.assertFalse(sc.DEFAULT_NUKE_CONFIG["trust_staff"])
+        self.assertFalse(sc.is_whitelisted("777", [], None, None, {}, is_staff=True))
+
+    def test_confiance_staff_explicite(self):
+        cfg = {"trust_staff": True}
+        self.assertTrue(sc.is_whitelisted("777", [], None, None, cfg, is_staff=True))
+        self.assertFalse(sc.is_whitelisted("778", [], None, None, cfg, is_staff=False))
+        # Un bot du staff n'y gagne jamais rien.
+        self.assertFalse(
+            sc.is_whitelisted("900", [], None, None, cfg, is_staff=True, is_bot=True))
+
     def test_signature_retrocompatible(self):
         """Les appels existants, sans les nouveaux arguments, doivent tenir."""
         self.assertTrue(sc.is_whitelisted("123", [], None, None, {"whitelist_users": ["123"]}))
