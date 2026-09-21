@@ -124,6 +124,23 @@ verifier("mais plus celle de l'anti-arnaque",
          not bot_mod.epargne_par_antiarnaque(admin, GID))
 bot_mod.update_cfg(GID, "immuniser_staff", True)
 
+# Un administrateur dont le serveur a coupe l'immunite reste filtre,
+# meme si l'immunite du staff est active : le choix explicite l'emporte.
+bot_mod.update_cfg(GID, "immuniser_admins", False)
+verifier("couper l'immunite des admins les expose, staff ou non",
+         not bot_mod.est_immunise(admin, GID))
+verifier("y compris a l'anti-arnaque",
+         not bot_mod.epargne_par_antiarnaque(admin, GID))
+verifier("le moderateur non administrateur, lui, reste immunise",
+         bot_mod.est_immunise(moderateur, GID))
+bot_mod.update_cfg(GID, "immuniser_admins", True)
+
+# Un objet de permissions partiel ne fait pas planter la decision.
+partiel = FauxMembre(440000000000007707)
+partiel.guild_permissions = type("P", (), {"administrator": False})()
+verifier("des permissions partielles ne font rien planter",
+         bot_mod.est_immunise(partiel, GID) is False)
+
 
 # ══════════════════════════════════════════════════════════════════════
 print("\n--- L'anti-nuke surveille le staff tant qu'on ne dit pas le contraire ---")

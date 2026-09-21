@@ -1822,12 +1822,18 @@ def est_du_staff(member, gid):
     if member is None or getattr(member, "bot", False):
         return False
     perms = getattr(member, "guild_permissions", None)
-    if perms and (perms.administrator or perms.manage_guild or perms.manage_messages):
+    if perms and any(getattr(perms, droit, False)
+                     for droit in ("administrator", "manage_guild", "manage_messages")):
         return True
     try:
         return is_staff(member, gid)
     except Exception:
         return False
+
+
+def _est_administrateur(member):
+    perms = getattr(member, "guild_permissions", None)
+    return bool(perms and getattr(perms, "administrator", False))
 
 
 def est_immunise(member, gid):
@@ -1837,15 +1843,18 @@ def est_immunise(member, gid):
     rien de l'anti-nuke, ni des sanctions manuelles d'un moderateur
     (`/warn`, `/ban`), qui restent volontairement possibles.
     """
-    if immuniser_staff(gid) and est_du_staff(member, gid):
-        return True
+    # D'abord ce qu'on a designe a la main : un membre, un role.
     if str(member.id) in {str(mid) for mid in get_members_imm(gid)}:
         return True
     immune_roles = {str(rid) for rid in get_roles_imm(gid)}
     if any(str(r.id) in immune_roles for r in getattr(member, "roles", [])):
         return True
-    perms = getattr(member, "guild_permissions", None)
-    return bool(perms and perms.administrator and immuniser_admins(gid))
+    # Un administrateur suit son propre reglage, qui existait avant celui
+    # du staff : si le serveur l'a coupe, c'etait voulu, et l'immunite du
+    # staff ne le lui rend pas en douce.
+    if _est_administrateur(member):
+        return immuniser_admins(gid)
+    return immuniser_staff(gid) and est_du_staff(member, gid)
 
 # ════════════════════════════════════════════════
 #  AVERTISSEMENTS & SANCTIONS PROGRESSIVES
@@ -5071,7 +5080,13 @@ async def _retirer_bot_malveillant(guild, membre, motif):
 
 def epargne_par_antiarnaque(auteur, gid):
     """Vrai si ce membre ne doit pas etre inspecte par l'anti-arnaque."""
-    return immuniser_staff(gid) and est_du_staff(auteur, gid)
+    if not (immuniser_staff(gid) and est_du_staff(auteur, gid)):
+        return False
+    # Meme priorite que pour les filtres : un administrateur dont le
+    # serveur a coupe l'immunite reste inspecte.
+    if _est_administrateur(auteur):
+        return immuniser_admins(gid)
+    return True
 
 
 async def verifier_arnaque(message):
