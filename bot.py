@@ -6830,7 +6830,11 @@ def serialize_dashboard_config(guild):
             "filtre_channels": salons_exempts(gid, "filtre"),
             "insultes_enabled": cfg.get("insultes_enabled", True),
             "antispam": bool(cfg.get("anti_spam")),
-            "antiraid": bool(cfg.get("antiraid")),
+            # La vraie config de l'anti-raid, pas le booleen historique :
+            # celui-ci vaut « non » sur un serveur qui n'y a jamais touche,
+            # alors que l'anti-raid y est actif par defaut.
+            "antiraid": bool(get_raid_cfg(gid).get("enabled")),
+            "antiscam": bool(antiscam_cfg(gid).get("enabled")),
             "staff_alert": bool(cfg.get("staff_alert_enabled")),
             "lockdown": bool(cfg.get("lockdown")),
             "default_words": INSULTES_BASE,
@@ -7086,7 +7090,16 @@ async def apply_dashboard_config(guild, payload):
     if "antispam" in security:
         cfg["anti_spam"] = bool(security.get("antispam"))
     if "antiraid" in security:
-        cfg["antiraid"] = bool(security.get("antiraid"))
+        # La carte de la grille et la section detaillee reglent la meme
+        # chose : elles ecrivent au meme endroit. Le booleen historique
+        # suit, pour les lectures qui le consultent encore.
+        raid = get_raid_cfg(gid)
+        raid["enabled"] = bool(security.get("antiraid"))
+        cfg["antiraid_config"] = raid
+        cfg["antiraid"] = raid["enabled"]
+    if "antiscam" in security:
+        anti = cfg.get("antiscam") if isinstance(cfg.get("antiscam"), dict) else {}
+        cfg["antiscam"] = {**anti, "enabled": bool(security.get("antiscam"))}
     if "staff_alert" in security:
         cfg["staff_alert_enabled"] = bool(security.get("staff_alert"))
     if "lockdown" in security:
