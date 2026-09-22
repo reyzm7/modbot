@@ -699,7 +699,8 @@ def verifier_commandes():
     # Toute commande de moderation doit porter un garde-fou.
     source = io.open("bot.py", encoding="utf-8").read()
     SENSIBLES = ("ban", "deban", "warn", "massdm", "clear-all", "clear-message",
-                 "annonce", "panel", "reset-avert", "infractions-reset")
+                 "annonce", "panel", "reset-avert", "infractions-reset",
+                 "massrole", "demassrole")
     sans_garde = []
     for nom in SENSIBLES:
         i = source.find(f'name="{nom}"')

@@ -893,6 +893,170 @@ class BackupStore:
         self._write(guild_id, remaining)
         return True
 
+    def import_snapshot(self, guild_id, snapshot, author="", note=""):
+        """
+        Range une sauvegarde venue d'un fichier parmi celles de ce serveur.
+
+        Elle ne s'applique pas : elle rejoint la liste, et se restaure
+        ensuite comme les autres, avec la meme confirmation.
+        """
+        entry = self.create(guild_id, snapshot, author=author, note=note)
+        return {k: v for k, v in entry.items() if k != "data"}
+
+
+# ── Le fichier d'une sauvegarde ─────────────────────────────────────────
+#
+# Telecharger une sauvegarde, c'est pouvoir la remettre en place ailleurs :
+# sur un serveur neuf apres une attaque, sur un second serveur monte sur le
+# meme modele, ou simplement la garder hors de Discord.
+#
+# Un fichier qu'on reimporte vient de l'exterieur : il a pu etre modifie a
+# la main. Rien n'en est repris tel quel — chaque champ est relu, borne,
+# retype. Les reglages de ModBot n'y figurent pas : ils ont leur propre
+# export, qui sait ce qui peut passer d'un serveur a l'autre.
+
+BACKUP_FORMAT = "modbot-backup"
+BACKUP_FILE_VERSION = 1
+# Les plafonds de Discord : 250 roles, 500 salons categories comprises.
+BACKUP_MAX_ROLES = 250
+BACKUP_MAX_CHANNELS = 500
+BACKUP_MAX_OVERWRITES = 100
+BACKUP_CHANNEL_TYPES = ("text", "voice", "category", "forum", "stage")
+# Les permissions Discord tiennent aujourd'hui sur une cinquantaine de bits.
+_PERMISSIONS_MAX = (1 << 60) - 1
+
+
+def backup_export(entry):
+    """Le document a telecharger pour cette sauvegarde, reglages exclus."""
+    data = dict((entry or {}).get("data") or {})
+    data.pop("settings", None)
+    guild = data.get("guild") or {}
+    return {
+        "format": BACKUP_FORMAT,
+        "version": BACKUP_FILE_VERSION,
+        "id": str((entry or {}).get("id") or ""),
+        "created_at": str((entry or {}).get("created_at") or ""),
+        "note": str((entry or {}).get("note") or "")[:200],
+        "source": {"id": str(guild.get("id") or ""), "name": str(guild.get("name") or "")[:100]},
+        "counts": (entry or {}).get("counts") or {},
+        "data": data,
+    }
+
+
+def _texte(brut, longueur, defaut=""):
+    texte = str(brut if brut is not None else defaut).replace("\x00", "").strip()
+    return texte[:longueur]
+
+
+def _entier(brut, bas, haut, defaut=0):
+    try:
+        valeur = int(str(brut).strip())
+    except (TypeError, ValueError):
+        return defaut
+    return max(bas, min(haut, valeur))
+
+
+def _ident(brut):
+    texte = str(brut or "").strip()
+    return texte if texte.isdigit() and len(texte) <= 21 else ""
+
+
+def _bits(brut):
+    return str(_entier(brut, 0, _PERMISSIONS_MAX, 0))
+
+
+def _role_propre(item):
+    if not isinstance(item, dict) or item.get("managed"):
+        return None
+    nom = _texte(item.get("name"), 100)
+    if not nom or nom == "@everyone":
+        return None
+    return {
+        "id": _ident(item.get("id")),
+        "name": nom,
+        "color": _entier(item.get("color"), 0, 0xFFFFFF),
+        "permissions": _bits(item.get("permissions")),
+        "hoist": bool(item.get("hoist")),
+        "mentionable": bool(item.get("mentionable")),
+        "position": _entier(item.get("position"), 0, 1000),
+        "managed": False,
+    }
+
+
+def _salon_propre(item, categorie=False):
+    if not isinstance(item, dict):
+        return None
+    nom = _texte(item.get("name"), 100)
+    if not nom:
+        return None
+    genre = "category" if categorie else str(item.get("type") or "text")
+    if genre not in BACKUP_CHANNEL_TYPES or (genre == "category") != categorie:
+        genre = "category" if categorie else "text"
+    droits = []
+    for ow in (item.get("overwrites") or [])[:BACKUP_MAX_OVERWRITES]:
+        if not isinstance(ow, dict):
+            continue
+        cible = "member" if ow.get("type") == "member" else "role"
+        ident = _ident(ow.get("id"))
+        nom_cible = _texte(ow.get("name"), 100)
+        if not ident and not nom_cible:
+            continue
+        droits.append({"type": cible, "id": ident, "name": nom_cible,
+                       "allow": _bits(ow.get("allow")), "deny": _bits(ow.get("deny"))})
+    return {
+        "id": _ident(item.get("id")),
+        "name": nom,
+        "type": genre,
+        "position": _entier(item.get("position"), 0, 1000),
+        "category_id": "" if categorie else _ident(item.get("category_id")),
+        "category_name": "" if categorie else _texte(item.get("category_name"), 100),
+        "topic": _texte(item.get("topic"), 1024),
+        "nsfw": bool(item.get("nsfw")),
+        "slowmode": _entier(item.get("slowmode"), 0, 21600),
+        "bitrate": _entier(item.get("bitrate"), 0, 384000),
+        "user_limit": _entier(item.get("user_limit"), 0, 99),
+        "overwrites": droits,
+    }
+
+
+def backup_import_clean(document):
+    """
+    (instantane, nom du serveur d'origine) d'un fichier de sauvegarde.
+
+    Accepte le fichier telecharge depuis ModBot, mais aussi une entree
+    brute de sauvegarde ou un instantane nu. Leve ValueError, avec une
+    phrase lisible, si le fichier n'est pas une sauvegarde.
+    """
+    if not isinstance(document, dict):
+        raise ValueError("Ce fichier n'est pas une sauvegarde ModBot.")
+    fmt = document.get("format")
+    if fmt is not None and fmt != BACKUP_FORMAT:
+        raise ValueError("Ce fichier n'est pas une sauvegarde ModBot.")
+    data = document.get("data") if isinstance(document.get("data"), dict) else document
+    if not any(isinstance(data.get(k), list) for k in ("roles", "categories", "channels")):
+        raise ValueError("Ce fichier ne contient ni roles ni salons.")
+
+    roles = [r for r in map(_role_propre, (data.get("roles") or [])[:BACKUP_MAX_ROLES * 2]) if r]
+    categories = [c for c in (_salon_propre(x, True) for x in (data.get("categories") or [])[:BACKUP_MAX_CHANNELS]) if c]
+    salons = [c for c in (_salon_propre(x) for x in (data.get("channels") or [])[:BACKUP_MAX_CHANNELS * 2]) if c]
+    roles = roles[:BACKUP_MAX_ROLES]
+    categories = categories[:BACKUP_MAX_CHANNELS]
+    salons = salons[:max(BACKUP_MAX_CHANNELS - len(categories), 0)]
+    if not roles and not categories and not salons:
+        raise ValueError("Ce fichier ne contient ni roles ni salons.")
+
+    source = data.get("guild") if isinstance(data.get("guild"), dict) else {}
+    origine = (document.get("source") or {}) if isinstance(document.get("source"), dict) else {}
+    nom = _texte(source.get("name") or origine.get("name"), 100)
+    snapshot = {
+        "version": 2,
+        "guild": {"id": _ident(source.get("id") or origine.get("id")), "name": nom},
+        "roles": roles,
+        "categories": categories,
+        "channels": salons,
+    }
+    return snapshot, nom
+
 
 # ════════════════════════════════════════════════════════════════════
 #  8. CAPTCHA

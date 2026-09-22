@@ -279,10 +279,21 @@ def anniversaires_du_jour(table, aujourdhui):
     return trouves
 
 
-def message_anniversaire(mentions):
-    """Un seul message pour tout le monde : dix messages, c'est du bruit."""
+def message_anniversaire(mentions, gabarit=""):
+    """
+    Un seul message pour tout le monde : dix messages, c'est du bruit.
+
+    Le serveur peut écrire le sien : `{membres}` y devient la liste des
+    personnes fêtées. Un texte qui ne cite personne n'est pas un
+    anniversaire — on garde alors la phrase par défaut.
+    """
     if not mentions:
         return ""
+    gabarit = str(gabarit or "").strip()
+    if gabarit and "{membres}" in gabarit:
+        liste = (mentions[0] if len(mentions) == 1
+                 else ", ".join(mentions[:-1]) + f" et {mentions[-1]}")
+        return gabarit.replace("{membres}", liste)[:1900]
     if len(mentions) == 1:
         return f"🎂 Joyeux anniversaire {mentions[0]} !"
     return ("🎂 Joyeux anniversaire "
@@ -445,3 +456,194 @@ def barre_de_vote(fiche, largeur=12):
     pleins = round(largeur * pour / total)
     return ("█" * pleins + "░" * (largeur - pleins)
             + f"  {pour} pour · {contre} contre")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §7. Le salon de comptage
+# ══════════════════════════════════════════════════════════════════════
+#
+# Le jeu que tous les serveurs connaissent : on compte, chacun son tour,
+# 1, 2, 3… Une erreur casse la série. Il tient les membres ensemble
+# parce qu'il demande d'être plusieurs : on ne compte pas seul, une
+# même personne ne joue jamais deux fois de suite.
+
+_NOMBRE = re.compile(r"^\s*(\d{1,9})(?!\d)")
+
+
+def lire_nombre(texte):
+    """Le nombre qui ouvre le message, ou None. « 12 enfin ! » compte pour 12."""
+    trouve = _NOMBRE.match(str(texte or ""))
+    return int(trouve.group(1)) if trouve else None
+
+
+def etat_comptage(brut):
+    brut = brut if isinstance(brut, dict) else {}
+    return {"actuel": _points(brut.get("actuel")),
+            "dernier": str(brut.get("dernier") or ""),
+            "record": _points(brut.get("record"))}
+
+
+def compter(etat, uid, nombre, seul_interdit=True, repartir=True):
+    """
+    (nouvel état, verdict, série cassée à).
+
+    Verdicts : « ok », « record » (le meilleur score vient de tomber),
+    « faux » (pas le bon nombre), « deux_fois » (la même personne deux
+    fois de suite). Sur une erreur, la série repart de zéro si le
+    serveur l'a voulu ; sinon on signale sans rien effacer.
+    """
+    etat = etat_comptage(etat)
+    uid = str(uid or "")
+    casse = etat["actuel"]
+    if seul_interdit and uid and etat["dernier"] == uid:
+        verdict = "deux_fois"
+    elif nombre != etat["actuel"] + 1:
+        verdict = "faux"
+    else:
+        nouveau = {"actuel": nombre, "dernier": uid, "record": max(etat["record"], nombre)}
+        return nouveau, ("record" if nombre > etat["record"] else "ok"), casse
+    if repartir:
+        return {"actuel": 0, "dernier": "", "record": etat["record"]}, verdict, casse
+    return etat, verdict, casse
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §8. Les réactions automatiques
+# ══════════════════════════════════════════════════════════════════════
+#
+# Un 👍 et un 👎 sous chaque idée, un ❤️ sous chaque photo : le bot pose
+# les réactions, les membres n'ont plus qu'à cliquer. Cinq au plus par
+# salon — au-delà, le message disparaît sous ses propres réactions.
+
+REACTIONS_SALONS_MAX = 10
+REACTIONS_PAR_SALON = 5
+_EMOJI_PERSO = re.compile(r"<a?:[A-Za-z0-9_]{2,32}:\d{15,21}>")
+
+
+def lire_emojis(brut):
+    """
+    Les emojis d'une saisie libre : « 👍 👎 », « 👍,👎 » ou une liste.
+
+    Un emoji personnalisé s'écrit <:nom:identifiant>. Un mot ordinaire
+    n'est pas un emoji : Discord refuserait la réaction, et le bot
+    l'essaierait sous chaque message pour rien.
+    """
+    if isinstance(brut, (list, tuple)):
+        morceaux = [str(x) for x in brut]
+    else:
+        morceaux = re.split(r"[\s,;]+", str(brut or ""))
+    emojis = []
+    for morceau in morceaux:
+        morceau = morceau.strip()
+        if not morceau or len(morceau) > 64:
+            continue
+        if _EMOJI_PERSO.fullmatch(morceau):
+            pass
+        elif re.search(r"[A-Za-z0-9<>:]", morceau) or len(morceau) > 12:
+            continue
+        if morceau not in emojis:
+            emojis.append(morceau)
+        if len(emojis) >= REACTIONS_PAR_SALON:
+            break
+    return emojis
+
+
+def lire_reactions_auto(brut):
+    """[{"salon", "emojis"}], un salon au plus une fois, sans ligne vide."""
+    propres, vus = [], set()
+    for ligne in brut or []:
+        if not isinstance(ligne, dict):
+            continue
+        salon = str(ligne.get("salon") or "").strip()
+        emojis = lire_emojis(ligne.get("emojis"))
+        if not salon.isdigit() or salon in vus or not emojis:
+            continue
+        vus.add(salon)
+        propres.append({"salon": salon, "emojis": emojis})
+        if len(propres) >= REACTIONS_SALONS_MAX:
+            break
+    return propres
+
+
+def emojis_du_salon(table, *salons):
+    """Les réactions à poser dans ce salon (ou le salon qui porte le fil)."""
+    cibles = [str(s) for s in salons if s]
+    for ligne in lire_reactions_auto(table):
+        if ligne["salon"] in cibles:
+            return ligne["emojis"]
+    return []
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §9. Les bonus d'expérience, et l'expérience en vocal
+# ══════════════════════════════════════════════════════════════════════
+#
+# Un serveur remercie ses boosters, ses donateurs, ses anciens : un rôle
+# peut multiplier l'expérience gagnée. Le plus fort des bonus s'applique,
+# ils ne s'additionnent pas — trois petits rôles ne doivent pas valoir
+# plus qu'un grand.
+
+BONUS_MAX = 10
+MULTIPLICATEUR_MIN, MULTIPLICATEUR_MAX = 1.1, 3.0
+
+
+def lire_bonus(brut):
+    propres, vus = [], set()
+    for ligne in brut or []:
+        if not isinstance(ligne, dict):
+            continue
+        role = str(ligne.get("role") or "").strip()
+        try:
+            valeur = round(float(str(ligne.get("multiplicateur") or 0).replace(",", ".")), 1)
+        except (TypeError, ValueError):
+            continue
+        if not role.isdigit() or role in vus:
+            continue
+        valeur = max(MULTIPLICATEUR_MIN, min(MULTIPLICATEUR_MAX, valeur))
+        vus.add(role)
+        propres.append({"role": role, "multiplicateur": valeur})
+        if len(propres) >= BONUS_MAX:
+            break
+    return propres
+
+
+def multiplicateur(bonus, roles_du_membre):
+    portes = {str(r) for r in roles_du_membre or []}
+    valeurs = [b["multiplicateur"] for b in lire_bonus(bonus) if b["role"] in portes]
+    return max(valeurs) if valeurs else 1.0
+
+
+def avec_bonus(points, facteur):
+    """Des points entiers : un classement en virgules ne se lit pas."""
+    return int(round(_points(points) * max(float(facteur or 1.0), 1.0)))
+
+
+# L'expérience en vocal : quelques points par minute passée à parler.
+# Seulement à plusieurs — seul dans un salon, on ne fait vivre personne —
+# et jamais en sourdine : un compte « garé » en vocal toute la nuit
+# gagnerait sans rien faire.
+XP_VOCAL_MIN, XP_VOCAL_MAX = 3, 6
+PAUSE_VOCAL = timedelta(seconds=55)
+
+
+def compte_en_vocal(humains_presents, sourd, salon_afk=False):
+    """Cette minute en vocal rapporte-t-elle quelque chose ?"""
+    return (not salon_afk) and (not sourd) and int(humains_presents or 0) >= 2
+
+
+def gagner_vocal(fiche, maintenant, points):
+    """
+    (fiche, niveau franchi ou None) — comme `gagner`, mais pour une
+    minute de vocal. Sa propre horloge : parler ne retarde pas
+    l'expérience des messages, et inversement.
+    """
+    fiche = dict(fiche or {})
+    dernier = _moment(fiche.get("vocal_le"))
+    if dernier is not None and maintenant - dernier < PAUSE_VOCAL:
+        return fiche, None
+    avant = niveau_de(fiche.get("xp"))
+    fiche["xp"] = _points(fiche.get("xp")) + max(_points(points), 0)
+    fiche["minutes_vocal"] = int(fiche.get("minutes_vocal") or 0) + 1
+    fiche["vocal_le"] = maintenant.isoformat()
+    apres = niveau_de(fiche["xp"])
+    return fiche, (apres if apres > avant else None)

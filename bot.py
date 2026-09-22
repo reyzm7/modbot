@@ -26,6 +26,8 @@ import boutique as bq
 import devis_pdf as dp
 import communaute as cm
 import rapport as rp
+import salons_proteges as sp
+import roles_masse as rm
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -331,6 +333,9 @@ F_ANNIVERSAIRES = chemin_donnees("anniversaires.json")
 F_RAPPELS = chemin_donnees("rappels.json")
 F_MUR = chemin_donnees("mur.json")
 F_VOTES = chemin_donnees("votes.json")
+# Le salon de comptage : ou en est la serie, qui a compte le dernier, le
+# record. Pas sauvegarde dans Discord : il change a chaque message.
+F_COMPTAGE = chemin_donnees("comptage.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -6317,6 +6322,9 @@ def serialize_role(role):
         "mention": role.mention,
         "color": f"#{int(role.color.value):06X}",
         "position": role.position,
+        # Les roles en masse le grisent dans leur liste : un role de
+        # moderation ne se distribue jamais a tout le serveur.
+        "dangereux": bool(rm.permissions_dangereuses(role.permissions.value)),
     }
 
 def dashboard_guild_logs(guild_id, limit=40):
@@ -6872,7 +6880,19 @@ def serialize_dashboard_config(guild):
             "anniv_salon": str(cfg.get("anniv_salon") or ""),
             "mur_salon": str(cfg.get("mur_salon") or ""),
             "mur_seuil": cm.lire_seuil(cfg.get("mur_seuil")),
+            "anniv_role": str(cfg.get("anniv_role") or ""),
+            "anniv_message": cfg.get("anniv_message") or "",
+            "comptage_salon": str(cfg.get("comptage_salon") or ""),
+            "comptage_repartir": cfg.get("comptage_repartir", True) is not False,
+            "comptage_seul": cfg.get("comptage_seul", True) is not False,
+            "comptage_record": cm.etat_comptage(_par_serveur(F_COMPTAGE, gid))["record"],
+            "reactions_auto": cm.lire_reactions_auto(cfg.get("reactions_auto")),
+            "xp_bonus": cm.lire_bonus(cfg.get("xp_bonus")),
+            "xp_vocal": bool(cfg.get("xp_vocal")),
         },
+        "salons_proteges": sp.lire_config(cfg.get("salons_proteges")),
+        "roles_masse": {**rm.lire_config(cfg.get("roles_masse")),
+                        "travail": massrole_etat(gid)},
         "events": evenements_cfg(gid),
         "premium": {
             **premium_etat(gid),
@@ -7020,6 +7040,48 @@ async def apply_dashboard_config(guild, payload):
                 cfg.pop(clef, None)
             else:
                 print(f"config {guild.id}: salon {clef} refuse (autre serveur)")
+        # Les ajouts du 22/09/2026. Chacun n'est touche que s'il est
+        # envoye : une page plus ancienne, qui ne les connait pas, ne
+        # doit pas les effacer en enregistrant autre chose.
+        if "comptage_salon" in vie:
+            parsed = id_salon_du_serveur(guild, vie.get("comptage_salon"))
+            if parsed:
+                cfg["comptage_salon"] = parsed
+            else:
+                cfg.pop("comptage_salon", None)
+        for clef in ("comptage_repartir", "comptage_seul", "xp_vocal"):
+            if clef in vie:
+                cfg[clef] = bool(vie.get(clef))
+        if "anniv_message" in vie:
+            cfg["anniv_message"] = clean_short_text(vie.get("anniv_message"), "", 400)
+        if "anniv_role" in vie:
+            role = guild.get_role(parse_int(vie.get("anniv_role")) or 0)
+            if role and not role.is_default() and not role.managed:
+                cfg["anniv_role"] = str(role.id)
+            else:
+                cfg.pop("anniv_role", None)
+        if isinstance(vie.get("xp_bonus"), list):
+            cfg["xp_bonus"] = [ligne for ligne in cm.lire_bonus(vie["xp_bonus"])
+                               if guild.get_role(int(ligne["role"]))]
+        if isinstance(vie.get("reactions_auto"), list):
+            cfg["reactions_auto"] = [ligne for ligne in cm.lire_reactions_auto(vie["reactions_auto"])
+                                     if id_salon_du_serveur(guild, ligne["salon"])]
+
+    # Les salons proteges et les roles en masse. Un salon ou un role d'un
+    # AUTRE serveur est ecarte, comme partout ailleurs.
+    proteges = payload.get("salons_proteges")
+    if isinstance(proteges, dict):
+        propre = sp.lire_config(proteges)
+        propre["salons"] = [s for s in propre["salons"] if id_salon_du_serveur(guild, s["id"])]
+        propre["roles_autorises"] = [r for r in propre["roles_autorises"]
+                                     if guild.get_role(int(r))]
+        cfg["salons_proteges"] = propre
+    masse = payload.get("roles_masse")
+    if isinstance(masse, dict):
+        propre = rm.lire_config(masse)
+        for clef in ("roles_interdits", "ignorer_roles"):
+            propre[clef] = [r for r in propre[clef] if guild.get_role(int(r))]
+        cfg["roles_masse"] = propre
 
     tickets = payload.get("tickets") or {}
     if tickets:
@@ -8017,6 +8079,47 @@ async def api_restore_backup(request):
                     severity="warning")
     return api_json({"ok": True, "report": report}, request=request)
 
+async def api_export_backup(request):
+    """Le fichier d'une sauvegarde : il se remet en place sur n'importe quel serveur."""
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    backup_id = str(request.match_info.get("backup_id") or "")
+    entry = BACKUPS.get(str(guild.id), backup_id)
+    if not entry:
+        raise web.HTTPNotFound(text="Sauvegarde introuvable.")
+    dashboard_log("backup_export", guild, identity.get("username"), backup_id)
+    return api_json(sc.backup_export(entry), request=request)
+
+
+async def api_import_backup(request):
+    """
+    Range un fichier de sauvegarde parmi celles de ce serveur.
+
+    Rien n'est applique : la sauvegarde rejoint la liste, et se restaure
+    ensuite avec la meme confirmation que les autres.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    try:
+        document = await request.json()
+    except Exception:
+        raise web.HTTPBadRequest(text="Fichier illisible : ce n'est pas une sauvegarde ModBot.")
+    try:
+        snapshot, origine = sc.backup_import_clean(document)
+    except ValueError as ex:
+        raise web.HTTPBadRequest(text=str(ex))
+    note = f"Importee de {origine}" if origine else "Importee d'un fichier"
+    try:
+        entry = BACKUPS.import_snapshot(str(guild.id), snapshot,
+                                        author=identity.get("username") or "Dashboard", note=note)
+    except Exception as ex:
+        raise web.HTTPInternalServerError(text=f"Import impossible : {ex}")
+    dashboard_log("backup_import", guild, identity.get("username"), entry["id"])
+    await log_event(guild, "admin", "Sauvegarde importee depuis le dashboard",
+                    f"Sauvegarde `{entry['id']}` ajoutee a la liste ({note}).", severity="info")
+    return api_json({"ok": True, "backup": entry}, request=request)
+
+
 async def api_delete_backup(request):
     identity = await api_identity(request)
     guild = await api_guild_from_request(request, identity)
@@ -8798,7 +8901,10 @@ DASHBOARD_PANELS = {
     "security": "Sécurité — anti-raid, anti-nuke, filtre de langage, captcha, alertes d'attaque",
     "moderation": "Modération — mots filtrés et échelle de sanctions",
     "search": "Recherche — chercher un membre ou un rôle pour le sanctionner ou l'immuniser",
-    "backups": "Sauvegardes — créer et restaurer une sauvegarde du serveur",
+    "backups": "Sauvegardes — créer, télécharger, importer et restaurer une sauvegarde du serveur, y compris sur un autre serveur",
+    "proteges": "Salons protégés — un message posté dans ces salons est supprimé aussitôt et son auteur averti ; mode « images seulement »",
+    "massroles": "Rôles en masse — donner ou retirer un rôle à tout le serveur (/massrole, /demassrole), et leurs réglages",
+    "communaute": "Vie du serveur — niveaux, bonus d'expérience, expérience en vocal, anniversaires, mur des messages, comptage, réactions automatiques",
     "logs": "Logs — journal des événements, par catégorie",
     "tickets": "Tickets — panneau de tickets, bannière, logo, catégories",
     "giveaways": "Giveaways — créer et gérer les tirages au sort",
@@ -13016,8 +13122,15 @@ async def start_dashboard_api():
     app.router.add_post("/api/guilds/{guild_id}/config/import", api_import_config)
     app.router.add_get("/api/guilds/{guild_id}/backups", api_guild_backups)
     app.router.add_post("/api/guilds/{guild_id}/backups", api_create_backup)
+    app.router.add_post("/api/guilds/{guild_id}/backups/import", api_import_backup)
     app.router.add_post("/api/guilds/{guild_id}/backups/{backup_id}/restore", api_restore_backup)
+    app.router.add_get("/api/guilds/{guild_id}/backups/{backup_id}/export", api_export_backup)
     app.router.add_delete("/api/guilds/{guild_id}/backups/{backup_id}", api_delete_backup)
+
+    # Roles en masse
+    app.router.add_get("/api/guilds/{guild_id}/massrole", api_massrole_etat)
+    app.router.add_post("/api/guilds/{guild_id}/massrole", api_massrole_lancer)
+    app.router.add_post("/api/guilds/{guild_id}/massrole/stop", api_massrole_arreter)
 
     # Publication
     app.router.add_post("/api/guilds/{guild_id}/tickets/publish", api_publish_ticket)
@@ -17861,13 +17974,34 @@ async def annuler_sanction_nuke(guild, actor_id, sanction):
 
     return "type de sanction inconnu"
 
-async def restore_deleted_channel(guild, snapshot):
+def cible_permission(guild, entry, role_map=None, source_guild_id=""):
+    """
+    Le role ou le membre qu'une permission sauvegardee designe ICI.
+
+    Sur le serveur d'origine, l'identifiant suffit. Ailleurs, il ne veut
+    rien dire : @everyone se reconnait a son nom (son identifiant est
+    celui du serveur d'origine), un role recree se retrouve par la table
+    de correspondance, un role deja present par son nom.
+    """
+    ident = parse_int(entry.get("id")) or 0
+    if entry.get("type") != "role":
+        return guild.get_member(ident) if ident else None
+    if entry.get("name") == "@everyone" or (source_guild_id and str(ident) == str(source_guild_id)):
+        return guild.default_role
+    if role_map and str(ident) in role_map:
+        return role_map[str(ident)]
+    role = guild.get_role(ident) if ident else None
+    if role is None and entry.get("name"):
+        role = discord.utils.get(guild.roles, name=entry["name"])
+    return role
+
+
+async def restore_deleted_channel(guild, snapshot, role_map=None, source_guild_id=""):
     """Recree un salon supprime a partir de son instantane."""
     try:
         overwrites = {}
         for entry in snapshot.get("overwrites", []):
-            target = (guild.get_role(int(entry["id"])) if entry["type"] == "role"
-                      else guild.get_member(int(entry["id"])))
+            target = cible_permission(guild, entry, role_map, source_guild_id)
             if target:
                 overwrites[target] = discord.PermissionOverwrite.from_pair(
                     discord.Permissions(int(entry["allow"])),
@@ -17884,6 +18018,13 @@ async def restore_deleted_channel(guild, snapshot):
         elif kind == "category":
             channel = await guild.create_category(
                 snapshot["name"], overwrites=overwrites, reason=reason)
+        elif kind == "stage" and hasattr(guild, "create_stage_channel"):
+            channel = await guild.create_stage_channel(
+                snapshot["name"], category=category, overwrites=overwrites, reason=reason)
+        elif kind == "forum" and hasattr(guild, "create_forum"):
+            channel = await guild.create_forum(
+                snapshot["name"], category=category, overwrites=overwrites,
+                topic=snapshot.get("topic") or None, reason=reason)
         else:
             channel = await guild.create_text_channel(
                 snapshot["name"], category=category, overwrites=overwrites,
@@ -18342,16 +18483,19 @@ async def restore_guild_snapshot(guild, snapshot, progress=None):
     report = {"roles": 0, "categories": 0, "channels": 0, "errors": []}
     existing_roles = {r.name.lower() for r in guild.roles}
     role_map = {}
+    # Le serveur d'ou vient la sauvegarde : sur un autre serveur, ses
+    # identifiants ne designent rien, il faut les traduire.
+    source = str((snapshot.get("guild") or {}).get("id") or "")
 
     for item in reversed(snapshot.get("roles") or []):
         if item.get("name", "").lower() in existing_roles:
             match = discord.utils.find(lambda r: r.name.lower() == item["name"].lower(), guild.roles)
             if match:
-                role_map[item["id"]] = match
+                role_map[str(item["id"])] = match
             continue
         role = await restore_deleted_role(guild, item)
         if role:
-            role_map[item["id"]] = role
+            role_map[str(item["id"])] = role
             report["roles"] += 1
         else:
             report["errors"].append(f"role @{item.get('name')}")
@@ -18364,7 +18508,8 @@ async def restore_guild_snapshot(guild, snapshot, progress=None):
         if found:
             category_map[item["id"]] = found
             continue
-        created = await restore_deleted_channel(guild, {**item, "type": "category", "category_id": ""})
+        created = await restore_deleted_channel(guild, {**item, "type": "category", "category_id": ""},
+                                                role_map, source)
         if created:
             category_map[item["id"]] = created
             report["categories"] += 1
@@ -18378,7 +18523,7 @@ async def restore_guild_snapshot(guild, snapshot, progress=None):
             continue
         target_category = category_map.get(item.get("category_id"))
         payload = {**item, "category_id": str(target_category.id) if target_category else ""}
-        created = await restore_deleted_channel(guild, payload)
+        created = await restore_deleted_channel(guild, payload, role_map, source)
         if created:
             report["channels"] += 1
         else:
@@ -18523,6 +18668,62 @@ async def backup_restore(i: discord.Interaction, identifiant: str):
                                             f"{report['channels']} salons")],
                     severity="warning", actor=i.user)
     dashboard_log("backup_restore", i.guild, str(i.user), entry["id"])
+
+@backup_group.command(name="export", description="Telecharger une sauvegarde en fichier, pour la remettre en place ailleurs")
+@app_commands.describe(identifiant="Identifiant de la sauvegarde (voir /backup list) ; vide = la plus recente")
+async def backup_export(i: discord.Interaction, identifiant: str = ""):
+    gid = str(i.guild.id)
+    entry = BACKUPS.get(gid, identifiant.strip()) if identifiant.strip() else BACKUPS.latest(gid)
+    if not entry:
+        return await send_error(i, "Sauvegarde introuvable",
+                                "Aucune sauvegarde a exporter. Cree-en une avec `/backup create`.")
+    contenu = json.dumps(sc.backup_export(entry), ensure_ascii=False, indent=1).encode("utf-8")
+    fichier = discord.File(io.BytesIO(contenu), filename=f"modbot-sauvegarde-{entry['id']}.json")
+    embed = embed_success(
+        "Sauvegarde exportee",
+        "Garde ce fichier : il se remet en place sur ce serveur ou sur n'importe quel autre, "
+        "avec `/backup import` ou depuis le tableau de bord (rubrique Sauvegardes).", gid)
+    try:
+        await i.response.send_message(embed=embed, file=fichier, ephemeral=True)
+    except Exception:
+        await i.followup.send(embed=embed, file=fichier, ephemeral=True)
+    dashboard_log("backup_export", i.guild, str(i.user), entry["id"])
+
+
+@backup_group.command(name="import", description="Importer un fichier de sauvegarde, venu de ce serveur ou d'un autre")
+@app_commands.describe(fichier="Le fichier .json obtenu avec /backup export ou depuis le tableau de bord")
+async def backup_import(i: discord.Interaction, fichier: discord.Attachment):
+    await _safe_defer(i)
+    gid = str(i.guild.id)
+    if (fichier.size or 0) > 8 * 1024 * 1024:
+        return await i.followup.send(embed=embed_error(
+            "Fichier trop lourd", "Une sauvegarde ModBot pese quelques centaines de Ko au plus.", gid),
+            ephemeral=True)
+    # Deux etapes distinctes : une erreur de lecture JSON est elle aussi
+    # une ValueError, et son message technique n'a rien a faire a l'ecran.
+    try:
+        document = json.loads((await fichier.read()).decode("utf-8-sig"))
+    except Exception:
+        return await i.followup.send(embed=embed_error(
+            "Fichier illisible", "Ce fichier n'est pas une sauvegarde ModBot.", gid), ephemeral=True)
+    try:
+        snapshot, origine = sc.backup_import_clean(document)
+    except ValueError as ex:
+        return await i.followup.send(embed=embed_error("Fichier refuse", str(ex), gid), ephemeral=True)
+    note = f"Importee de {origine}" if origine else "Importee d'un fichier"
+    entry = BACKUPS.import_snapshot(gid, snapshot, author=str(i.user), note=note)
+    counts = entry.get("counts") or {}
+    embed = embed_success("Sauvegarde importee", note, gid)
+    embed.add_field(name="🆔 Identifiant", value=f"`{entry['id']}`", inline=True)
+    embed.add_field(name="📦 Contenu", value=f"🎭 {counts.get('roles', 0)} roles · "
+                                             f"🗂️ {counts.get('categories', 0)} categories · "
+                                             f"📁 {counts.get('channels', 0)} salons", inline=False)
+    embed.add_field(name="♻️ La mettre en place",
+                    value=f"`/backup restore identifiant:{entry['id']}` — rien n'est supprime, "
+                          "seul ce qui manque est recree.", inline=False)
+    await i.followup.send(embed=embed, ephemeral=True)
+    dashboard_log("backup_import", i.guild, str(i.user), entry["id"])
+
 
 @backup_group.command(name="delete", description="Supprimer une sauvegarde")
 @app_commands.describe(identifiant="Identifiant de la sauvegarde a supprimer")
@@ -21805,6 +22006,7 @@ async def presence_loop():
 
 _anniversaires_task = None
 _rappels_membres_task = None
+_xp_vocal_task = None
 
 
 def _par_serveur(chemin, gid):
@@ -21855,7 +22057,9 @@ async def gagner_experience(message):
         return
     uid = str(message.author.id)
     table = xp_du_serveur(gid)
-    fiche, monte = cm.gagner(table.get(uid), now(), random.randint(cm.XP_MIN, cm.XP_MAX))
+    points = cm.avec_bonus(random.randint(cm.XP_MIN, cm.XP_MAX), cm.multiplicateur(
+        cfg.get("xp_bonus"), [r.id for r in getattr(message.author, "roles", [])]))
+    fiche, monte = cm.gagner(table.get(uid), now(), points)
     if fiche == table.get(uid):
         return
     xp_ecrire(gid, uid, fiche)
@@ -21868,6 +22072,59 @@ async def gagner_experience(message):
                                            cfg.get("xp_message")))
     except Exception as erreur:
         print(f"xp: annonce de niveau impossible ({gid}) : {erreur}")
+
+
+async def xp_vocal_loop():
+    """Une minute passee a parler, a plusieurs, rapporte quelques points."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        for guild in list(bot.guilds):
+            try:
+                await xp_vocal_du_serveur(guild)
+            except Exception as erreur:
+                print(f"xp vocal {guild.id}: {erreur}")
+        await asyncio.sleep(60)
+
+
+async def xp_vocal_du_serveur(guild):
+    gid = str(guild.id)
+    cfg = get_cfg(gid)
+    if not cfg.get("xp_enabled") or not cfg.get("xp_vocal"):
+        return
+    afk = getattr(guild, "afk_channel", None)
+    table = xp_du_serveur(gid)
+    montees, change = [], False
+    for salon in list(getattr(guild, "voice_channels", [])) + list(getattr(guild, "stage_channels", [])):
+        if not cm.salon_compte(cfg.get("xp_salons_exclus"), salon.id,
+                               getattr(salon, "category_id", None)):
+            continue
+        humains = [m for m in salon.members if not m.bot]
+        for membre in humains:
+            voix = membre.voice
+            sourd = bool(voix and (voix.self_deaf or voix.deaf))
+            if not cm.compte_en_vocal(len(humains), sourd, bool(afk and salon.id == afk.id)):
+                continue
+            points = cm.avec_bonus(random.randint(cm.XP_VOCAL_MIN, cm.XP_VOCAL_MAX),
+                                   cm.multiplicateur(cfg.get("xp_bonus"), [r.id for r in membre.roles]))
+            avant = table.get(str(membre.id))
+            fiche, monte = cm.gagner_vocal(avant, now(), points)
+            if fiche != avant:
+                table[str(membre.id)] = fiche
+                change = True
+            if monte is not None:
+                montees.append((membre, monte))
+    if change:
+        _ecrire_par_serveur(F_XP, gid, table)
+    annonce = salon_du_serveur(guild, cfg.get("xp_salon"))
+    for membre, niveau in montees:
+        await donner_recompenses_niveau(membre, niveau)
+        # Sans salon d'annonce choisi, rien n'est publie : un vocal n'a
+        # pas de « salon ou le membre ecrivait ».
+        if annonce is not None:
+            try:
+                await annonce.send(cm.message_niveau(membre.mention, niveau, cfg.get("xp_message")))
+            except Exception as erreur:
+                print(f"xp vocal: annonce impossible ({gid}) : {erreur}")
 
 
 async def donner_recompenses_niveau(membre, niveau):
@@ -22007,22 +22264,66 @@ async def souhaiter_les_anniversaires():
     """Un seul message par serveur et par jour, jamais dix mentions separees."""
     aujourdhui = now().date()
     for guild in list(bot.guilds):
-        gid = str(guild.id)
-        cfg = get_cfg(gid)
-        salon = salon_du_serveur(guild, cfg.get("anniv_salon"))
-        if salon is None:
-            continue
-        if str(cfg.get("anniv_dernier") or "") == aujourdhui.isoformat():
-            continue
-        qui = cm.anniversaires_du_jour(_par_serveur(F_ANNIVERSAIRES, gid), aujourdhui)
-        update_cfg(gid, "anniv_dernier", aujourdhui.isoformat())
-        presents = [f"<@{uid}>" for uid in qui if guild.get_member(int(uid))]
-        if not presents:
-            continue
+        # Chaque serveur a part : un role mal place chez l'un ne prive
+        # pas les autres de leurs anniversaires.
         try:
-            await salon.send(cm.message_anniversaire(presents))
+            await anniversaires_du_serveur(guild, aujourdhui)
         except Exception as erreur:
-            print(f"anniversaires: {gid} : {erreur}")
+            print(f"anniversaires: {guild.id} : {erreur}")
+
+
+async def anniversaires_du_serveur(guild, aujourdhui):
+    gid = str(guild.id)
+    cfg = get_cfg(gid)
+    salon = salon_du_serveur(guild, cfg.get("anniv_salon"))
+    role = guild.get_role(parse_int(cfg.get("anniv_role")) or 0)
+    if salon is None and role is None:
+        return
+    if str(cfg.get("anniv_dernier") or "") == aujourdhui.isoformat():
+        return
+    qui = cm.anniversaires_du_jour(_par_serveur(F_ANNIVERSAIRES, gid), aujourdhui)
+    update_cfg(gid, "anniv_dernier", aujourdhui.isoformat())
+    membres = [m for m in (guild.get_member(int(uid)) for uid in qui) if m]
+    if role is not None:
+        await porter_role_anniversaire(guild, role, membres)
+    if salon is not None and membres:
+        await salon.send(cm.message_anniversaire(
+            [m.mention for m in membres], cfg.get("anniv_message")))
+
+
+async def porter_role_anniversaire(guild, role, membres):
+    """
+    Le role du jour : rendu par ceux d'hier, porte par ceux d'aujourd'hui.
+
+    On ne le retire QU'A ceux a qui ModBot l'a donne. Un serveur qui
+    choisirait par megarde un role existant — « Membre » — ne doit pas
+    le voir arrache a tout le monde le lendemain.
+    """
+    gid = str(guild.id)
+    roles, refus = trier_auto_roles(guild, [role.id])
+    if not roles or not guild.me.guild_permissions.manage_roles:
+        return await log_event(
+            guild, "roles", "Role d'anniversaire impossible",
+            f"ModBot ne peut pas donner {role.mention} : "
+            + (", ".join(refus) or "permission **Gerer les roles** manquante") + ".",
+            severity="warning")
+    aujourdhui = {str(m.id) for m in membres}
+    for uid in get_cfg(gid).get("anniv_role_porteurs") or []:
+        if str(uid) in aujourdhui:
+            continue
+        ancien = guild.get_member(parse_int(uid) or 0)
+        if ancien and role in ancien.roles:
+            try:
+                await ancien.remove_roles(role, reason="[ModBot] Fin de la journee d'anniversaire")
+            except Exception as erreur:
+                print(f"anniversaires: retrait {gid}/{uid} : {erreur}")
+    for membre in membres:
+        if role not in membre.roles:
+            try:
+                await membre.add_roles(role, reason="[ModBot] Joyeux anniversaire")
+            except Exception as erreur:
+                print(f"anniversaires: ajout {gid}/{membre.id} : {erreur}")
+    update_cfg(gid, "anniv_role_porteurs", sorted(aujourdhui))
 
 
 async def anniversaires_loop():
@@ -22117,6 +22418,142 @@ async def rappels_loop():
         except Exception as erreur:
             print(f"boucle rappels: {erreur}")
         await asyncio.sleep(30)
+
+
+# ── Le salon de comptage ──────────────────────────────────────────────
+
+async def jouer_comptage(message, cfg):
+    """
+    1, 2, 3… chacun son tour. Un message qui ne commence pas par un
+    nombre est une conversation : on le laisse tranquille.
+    """
+    salon_id = str(cfg.get("comptage_salon") or "")
+    if not salon_id or str(getattr(message.channel, "id", "")) != salon_id:
+        return
+    nombre = cm.lire_nombre(message.content)
+    if nombre is None:
+        return
+    gid = str(message.guild.id)
+    repartir = cfg.get("comptage_repartir", True) is not False
+    etat, verdict, casse = cm.compter(
+        _par_serveur(F_COMPTAGE, gid), message.author.id, nombre,
+        seul_interdit=cfg.get("comptage_seul", True) is not False, repartir=repartir)
+    _ecrire_par_serveur(F_COMPTAGE, gid, etat)
+    try:
+        if verdict == "ok":
+            return await message.add_reaction("✅")
+        if verdict == "record":
+            return await message.add_reaction("🏆")
+        await message.add_reaction("❌")
+        if verdict == "faux" and casse == 0:
+            return
+        if verdict == "deux_fois":
+            raison = f"{message.author.mention} a compte deux fois de suite."
+        else:
+            raison = f"{message.author.mention} a ecrit **{nombre}**, il fallait **{casse + 1}**."
+        if repartir:
+            suite = f"La serie s'arrete a **{casse}**. On repart de **1**."
+        else:
+            suite = f"On attend toujours **{casse + 1}**."
+        await message.channel.send(embed=EG(
+            "Serie cassee", f"{raison}\n{suite}\nRecord du serveur : **{etat['record']}**",
+            Palette.WARNING, gid))
+    except Exception as erreur:
+        print(f"comptage {gid}: {erreur}")
+
+
+# ── Les reactions automatiques ────────────────────────────────────────
+
+async def poser_reactions_auto(message, cfg):
+    """Les reactions choisies pour ce salon, sous chaque nouveau message."""
+    table = cfg.get("reactions_auto")
+    if not table:
+        return
+    salon = message.channel
+    parent = getattr(salon, "parent", None)
+    # Un post de forum est un fil : il herite des reactions du forum. Un
+    # fil ordinaire, lui, est une conversation — on ne la couvre pas
+    # d'emojis a chaque reponse.
+    porteur = parent.id if isinstance(parent, discord.ForumChannel) else None
+    for emoji in cm.emojis_du_salon(table, getattr(salon, "id", None), porteur):
+        try:
+            await message.add_reaction(emoji)
+        except discord.Forbidden:
+            return
+        except Exception as erreur:
+            print(f"reactions auto {message.guild.id}: {emoji} : {erreur}")
+
+
+# ── Les salons proteges ───────────────────────────────────────────────
+
+# Qui a ete averti, et quand : une seule remontrance par rafale.
+_avertis_salons_proteges = {}
+
+
+def a_un_media(message):
+    """Une image, une video, un fichier ou un sticker : ce qu'un salon de medias accepte."""
+    if message.attachments or getattr(message, "stickers", None):
+        return True
+    return any(getattr(e, "type", "") in ("image", "video", "gifv") for e in message.embeds)
+
+
+async def filtrer_salon_protege(message, cfg):
+    """
+    Supprime un message poste dans un salon protege, et previent son auteur.
+
+    Rend True si le message a ete retire : plus rien ne doit le traiter.
+    """
+    brut = cfg.get("salons_proteges")
+    if not brut:
+        return False
+    salon = message.channel
+    regle = sp.regle_du_salon(brut, getattr(salon, "id", None))
+    if not regle:
+        return False
+    auteur = message.author
+    gid = str(message.guild.id)
+    config = sp.lire_config(brut)
+    if sp.exempte(config, est_du_staff(auteur, gid), [r.id for r in getattr(auteur, "roles", [])]):
+        return False
+    if not sp.a_supprimer(regle, a_un_media(message)):
+        return False
+    # Une arnaque reste une arnaque, meme ici : elle merite le traitement
+    # complet — alerte, points, bannissement eventuel — pas un simple
+    # « mauvais salon ».
+    if await verifier_arnaque(message):
+        return True
+    if not await claim_message_by_delete(message):
+        return True
+    rapport_compter(gid, "filtres")
+    if not sp.doit_avertir(_avertis_salons_proteges, f"{gid}:{salon.id}:{auteur.id}", time.monotonic()):
+        return True
+    texte = sp.message_perso(config, auteur.mention, salon.mention)
+    if not texte and regle["mode"] == "medias":
+        texte = f"{auteur.mention}, {salon.mention} n'accepte que les images et les fichiers : ton message a ete supprime."
+    elif not texte:
+        texte = f"{auteur.mention}, on n'ecrit pas dans {salon.mention} : ton message a ete supprime."
+    if config["infraction"] and isinstance(auteur, discord.Member):
+        nb = add_avert(str(auteur.id), gid, f"[Salon protege] Message dans #{salon.name}")
+        sanction = await appliquer_sanction(auteur, nb, "salon protege")
+        texte += f"\n{sanction['label']}"
+    if config["avertir"] == "salon":
+        try:
+            await salon.send(embed=EG("🔒 Salon protege", texte, Palette.WARNING, gid),
+                             delete_after=config["duree"],
+                             allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
+    elif config["avertir"] == "mp":
+        try:
+            await auteur.send(embed=EG("🔒 Salon protege", f"{texte}\n\n**{message.guild.name}**",
+                                       Palette.WARNING, gid))
+        except Exception:
+            pass
+    await log_event(
+        message.guild, "moderation", "Message retire d'un salon protege",
+        f"{auteur.mention} a ecrit dans {salon.mention}, qui est protege.",
+        severity="info", target=auteur)
+    return True
 
 
 # ── Le mur des meilleurs messages ─────────────────────────────────────
@@ -22374,7 +22811,7 @@ async def on_ready():
     # fonction : la lire (« if not _rappels_membres_task ») levait
     # UnboundLocalError, et on_ready s'arretait la, a chaque demarrage.
     # Tout ce qui suivait ne tournait jamais — dont l'envoi des commandes.
-    global _anniversaires_task, _rappels_membres_task
+    global _anniversaires_task, _rappels_membres_task, _xp_vocal_task
     global _tempbans_task, _rapports_task
     global _licences_task
     global _presence_task
@@ -22443,6 +22880,8 @@ async def on_ready():
         _anniversaires_task = asyncio.create_task(boucle_surveillee("anniversaires_loop", anniversaires_loop))
     if not _rappels_membres_task or _rappels_membres_task.done():
         _rappels_membres_task = asyncio.create_task(boucle_surveillee("rappels_loop", rappels_loop))
+    if not _xp_vocal_task or _xp_vocal_task.done():
+        _xp_vocal_task = asyncio.create_task(boucle_surveillee("xp_vocal_loop", xp_vocal_loop))
     if not _tempbans_task or _tempbans_task.done():
         _tempbans_task = asyncio.create_task(boucle_surveillee("tempbans_loop", tempbans_loop))
     if not _rapports_task or _rapports_task.done():
@@ -22558,6 +22997,11 @@ async def on_message(message):
         uid = str(message.author.id)
         cfg = get_cfg(gid)
 
+        # Un salon protege passe avant tout : un message qui n'avait rien
+        # a faire la ne rapporte ni statistique ni experience.
+        if await filtrer_salon_protege(message, cfg):
+            return
+
         # Track message stats
         track_msg(uid, gid)
         await gagner_experience(message)
@@ -22634,6 +23078,12 @@ async def on_message(message):
         if detection and not immunise and not exempte_ici(cfg, message.channel, "filtre"):
             await handle_bad_word(message, detection)
             return
+
+        # La vie du serveur, pour les seuls messages qui restent : on ne
+        # compte pas, on ne reagit pas sous un message que les filtres
+        # viennent de supprimer.
+        await jouer_comptage(message, cfg)
+        await poser_reactions_auto(message, cfg)
 
     finally:
         _en_cours.discard(message.id)
@@ -23285,6 +23735,345 @@ async def cmd_reset(i: discord.Interaction, membre: discord.Member):
     await send_log(i.guild, le)
 
 # ════════════════════════════════════════════════
+#  ROLES EN MASSE
+# ════════════════════════════════════════════════
+#
+# /massrole donne un role a tous ceux qui ne l'ont pas, /demassrole le
+# retire a tous ceux qui l'ont. Le calcul — qui est vise, quel role est
+# permis — vit dans roles_masse.py. Ici : Discord, la confirmation, et
+# une operation qui peut durer un quart d'heure sur un gros serveur.
+
+# L'operation en cours, ou la derniere, par serveur. En memoire seulement :
+# un redemarrage l'interrompt, et on relance la commande — elle ne vise
+# que ceux qui n'ont pas encore le role, rien n'est fait deux fois.
+_TRAVAUX_ROLES = {}
+
+REFUS_MASSROLE = {
+    "everyone": "@everyone appartient deja a tout le monde.",
+    "gere": "Ce role est gere par une integration (un bot, les boosts) : Discord interdit de le donner a la main.",
+    "interdit": "Ce role est dans la liste des roles interdits (tableau de bord, rubrique Roles en masse).",
+    "dangereux": "Ce role porte des permissions de moderation ou d'administration : ModBot ne le distribue jamais a tout le serveur.",
+    "au_dessus_du_bot": "Ce role est au-dessus du role de ModBot. Remonte ModBot dans Parametres du serveur, Roles.",
+    "au_dessus_de_toi": "Ce role est au-dessus de ton propre role.",
+}
+
+CHOIX_CIBLES_MASSROLE = [
+    app_commands.Choice(name="Les humains seulement", value="humains"),
+    app_commands.Choice(name="Les bots seulement", value="bots"),
+    app_commands.Choice(name="Tout le monde", value="tous"),
+]
+
+
+def massrole_config(gid):
+    return rm.lire_config(get_cfg(gid).get("roles_masse"))
+
+
+def massrole_etat(gid):
+    """L'operation en cours ou la derniere, sans ses rouages internes."""
+    travail = _TRAVAUX_ROLES.get(str(gid))
+    if not travail:
+        return None
+    return {k: v for k, v in travail.items() if not k.startswith("_")}
+
+
+def massrole_en_cours(gid):
+    travail = _TRAVAUX_ROLES.get(str(gid))
+    return bool(travail and travail.get("etat") == "en_cours")
+
+
+def massrole_refus(guild, role, auteur=None):
+    """Le code de refus pour ce role, ou "" s'il peut etre distribue."""
+    sommet_auteur, proprietaire = None, False
+    if auteur is not None:
+        proprietaire = getattr(auteur, "id", 0) == guild.owner_id
+        haut = getattr(auteur, "top_role", None)
+        sommet_auteur = haut.position if haut is not None else None
+    return rm.refus_du_role(
+        {"id": str(role.id), "defaut": role.is_default(), "gere": role.managed,
+         "position": role.position, "permissions": role.permissions.value},
+        guild.me.top_role.position, sommet_auteur, proprietaire,
+        massrole_config(guild.id)["roles_interdits"])
+
+
+async def massrole_cibles(guild, role, action, cible, seulement_avec=None):
+    """Les membres a toucher. Les membres sont d'abord tous charges."""
+    if not guild.chunked:
+        try:
+            await asyncio.wait_for(guild.chunk(), timeout=60)
+        except Exception as erreur:
+            print(f"massrole {guild.id}: chargement des membres incomplet ({erreur})")
+    membres = [{"id": str(m.id), "bot": m.bot, "roles": [str(r.id) for r in m.roles]}
+               for m in guild.members]
+    return rm.membres_vises(membres, role.id, action, cible,
+                            str(getattr(seulement_avec, "id", "") or ""),
+                            massrole_config(guild.id)["ignorer_roles"])
+
+
+def duree_lisible(secondes):
+    if secondes < 60:
+        return "moins d'une minute"
+    return f"environ {max(1, round(secondes / 60))} min"
+
+
+def massrole_lancer(guild, role, action, ids, auteur_nom, rappel=None):
+    """Pose l'operation et la lance en tache de fond ; rend son etat."""
+    gid = str(guild.id)
+    _TRAVAUX_ROLES[gid] = {
+        "etat": "en_cours", "action": action, "role_id": str(role.id), "role": role.name,
+        "total": len(ids), "faits": 0, "echecs": 0, "auteur": str(auteur_nom or ""),
+        "debut": now().isoformat(), "fin": "", "erreur": "", "_stop": False,
+    }
+    asyncio.create_task(massrole_executer(guild, role, action, ids, rappel))
+    return massrole_etat(gid)
+
+
+async def massrole_executer(guild, role, action, ids, rappel=None):
+    gid = str(guild.id)
+    travail = _TRAVAUX_ROLES[gid]
+    raison = (f"[ModBot] /massrole par {travail['auteur']}" if action == "ajouter"
+              else f"[ModBot] /demassrole par {travail['auteur']}")
+    dernier_rappel = time.monotonic()
+    refus_de_suite = 0
+    try:
+        for uid in ids:
+            if travail["_stop"]:
+                break
+            membre = guild.get_member(int(uid))
+            try:
+                if membre is None:
+                    raise LookupError("parti")
+                if action == "ajouter":
+                    await membre.add_roles(role, reason=raison)
+                else:
+                    await membre.remove_roles(role, reason=raison)
+                travail["faits"] += 1
+                refus_de_suite = 0
+            except discord.Forbidden:
+                travail["echecs"] += 1
+                refus_de_suite += 1
+                # Dix refus d'affilee : ModBot a perdu sa permission, ou
+                # le role est passe au-dessus de lui. Insister ferait des
+                # milliers d'appels voues a l'echec.
+                if refus_de_suite >= 10:
+                    travail["erreur"] = ("Discord refuse : ModBot a perdu la permission Gerer les roles, "
+                                         "ou le role est passe au-dessus du sien.")
+                    break
+            except Exception:
+                travail["echecs"] += 1
+            if rappel and time.monotonic() - dernier_rappel >= 3:
+                dernier_rappel = time.monotonic()
+                try:
+                    await rappel(massrole_etat(gid))
+                except Exception:
+                    rappel = None
+        travail["etat"] = ("arrete" if travail["_stop"] else
+                           "interrompu" if travail["erreur"] else "fini")
+    except Exception as ex:
+        travail["etat"] = "interrompu"
+        travail["erreur"] = str(ex)[:200]
+    finally:
+        travail["fin"] = now().isoformat()
+    if rappel:
+        try:
+            await rappel(massrole_etat(gid))
+        except Exception:
+            pass
+    verbe = "donne a" if action == "ajouter" else "retire a"
+    dashboard_log("massrole" if action == "ajouter" else "demassrole", guild, travail["auteur"],
+                  f"@{role.name} : {travail['faits']}/{travail['total']}")
+    if massrole_config(gid)["journal"]:
+        await log_event(
+            guild, "roles", "Roles en masse",
+            f"{role.mention} {verbe} **{travail['faits']}** membre(s) sur {travail['total']}.",
+            fields=[("👤 Lance par", travail["auteur"] or "-"),
+                    ("⚠️ Echecs", str(travail["echecs"])),
+                    ("📋 Etat", travail["etat"])],
+            severity="warning" if travail["echecs"] or travail["erreur"] else "success")
+
+
+def embed_massrole(etat, gid):
+    """Ou en est l'operation, en une carte."""
+    role = f"<@&{etat['role_id']}>"
+    faits, total = etat["faits"], max(etat["total"], 1)
+    pleins = round(12 * (faits + etat["echecs"]) / total)
+    barre = "█" * pleins + "░" * (12 - pleins)
+    if etat["etat"] == "en_cours":
+        titre, couleur = "Roles en masse : en cours", Palette.INFO
+    elif etat["etat"] == "fini":
+        titre, couleur = "Roles en masse : termine", Palette.SUCCESS
+    elif etat["etat"] == "arrete":
+        titre, couleur = "Roles en masse : arrete", Palette.WARNING
+    else:
+        titre, couleur = "Roles en masse : interrompu", Palette.DANGER
+    if etat["action"] == "ajouter":
+        texte = f"{role} donne a **{faits}** membre(s) sur {etat['total']}."
+    else:
+        texte = f"{role} retire a **{faits}** membre(s) sur {etat['total']}."
+    embed = E(titre, f"{texte}\n`{barre}`", couleur)
+    if etat["echecs"]:
+        embed.add_field(name="⚠️ Echecs", value=str(etat["echecs"]), inline=True)
+    if etat.get("erreur"):
+        embed.add_field(name="Raison", value=etat["erreur"][:1024], inline=False)
+    return embed
+
+
+class VueArretMassrole(discord.ui.View):
+    """Un seul bouton : tout arreter. Ce qui est fait reste fait."""
+
+    def __init__(self, gid, auteur_id):
+        super().__init__(timeout=900)
+        self.gid = str(gid)
+        self.auteur_id = int(auteur_id)
+
+    @discord.ui.button(label="Arreter", style=discord.ButtonStyle.danger, emoji="⏹️")
+    async def arreter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        travail = _TRAVAUX_ROLES.get(self.gid)
+        if travail and travail.get("etat") == "en_cours":
+            travail["_stop"] = True
+        button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception:
+            pass
+
+
+async def preparer_massrole(i, role, action, cible=None, seulement_avec=None):
+    gid = str(i.guild.id)
+    config = massrole_config(gid)
+    if not config["enabled"]:
+        return await send_error(i, "Roles en masse desactives",
+                                "Un administrateur peut les reactiver depuis le tableau de bord, "
+                                "rubrique Roles en masse.")
+    if massrole_en_cours(gid):
+        return await send_error(i, "Une operation est deja en cours",
+                                "Attends qu'elle se termine, ou arrete-la avec son bouton.")
+    refus = massrole_refus(i.guild, role, i.user)
+    if refus:
+        return await send_error(i, "Impossible", REFUS_MASSROLE.get(refus, refus))
+    await _safe_defer(i)
+    choix = getattr(cible, "value", None) or config["cible"]
+    ids = await massrole_cibles(i.guild, role, action, choix, seulement_avec)
+    if not ids:
+        return await i.followup.send(embed=embed_info(
+            "Rien a faire",
+            f"Tous les membres vises ont deja {role.mention}." if action == "ajouter"
+            else f"Aucun membre vise ne porte {role.mention}.", gid), ephemeral=True)
+    if action == "ajouter":
+        texte = f"**{len(ids)}** membre(s) vont recevoir {role.mention}."
+    else:
+        texte = f"**{len(ids)}** membre(s) vont perdre {role.mention}."
+    confirme, vue = await ask_confirmation(
+        i, "Confirmer", texte + f"\nDuree estimee : {duree_lisible(rm.duree_estimee(len(ids)))}.",
+        confirm_label="Lancer", danger=action == "retirer")
+    if not confirme:
+        return
+    if massrole_en_cours(gid):
+        return await send_error(vue.interaction or i, "Une operation est deja en cours",
+                                "Attends qu'elle se termine, ou arrete-la avec son bouton.")
+    bouton = vue.interaction
+    # Une seule vue pour toute l operation : en creer une a chaque mise a
+    # jour en empilerait des centaines, toutes a l ecoute.
+    arret = VueArretMassrole(gid, i.user.id)
+
+    async def rappel(etat):
+        en_cours = etat["etat"] == "en_cours"
+        if not en_cours:
+            arret.stop()
+        await bouton.edit_original_response(
+            embed=embed_massrole(etat, gid), view=arret if en_cours else None)
+
+    etat = massrole_lancer(i.guild, role, action, ids, str(i.user), rappel if bouton else None)
+    if bouton:
+        try:
+            await rappel(etat)
+        except Exception:
+            pass
+
+
+@bot.tree.command(name="massrole", description="👥 Donner un role a tous les membres qui ne l'ont pas")
+@app_commands.describe(role="Le role a donner",
+                       cible="Qui le recoit (par defaut : le reglage du serveur)",
+                       seulement_avec="Seulement les membres qui ont deja ce role")
+@app_commands.choices(cible=CHOIX_CIBLES_MASSROLE)
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.guild_only()
+async def cmd_massrole(i: discord.Interaction, role: discord.Role,
+                       cible: app_commands.Choice[str] = None,
+                       seulement_avec: discord.Role = None):
+    await preparer_massrole(i, role, "ajouter", cible, seulement_avec)
+
+
+@bot.tree.command(name="demassrole", description="👥 Retirer un role a tous les membres qui l'ont")
+@app_commands.describe(role="Le role a retirer",
+                       cible="A qui le retirer (par defaut : le reglage du serveur)",
+                       seulement_avec="Seulement les membres qui ont aussi ce role")
+@app_commands.choices(cible=CHOIX_CIBLES_MASSROLE)
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.guild_only()
+async def cmd_demassrole(i: discord.Interaction, role: discord.Role,
+                         cible: app_commands.Choice[str] = None,
+                         seulement_avec: discord.Role = None):
+    await preparer_massrole(i, role, "retirer", cible, seulement_avec)
+
+
+async def api_massrole_etat(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    return api_json({"ok": True, "travail": massrole_etat(guild.id)}, request=request)
+
+
+async def api_massrole_lancer(request):
+    """
+    Sans `confirm`, un apercu : combien de membres, combien de temps.
+    Avec `confirm: true`, l'operation part en tache de fond.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    gid = str(guild.id)
+    payload = await request.json() if request.can_read_body else {}
+    payload = payload if isinstance(payload, dict) else {}
+    if not massrole_config(gid)["enabled"]:
+        raise web.HTTPForbidden(text="Les roles en masse sont desactives sur ce serveur.")
+    action = str(payload.get("action") or "")
+    if action not in rm.ACTIONS:
+        raise web.HTTPBadRequest(text="Action inconnue.")
+    role = guild.get_role(parse_int(payload.get("role_id")) or 0)
+    if role is None:
+        raise web.HTTPNotFound(text="Role introuvable sur ce serveur.")
+    if massrole_en_cours(gid):
+        raise web.HTTPConflict(text="Une operation est deja en cours sur ce serveur.")
+    if not guild.me.guild_permissions.manage_roles:
+        raise web.HTTPForbidden(text="ModBot n'a pas la permission Gerer les roles.")
+    uid = str(identity.get("user_id") or "")
+    auteur = guild.get_member(int(uid)) if uid.isdigit() else None
+    refus = massrole_refus(guild, role, auteur)
+    if refus:
+        raise web.HTTPBadRequest(text=REFUS_MASSROLE.get(refus, refus))
+    seulement = guild.get_role(parse_int(payload.get("seulement_avec")) or 0)
+    cible = str(payload.get("cible") or "") or massrole_config(gid)["cible"]
+    ids = await massrole_cibles(guild, role, action, cible, seulement)
+    if not payload.get("confirm"):
+        return api_json({"ok": True, "apercu": {
+            "total": len(ids), "secondes": rm.duree_estimee(len(ids))}}, request=request)
+    if not ids:
+        return api_json({"ok": True, "travail": None, "total": 0}, request=request)
+    etat = massrole_lancer(guild, role, action, ids,
+                           identity.get("username") or "Dashboard")
+    return api_json({"ok": True, "travail": etat}, request=request)
+
+
+async def api_massrole_arreter(request):
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    travail = _TRAVAUX_ROLES.get(str(guild.id))
+    if travail and travail.get("etat") == "en_cours":
+        travail["_stop"] = True
+    return api_json({"ok": True, "travail": massrole_etat(guild.id)}, request=request)
+
+
+# ════════════════════════════════════════════════
 #  AIDE ET INFORMATIONS
 # ════════════════════════════════════════════════
 
@@ -23303,6 +24092,7 @@ CATEGORIES_COMMANDES = [
     ("🎫", "Support", ["addticket", "report", "suggest"]),
     ("🎉", "Communauté", ["giveaway", "translate", "niveau", "classement",
                          "anniversaire", "rappel"]),
+    ("🎭", "Roles en masse", ["massrole", "demassrole"]),
     ("💾", "Sauvegardes", ["backup"]),
     ("📊", "Statistiques", ["serverstats", "modstats", "profilestats"]),
     ("⭐", "Premium", ["premium", "voter"]),
