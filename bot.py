@@ -23823,7 +23823,11 @@ def massrole_lancer(guild, role, action, ids, auteur_nom, rappel=None):
         "total": len(ids), "faits": 0, "echecs": 0, "auteur": str(auteur_nom or ""),
         "debut": now().isoformat(), "fin": "", "erreur": "", "_stop": False,
     }
-    asyncio.create_task(massrole_executer(guild, role, action, ids, rappel))
+    # La tache est gardee avec son etat : asyncio ne retient qu'une
+    # reference faible, et une tache que plus rien ne tient peut etre
+    # ramassee en plein travail.
+    _TRAVAUX_ROLES[gid]["_tache"] = asyncio.create_task(
+        massrole_executer(guild, role, action, ids, rappel))
     return massrole_etat(gid)
 
 
