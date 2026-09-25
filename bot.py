@@ -24193,6 +24193,10 @@ def vue_liens_modbot():
         (1, "Wiki", "📚", f"{racine}/wiki.html"),
         (1, "Support", "💬", "https://discord.gg/CK8CbFtYuv"),
         (1, "Conditions", "📜", f"{racine}/conditions.html"),
+        # La politique de confidentialite n'etait citee que dans l'embed de
+        # /info-bot. Discord demande ou un membre peut la lire : elle merite
+        # son propre bouton, la ou on cherche deja les liens du bot.
+        (1, "Confidentialite", "🔒", f"{racine}/confidentialite.html"),
     ):
         vue.add_item(discord.ui.Button(label=libelle, emoji=emoji, url=url,
                                        row=rangee, style=discord.ButtonStyle.link))
