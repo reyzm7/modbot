@@ -336,6 +336,10 @@ F_VOTES = chemin_donnees("votes.json")
 # Le salon de comptage : ou en est la serie, qui a compte le dernier, le
 # record. Pas sauvegarde dans Discord : il change a chaque message.
 F_COMPTAGE = chemin_donnees("comptage.json")
+# Les notes de l'equipe sur un membre : « deja prevenu en vocal ». Elles
+# ne sanctionnent rien ; elles permettent a une equipe de se passer le
+# relais, ce qu'aucun compteur ne dit.
+F_NOTES = chemin_donnees("notes.json")
 F_DASHBOARD_LOGS = chemin_donnees("dashboard_logs.json")
 F_CAPTCHA = chemin_donnees("captcha_pending.json")
 F_GIVEAWAYS = chemin_donnees("giveaways.json")
@@ -459,6 +463,8 @@ FICHIERS_SAUVEGARDES = (
     # avec elle.
     "data.json",
     "bans.json",
+    # Ce que l'equipe s'est ecrit sur un membre ne se refabrique pas.
+    "notes.json",
     # Un bannissement temporaire perdu ne se leve jamais : on aurait dit
     # « une semaine » et ce serait devenu « pour toujours ».
     "tempbans.json",
@@ -4241,7 +4247,11 @@ intents.guilds = True
 intents.voice_states = True
 intents.moderation = True  # bannissements (on_member_ban / on_member_unban)
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+# Plus aucune commande a prefixe : elles lisaient chaque message du
+# serveur pour rendre un service que rend une commande slash. C'etait
+# aussi l'argument que Discord nous opposait pour l'intent de contenu.
+# `help_command=None` retire le `!help` que discord.py ajoute seul.
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 async def _safe_defer(interaction: discord.Interaction, ephemeral=True):
     """Defer safely — returns False if already responded"""
@@ -4488,11 +4498,6 @@ async def claim_message_by_delete(message):
         return True
     except Exception:
         return True
-
-async def claim_prefix_command(ctx, action, ttl_seconds=120):
-    if not take_ticket_action_lock(f"prefix-{ctx.guild.id}-{ctx.message.id}-{action}", ttl_seconds=ttl_seconds):
-        return False
-    return await claim_message_by_delete(ctx.message)
 
 def ticket_action_key(interaction, action):
     gid = getattr(interaction.guild, "id", "dm")
@@ -20561,9 +20566,15 @@ async def cmd_infractions(i: discord.Interaction, membre: discord.Member):
     ladder = get_filter_cfg(gid)["ladder"]
 
     if not history:
-        return await i.followup.send(
-            embed=embed_success("Casier vierge", f"{membre.mention} n'a aucune infraction enregistree.", gid),
-            ephemeral=True)
+        vierge = embed_success(
+            "Casier vierge", f"{membre.mention} n'a aucune infraction enregistree.", gid)
+        notes = notes_du_membre(gid, membre.id)
+        if notes:
+            vierge.add_field(
+                name=f"📝 Notes de l'equipe ({len(notes)})",
+                value="\n".join(f"`{n.get('auteur', '?')}` — {n.get('texte', '')}"
+                                for n in notes[-3:])[:1024], inline=False)
+        return await i.followup.send(embed=vierge, ephemeral=True)
 
     current = sc.resolve_sanction(points, ladder)
     next_step = next((s for s in ladder if s["threshold"] > points), None)
@@ -20586,6 +20597,14 @@ async def cmd_infractions(i: discord.Interaction, membre: discord.Member):
         lines.append(f"`{fmt(stamp) if stamp else '?'}` — {entry.get('reason', '?')} "
                      f"(+{entry.get('points', 1)} pt)")
     embed.add_field(name="🕒 10 dernieres infractions", value="\n".join(lines)[:1024], inline=False)
+    # Les notes de l'equipe, a cote du casier : c'est en les lisant
+    # ensemble qu'on decide.
+    notes = notes_du_membre(gid, membre.id)
+    if notes:
+        recentes = [f"`{note.get('auteur', '?')}` — {note.get('texte', '')}"
+                    for note in notes[-3:]]
+        embed.add_field(name=f"📝 Notes de l'equipe ({len(notes)})",
+                        value="\n".join(recentes)[:1024], inline=False)
     await i.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="infractions-reset", description="Effacer l'historique d'infractions d'un membre")
@@ -23358,103 +23377,27 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # ════════════════════════════════════════════════
-#  COMMANDES PRÉFIXE
+#  NETTOYAGE DES SALONS
 # ════════════════════════════════════════════════
-
-@bot.command(name="addroles")
-@commands.has_permissions(manage_roles=True)
-async def addroles(ctx):
-    if not await claim_prefix_command(ctx, "addroles", ttl_seconds=120):
-        return
-    membres = [m for m in ctx.message.mentions if isinstance(m, discord.Member)]
-    roles   = ctx.message.role_mentions
-    if not membres or not roles:
-        return await ctx.send(embed=E("❌ Usage", "Usage : `!addroles @m1 @m2 @role`", 0xED4245))
-    count = failed = 0
-    for m in membres:
-        for r in roles:
-            if r >= ctx.guild.me.top_role: failed += 1; continue
-            try: await m.add_roles(r); count += 1
-            except Exception: failed += 1
-    e = E("✅ Rôles ajoutés", f"**{count}** ajouté(s) à **{len(membres)}** membre(s).", 0x43B581)
-    if failed: e.add_field(name="⚠️ Échecs", value=f"`{failed}` (hiérarchie/permissions)", inline=False)
-    await ctx.send(embed=e)
-    track_mod(str(ctx.author.id), str(ctx.guild.id), "roles")
-    await alert_staff(ctx.guild, "ADDROLES", ctx.author, raison=f"+{count} rôle(s)")
-
-@bot.command(name="deleteroles")
-@commands.has_permissions(manage_roles=True)
-async def deleteroles(ctx):
-    if not await claim_prefix_command(ctx, "deleteroles", ttl_seconds=120):
-        return
-    membres = [m for m in ctx.message.mentions if isinstance(m, discord.Member)]
-    roles   = ctx.message.role_mentions
-    if not membres or not roles:
-        return await ctx.send(embed=E("❌ Usage", "Usage : `!deleteroles @m1 @m2 @role`", 0xED4245))
-    count = failed = 0
-    for m in membres:
-        for r in roles:
-            if r >= ctx.guild.me.top_role: failed += 1; continue
-            try: await m.remove_roles(r); count += 1
-            except Exception: failed += 1
-    e = E("✅ Rôles retirés", f"**{count}** retiré(s) à **{len(membres)}** membre(s).", 0x43B581)
-    if failed: e.add_field(name="⚠️ Échecs", value=f"`{failed}`", inline=False)
-    await ctx.send(embed=e)
-    track_mod(str(ctx.author.id), str(ctx.guild.id), "roles")
-
-@bot.command(name="addchannel")
-@commands.has_permissions(manage_channels=True)
-async def addchannel(ctx):
-    if not await claim_prefix_command(ctx, "addchannel", ttl_seconds=120):
-        return
-    membre = ctx.message.mentions[0] if ctx.message.mentions else None
-    salon = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else ctx.channel
-    if not membre or not salon:
-        return await ctx.send(embed=E("❌ Usage", "Usage : `!addchannel @membre #salon`", 0xED4245))
-    try:
-        await salon.set_permissions(
-            membre,
-            view_channel=True,
-            read_messages=True,
-            send_messages=True,
-            attach_files=True,
-            add_reactions=True,
-            reason=f"addchannel by {ctx.author}",
-        )
-    except Exception as ex:
-        return await ctx.send(embed=E("❌ Erreur", str(ex), 0xED4245))
-    e = E("✅ Acces salon ajoute", f"{membre.mention} peut maintenant voir et ecrire dans {salon.mention}.", 0x43B581)
-    await ctx.send(embed=e)
-    await alert_staff(ctx.guild, "ADDCHANNEL", ctx.author, membre, f"Salon {salon}")
-
-@bot.command(name="deletechannel")
-@commands.has_permissions(manage_channels=True)
-async def deletechannel(ctx):
-    if not await claim_prefix_command(ctx, "deletechannel", ttl_seconds=120):
-        return
-    membre = ctx.message.mentions[0] if ctx.message.mentions else None
-    salon = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else ctx.channel
-    if not membre or not salon:
-        return await ctx.send(embed=E("❌ Usage", "Usage : `!deletechannel @membre #salon`", 0xED4245))
-    try:
-        await salon.set_permissions(membre, overwrite=None, reason=f"deletechannel by {ctx.author}")
-    except Exception as ex:
-        return await ctx.send(embed=E("❌ Erreur", str(ex), 0xED4245))
-    e = E("✅ Acces salon retire", f"{membre.mention} n'a plus de permission speciale dans {salon.mention}.", 0x43B581)
-    await ctx.send(embed=e)
-    await alert_staff(ctx.guild, "DELETECHANNEL", ctx.author, membre, f"Salon {salon}")
 
 _clear_locks: set = set()
 
 def clear_lock_key(guild_id, channel_id):
     return f"{guild_id}:{channel_id}"
 
-async def delete_messages_safely(channel, limit=None, reason=""):
+async def delete_messages_safely(channel, limit=None, reason="", check=None):
+    """
+    Supprime jusqu'a `limit` messages, ou ceux que `check` retient parmi eux.
+
+    Le filtre porte sur les messages PARCOURUS, pas sur le nombre
+    supprime : « les vingt derniers, de ce membre » et non « les vingt
+    derniers de ce membre », qui obligerait a remonter tout le salon.
+    """
     try:
         try:
-            deleted = await channel.purge(limit=limit, reason=reason, bulk=True)
+            deleted = await channel.purge(limit=limit, reason=reason, bulk=True, check=check)
         except TypeError:
-            deleted = await channel.purge(limit=limit, bulk=True)
+            deleted = await channel.purge(limit=limit, bulk=True, check=check)
         return len(deleted)
     except discord.Forbidden:
         raise
@@ -23463,6 +23406,8 @@ async def delete_messages_safely(channel, limit=None, reason=""):
 
     deleted = 0
     async for msg in channel.history(limit=limit):
+        if check and not check(msg):
+            continue
         try:
             try:
                 await msg.delete(reason=reason)
@@ -23619,9 +23564,12 @@ async def cmd_addticket(i: discord.Interaction, membre: discord.Member):
     await i.response.send_message(embed=EG("✅ Membre ajouté au ticket", f"{membre.mention} peut maintenant voir et écrire dans {i.channel.mention}.", 0x43B581, gid), ephemeral=True)
 
 @bot.tree.command(name="clear-message", description="Supprimer 1 a 100 messages du salon")
-@app_commands.describe(nombre="Nombre de messages a supprimer entre 1 et 100")
+@app_commands.describe(nombre="Nombre de messages a parcourir, entre 1 et 100",
+                       membre="Ne supprimer que ses messages",
+                       contient="Ne supprimer que les messages contenant ce texte")
 @app_commands.checks.has_permissions(manage_messages=True)
-async def cmd_clear_message(i: discord.Interaction, nombre: int):
+async def cmd_clear_message(i: discord.Interaction, nombre: int,
+                            membre: discord.Member = None, contient: str = ""):
     gid = str(i.guild.id)
     if nombre < 1 or nombre > 100:
         return await i.response.send_message(embed=build_simple_embed(gid, "Nombre invalide", "Invalid amount", tr(gid, "clear_invalid"), 0xED4245), ephemeral=True)
@@ -23633,7 +23581,17 @@ async def cmd_clear_message(i: discord.Interaction, nombre: int):
     _clear_locks.add(lock_key)
     await _safe_defer(i)
     try:
-        count = await delete_messages_safely(i.channel, limit=nombre, reason=f"Clear message by {i.user}")
+        # Sans filtre, rien ne change : on supprime les N derniers.
+        morceau = str(contient or "").strip().lower()
+
+        def retenu(message):
+            if membre is not None and message.author.id != membre.id:
+                return False
+            return not morceau or morceau in (message.content or "").lower()
+
+        count = await delete_messages_safely(
+            i.channel, limit=nombre, reason=f"Clear message by {i.user}",
+            check=retenu if (membre is not None or morceau) else None)
     except Exception as ex:
         return await i.followup.send(f"Erreur : {ex}", ephemeral=True)
     finally:
@@ -24002,6 +23960,404 @@ async def cmd_reset(i: discord.Interaction, membre: discord.Member):
     await send_log(i.guild, le)
 
 # ════════════════════════════════════════════════
+#  LES GESTES QUOTIDIENS
+# ════════════════════════════════════════════════
+#
+# Rendre muet, verrouiller un salon, sortir quelqu'un d'un vocal, donner
+# un role, ouvrir un salon, prendre une note : ce qu'une equipe fait dix
+# fois par jour. Le bot savait deja tout faire — tout seul, ou depuis le
+# tableau de bord — mais personne ne pouvait le lui demander depuis
+# Discord. Les quatre commandes a prefixe qui en couvraient une partie
+# sont parties le 25/09/2026 : une commande slash fait la meme chose sans
+# lire tous les messages du serveur.
+
+# Vingt-huit jours : le plafond de Discord pour une exclusion temporaire.
+MUTE_MAX = timedelta(days=28)
+
+
+def notes_du_membre(gid, uid):
+    donnees = jload(F_NOTES)
+    par_serveur = donnees.get(str(gid)) if isinstance(donnees, dict) else None
+    notes = (par_serveur or {}).get(str(uid)) if isinstance(par_serveur, dict) else None
+    return notes if isinstance(notes, list) else []
+
+
+def ajouter_note(gid, uid, auteur, texte):
+    donnees = jload(F_NOTES)
+    if not isinstance(donnees, dict):
+        donnees = {}
+    par_serveur = donnees.setdefault(str(gid), {})
+    notes = par_serveur.get(str(uid))
+    notes = notes if isinstance(notes, list) else []
+    notes.append({"date": now().isoformat(), "auteur": str(auteur),
+                  "texte": str(texte)[:500]})
+    # Vingt notes par membre : au-dela, c'est un journal, pas une note.
+    par_serveur[str(uid)] = notes[-20:]
+    jsave(F_NOTES, donnees)
+    return par_serveur[str(uid)]
+
+
+def retirer_note(gid, uid, rang):
+    notes = notes_du_membre(gid, uid)
+    if rang < 1 or rang > len(notes):
+        return None
+    partie = notes.pop(rang - 1)
+    donnees = jload(F_NOTES)
+    donnees.setdefault(str(gid), {})[str(uid)] = notes
+    jsave(F_NOTES, donnees)
+    return partie
+
+
+async def prevenir_sanction(membre, guild, titre, texte):
+    """
+    Le message prive qui dit ce qui vient d'arriver, et comment contester.
+
+    Rend True s'il est parti. Des MP fermes n'annulent rien : la sanction
+    s'applique, et l'equipe voit que le membre n'a pas ete prevenu.
+    """
+    gid = str(guild.id)
+    embed = EG(titre, texte, Palette.WARNING, gid)
+    embed.set_footer(text=guild.name)
+    try:
+        await membre.send(embed=embed, view=vue_contester(gid))
+        return True
+    except Exception:
+        return False
+
+
+def refus_hierarchie(guild, auteur, membre):
+    """La phrase qui explique pourquoi c'est impossible, ou "" si ca l'est."""
+    if membre.id == getattr(bot.user, "id", None):
+        return "ModBot ne peut pas se sanctionner lui-meme."
+    if membre.id == guild.owner_id:
+        return "Le proprietaire du serveur ne peut pas etre sanctionne."
+    if membre.id == auteur.id:
+        return "Tu ne peux pas te sanctionner toi-meme."
+    if isinstance(auteur, discord.Member) and auteur.id != guild.owner_id \
+            and membre.top_role >= auteur.top_role:
+        return f"{membre.mention} a un role superieur ou egal au tien."
+    if membre.top_role >= guild.me.top_role:
+        return (f"Le role de {membre.mention} est au-dessus de celui de ModBot. "
+                "Remonte **ModBot** dans Parametres du serveur, Roles.")
+    return ""
+
+
+@bot.tree.command(name="mute", description="🔇 Rendre un membre muet pour un temps")
+@app_commands.describe(membre="Le membre a rendre muet",
+                       duree="10m, 2h, 1h30, 3j… jusqu'a 28 jours",
+                       raison="Ce qu'il saura, et ce que le journal gardera")
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.guild_only()
+async def cmd_mute(i: discord.Interaction, membre: discord.Member, duree: str = "1h",
+                   raison: str = "Aucune raison fournie"):
+    gid = str(i.guild.id)
+    secondes = parse_duree(duree)
+    if not secondes:
+        return await send_error(i, "Duree incomprise",
+                                "Ecris par exemple `10m`, `2h`, `1h30` ou `3j`.")
+    limite = min(timedelta(seconds=secondes), MUTE_MAX)
+    refus = refus_hierarchie(i.guild, i.user, membre)
+    if refus:
+        return await send_error(i, "Action impossible", refus)
+    await _safe_defer(i)
+    try:
+        await membre.timeout(discord.utils.utcnow() + limite,
+                             reason=f"[ModBot] /mute par {i.user} — {raison}")
+    except discord.Forbidden:
+        return await i.followup.send(embed=embed_error(
+            "Discord refuse", "Il manque a ModBot la permission **Exclure temporairement**.",
+            gid), ephemeral=True)
+    except Exception as ex:
+        return await i.followup.send(embed=embed_error("Echec", f"`{ex}`", gid), ephemeral=True)
+
+    lisible = sc.human_duration(int(limite.total_seconds() // 60))
+    INFRACTIONS.add(gid, membre.id, f"Mute {lisible} par {i.user} : {raison}",
+                    points=1, source="mute")
+    prevenu = await prevenir_sanction(
+        membre, i.guild, "🔇 Tu as ete rendu muet",
+        f"Sur **{i.guild.name}**, pour **{lisible}**.\n**Raison :** {raison}")
+    embed = embed_success("Membre rendu muet",
+                          f"{membre.mention} ne peut plus ecrire pendant **{lisible}**.", gid)
+    embed.add_field(name="📋 Raison", value=raison, inline=False)
+    embed.add_field(name="✉️ Prevenu", value="oui" if prevenu else "MP fermes", inline=True)
+    await i.followup.send(embed=embed, ephemeral=True)
+    await log_event(i.guild, "moderation", "Membre rendu muet",
+                    f"{membre.mention} pour **{lisible}**.",
+                    fields=[("📋 Raison", raison), ("👮 Par", str(i.user))],
+                    severity="warning", actor=i.user, target=membre)
+    await alert_staff(i.guild, "MUTE", i.user, membre, f"{lisible} — {raison}")
+    track_mod(str(i.user.id), gid, "mute")
+
+
+@bot.tree.command(name="unmute", description="🔊 Rendre la parole a un membre")
+@app_commands.describe(membre="Le membre a liberer", raison="Pourquoi la sanction est levee")
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.guild_only()
+async def cmd_unmute(i: discord.Interaction, membre: discord.Member,
+                     raison: str = "Sanction levee"):
+    gid = str(i.guild.id)
+    await _safe_defer(i)
+    if not (membre.timed_out_until and membre.timed_out_until > discord.utils.utcnow()):
+        return await i.followup.send(embed=embed_info(
+            "Rien a lever", f"{membre.mention} n'est pas muet.", gid), ephemeral=True)
+    try:
+        await membre.timeout(None, reason=f"[ModBot] /unmute par {i.user} — {raison}")
+    except Exception as ex:
+        return await i.followup.send(embed=embed_error("Echec", f"`{ex}`", gid), ephemeral=True)
+    await prevenir_sanction(membre, i.guild, "🔊 Tu peux reparler",
+                            f"Sur **{i.guild.name}**.\n**Raison :** {raison}")
+    await i.followup.send(embed=embed_success(
+        "Parole rendue", f"{membre.mention} peut de nouveau ecrire.", gid), ephemeral=True)
+    await log_event(i.guild, "moderation", "Mute leve", f"{membre.mention} peut reparler.",
+                    fields=[("📋 Raison", raison), ("👮 Par", str(i.user))],
+                    severity="success", actor=i.user, target=membre)
+
+
+@bot.tree.command(name="lock", description="🔒 Fermer ce salon : plus personne n'y ecrit")
+@app_commands.describe(salon="Le salon a fermer (par defaut, celui-ci)",
+                       raison="Ce qui sera annonce dans le salon")
+@app_commands.default_permissions(manage_channels=True)
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.guild_only()
+async def cmd_lock(i: discord.Interaction, salon: discord.TextChannel = None,
+                   raison: str = ""):
+    await _verrouiller_salon(i, salon or i.channel, True, raison)
+
+
+@bot.tree.command(name="unlock", description="🔓 Rouvrir ce salon")
+@app_commands.describe(salon="Le salon a rouvrir (par defaut, celui-ci)",
+                       raison="Ce qui sera annonce dans le salon")
+@app_commands.default_permissions(manage_channels=True)
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.guild_only()
+async def cmd_unlock(i: discord.Interaction, salon: discord.TextChannel = None,
+                     raison: str = ""):
+    await _verrouiller_salon(i, salon or i.channel, False, raison)
+
+
+async def _verrouiller_salon(i, salon, fermer, raison):
+    """
+    Ferme ou rouvre un salon pour @everyone.
+
+    A la reouverture, la permission repart en « heritee » plutot qu'en
+    « autorisee » : un salon qui tenait ses droits de sa categorie les
+    retrouve, au lieu d'etre ouvert en dur pour toujours.
+    """
+    gid = str(i.guild.id)
+    await _safe_defer(i)
+    droits = salon.overwrites_for(i.guild.default_role)
+    droits.send_messages = False if fermer else None
+    try:
+        await salon.set_permissions(i.guild.default_role, overwrite=droits,
+                                    reason=f"[ModBot] {'lock' if fermer else 'unlock'} par {i.user}")
+    except discord.Forbidden:
+        return await i.followup.send(embed=embed_error(
+            "Discord refuse", "Il manque a ModBot la permission **Gerer les salons** ici.",
+            gid), ephemeral=True)
+    except Exception as ex:
+        return await i.followup.send(embed=embed_error("Echec", f"`{ex}`", gid), ephemeral=True)
+    titre = "🔒 Salon ferme" if fermer else "🔓 Salon rouvert"
+    texte = raison or ("Le salon est ferme le temps que ca se calme."
+                       if fermer else "Vous pouvez de nouveau ecrire ici.")
+    try:
+        await salon.send(embed=EG(titre, texte, Palette.WARNING if fermer else Palette.SUCCESS, gid))
+    except Exception:
+        pass
+    await i.followup.send(embed=embed_success(
+        titre, f"{salon.mention} — {texte}", gid), ephemeral=True)
+    await log_event(i.guild, "channels", titre, f"{salon.mention} par {i.user.mention}.",
+                    fields=[("📋 Raison", raison or "-")],
+                    severity="warning" if fermer else "success", actor=i.user)
+
+
+vocal_group = app_commands.Group(
+    name="vocal", description="Moderation des salons vocaux",
+    default_permissions=discord.Permissions(move_members=True), guild_only=True)
+
+
+@vocal_group.command(name="deconnecter", description="Sortir un membre de son salon vocal")
+@app_commands.describe(membre="Le membre a deconnecter", raison="Pourquoi")
+@app_commands.checks.has_permissions(move_members=True)
+async def vocal_deconnecter(i: discord.Interaction, membre: discord.Member, raison: str = ""):
+    gid = str(i.guild.id)
+    if not (membre.voice and membre.voice.channel):
+        return await send_error(i, "Personne a deconnecter",
+                                f"{membre.mention} n'est dans aucun salon vocal.")
+    salon = membre.voice.channel
+    await _safe_defer(i)
+    try:
+        await membre.move_to(None, reason=f"[ModBot] /vocal deconnecter par {i.user} — {raison}")
+    except Exception as ex:
+        return await i.followup.send(embed=embed_error("Echec", f"`{ex}`", gid), ephemeral=True)
+    await i.followup.send(embed=embed_success(
+        "Membre deconnecte", f"{membre.mention} a ete sorti de {salon.mention}.", gid),
+        ephemeral=True)
+    await log_event(i.guild, "voice", "Membre deconnecte du vocal",
+                    f"{membre.mention} sorti de {salon.mention}.",
+                    fields=[("📋 Raison", raison or "-"), ("👮 Par", str(i.user))],
+                    severity="warning", actor=i.user, target=membre)
+
+
+@vocal_group.command(name="deplacer", description="Deplacer un membre vers un autre salon vocal")
+@app_commands.describe(membre="Le membre a deplacer", salon="Le salon vocal d'arrivee",
+                       raison="Pourquoi")
+@app_commands.checks.has_permissions(move_members=True)
+async def vocal_deplacer(i: discord.Interaction, membre: discord.Member,
+                         salon: discord.VoiceChannel, raison: str = ""):
+    gid = str(i.guild.id)
+    if not (membre.voice and membre.voice.channel):
+        return await send_error(i, "Personne a deplacer",
+                                f"{membre.mention} n'est dans aucun salon vocal.")
+    await _safe_defer(i)
+    try:
+        await membre.move_to(salon, reason=f"[ModBot] /vocal deplacer par {i.user} — {raison}")
+    except Exception as ex:
+        return await i.followup.send(embed=embed_error("Echec", f"`{ex}`", gid), ephemeral=True)
+    await i.followup.send(embed=embed_success(
+        "Membre deplace", f"{membre.mention} est maintenant dans {salon.mention}.", gid),
+        ephemeral=True)
+    await log_event(i.guild, "voice", "Membre deplace",
+                    f"{membre.mention} vers {salon.mention}.",
+                    fields=[("📋 Raison", raison or "-"), ("👮 Par", str(i.user))],
+                    severity="info", actor=i.user, target=membre)
+
+
+bot.tree.add_command(vocal_group)
+
+
+@bot.tree.command(name="role", description="🎭 Donner ou retirer un role a un membre")
+@app_commands.describe(membre="Le membre", role="Le role", action="Donner ou retirer")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Donner", value="ajouter"),
+    app_commands.Choice(name="Retirer", value="retirer"),
+])
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.guild_only()
+async def cmd_role(i: discord.Interaction, membre: discord.Member, role: discord.Role,
+                   action: app_commands.Choice[str] = None):
+    gid = str(i.guild.id)
+    donner = (action.value if action else "ajouter") == "ajouter"
+    if role.is_default():
+        return await send_error(i, "Impossible", "@everyone appartient deja a tout le monde.")
+    if role.managed:
+        return await send_error(i, "Impossible",
+                                "Ce role est gere par une integration : Discord interdit de le donner a la main.")
+    if role >= i.guild.me.top_role:
+        return await send_error(i, "Impossible",
+                                f"{role.mention} est au-dessus du role de ModBot.")
+    if isinstance(i.user, discord.Member) and i.user.id != i.guild.owner_id \
+            and role >= i.user.top_role:
+        return await send_error(i, "Impossible", f"{role.mention} est au-dessus de ton propre role.")
+    await _safe_defer(i)
+    try:
+        if donner:
+            await membre.add_roles(role, reason=f"[ModBot] /role par {i.user}")
+        else:
+            await membre.remove_roles(role, reason=f"[ModBot] /role par {i.user}")
+    except Exception as ex:
+        return await i.followup.send(embed=embed_error("Echec", f"`{ex}`", gid), ephemeral=True)
+    texte = (f"{role.mention} donne a {membre.mention}." if donner
+             else f"{role.mention} retire a {membre.mention}.")
+    await i.followup.send(embed=embed_success("C'est fait", texte, gid), ephemeral=True)
+    await log_event(i.guild, "roles", "Role modifie a la main", texte,
+                    fields=[("👮 Par", str(i.user))], severity="info",
+                    actor=i.user, target=membre)
+    track_mod(str(i.user.id), gid, "roles")
+
+
+@bot.tree.command(name="salon-acces",
+                  description="🚪 Ouvrir ou fermer un salon a un membre en particulier")
+@app_commands.describe(membre="Le membre", salon="Le salon (par defaut, celui-ci)",
+                       action="Ouvrir ou fermer")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Ouvrir", value="ouvrir"),
+    app_commands.Choice(name="Fermer", value="fermer"),
+])
+@app_commands.default_permissions(manage_channels=True)
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.guild_only()
+async def cmd_salon_acces(i: discord.Interaction, membre: discord.Member,
+                          salon: discord.TextChannel = None,
+                          action: app_commands.Choice[str] = None):
+    gid = str(i.guild.id)
+    salon = salon or i.channel
+    ouvrir = (action.value if action else "ouvrir") == "ouvrir"
+    await _safe_defer(i)
+    try:
+        if ouvrir:
+            await salon.set_permissions(
+                membre, view_channel=True, read_messages=True, send_messages=True,
+                attach_files=True, add_reactions=True,
+                reason=f"[ModBot] /salon-acces par {i.user}")
+        else:
+            # La permission repart en « heritee » : le membre retrouve ce
+            # que ses roles lui donnent, au lieu d'un refus en dur.
+            await salon.set_permissions(membre, overwrite=None,
+                                        reason=f"[ModBot] /salon-acces par {i.user}")
+    except Exception as ex:
+        return await i.followup.send(embed=embed_error("Echec", f"`{ex}`", gid), ephemeral=True)
+    texte = (f"{membre.mention} peut voir et ecrire dans {salon.mention}." if ouvrir
+             else f"{membre.mention} n'a plus de permission speciale dans {salon.mention}.")
+    await i.followup.send(embed=embed_success("C'est fait", texte, gid), ephemeral=True)
+    await log_event(i.guild, "permissions", "Acces a un salon modifie", texte,
+                    fields=[("👮 Par", str(i.user))], severity="info",
+                    actor=i.user, target=membre)
+
+
+note_group = app_commands.Group(
+    name="note", description="Les notes de l'equipe sur un membre",
+    default_permissions=discord.Permissions(manage_messages=True), guild_only=True)
+
+
+@note_group.command(name="ajouter", description="Ecrire une note sur un membre")
+@app_commands.describe(membre="Le membre", texte="Ce que l'equipe doit savoir")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def note_ajouter(i: discord.Interaction, membre: discord.Member, texte: str):
+    gid = str(i.guild.id)
+    notes = ajouter_note(gid, membre.id, i.user, texte)
+    embed = embed_success("Note enregistree", f"Sur {membre.mention}.", gid)
+    embed.add_field(name="📝 Note", value=texte[:1024], inline=False)
+    embed.add_field(name="📚 Total", value=f"{len(notes)} note(s)", inline=True)
+    await safe_ephemeral(i, embed=embed)
+    await log_event(i.guild, "moderation", "Note sur un membre",
+                    f"{i.user.mention} a note {membre.mention}.",
+                    severity="info", actor=i.user, target=membre)
+
+
+@note_group.command(name="lister", description="Lire les notes sur un membre")
+@app_commands.describe(membre="Le membre")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def note_lister(i: discord.Interaction, membre: discord.Member):
+    gid = str(i.guild.id)
+    notes = notes_du_membre(gid, membre.id)
+    if not notes:
+        return await safe_ephemeral(i, embed=embed_info(
+            "Aucune note", f"L'equipe n'a rien note sur {membre.mention}.", gid))
+    embed = embed_base(f"Notes sur {membre.display_name}", "", Palette.INFO, gid, ICONS["admin"])
+    for rang, note in enumerate(notes, 1):
+        quand = sc.parse_iso(note.get("date"))
+        embed.add_field(name=f"{rang}. {note.get('auteur', '?')} — {fmt(quand) if quand else '?'}",
+                        value=str(note.get("texte", ""))[:1024], inline=False)
+    await safe_ephemeral(i, embed=embed)
+
+
+@note_group.command(name="retirer", description="Effacer une note")
+@app_commands.describe(membre="Le membre", numero="Le numero de la note (voir /note lister)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def note_retirer(i: discord.Interaction, membre: discord.Member, numero: int):
+    gid = str(i.guild.id)
+    partie = retirer_note(gid, membre.id, numero)
+    if partie is None:
+        return await send_error(i, "Numero inconnu",
+                                "Regarde `/note lister` : les notes sont numerotees a partir de 1.")
+    await safe_ephemeral(i, embed=embed_success(
+        "Note effacee", f"La note {numero} sur {membre.mention} n'existe plus.", gid))
+
+
+# ════════════════════════════════════════════════
 #  ROLES EN MASSE
 # ════════════════════════════════════════════════
 #
@@ -24363,20 +24719,20 @@ CATEGORIES_COMMANDES = [
     ("🎫", "Support", ["addticket", "report", "suggest"]),
     ("🎉", "Communauté", ["giveaway", "translate", "niveau", "classement",
                          "anniversaire", "rappel"]),
-    ("🎭", "Roles en masse", ["massrole", "demassrole"]),
+    ("🔇", "Sanctions", ["mute", "unmute"]),
+    ("🔒", "Salons", ["lock", "unlock", "salon-acces"]),
+    ("🎭", "Roles", ["role", "massrole", "demassrole"]),
+    ("🔊", "Vocal", ["vocal"]),
+    ("📝", "Notes", ["note"]),
     ("💾", "Sauvegardes", ["backup"]),
     ("📊", "Statistiques", ["serverstats", "modstats", "profilestats"]),
     ("⭐", "Premium", ["premium", "voter"]),
     ("🧰", "Outils", ["panel", "aide", "info-bot"]),
 ]
 
-# Commandes a prefixe, qui ne vivent pas dans l'arbre des slash.
-COMMANDES_TEXTE = [
-    ("!addroles", "donner un role a un membre"),
-    ("!deleteroles", "retirer un role"),
-    ("!addchannel", "ouvrir un salon a un membre"),
-    ("!deletechannel", "lui en retirer l'acces"),
-]
+# Il n'y a plus de commande a prefixe : `/role` et `/salon-acces` les
+# remplacent, sans lire les messages de personne.
+COMMANDES_TEXTE = []
 
 
 def inventaire_commandes():

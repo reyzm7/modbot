@@ -700,7 +700,8 @@ def verifier_commandes():
     source = io.open("bot.py", encoding="utf-8").read()
     SENSIBLES = ("ban", "deban", "warn", "massdm", "clear-all", "clear-message",
                  "annonce", "panel", "reset-avert", "infractions-reset",
-                 "massrole", "demassrole")
+                 "massrole", "demassrole", "mute", "unmute", "lock", "unlock",
+                 "role", "salon-acces")
     sans_garde = []
     for nom in SENSIBLES:
         i = source.find(f'name="{nom}"')
