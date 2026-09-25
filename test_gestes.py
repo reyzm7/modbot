@@ -149,8 +149,11 @@ verifier("ModBot, jamais",
          "ModBot ne peut pas se sanctionner" in bot_mod.refus_hierarchie(SERVEUR, MODO, FauxMembre(1, 50)))
 verifier("un role egal ou superieur au sien, jamais",
          "superieur ou egal au tien" in bot_mod.refus_hierarchie(SERVEUR, MODO, FauxMembre(4, 10)))
+# L'auteur doit etre au-dessus du membre, sinon c'est l'autre refus qui
+# sort — et il a raison de sortir en premier.
 verifier("au-dessus de ModBot, jamais",
-         "au-dessus de celui de ModBot" in bot_mod.refus_hierarchie(SERVEUR, MODO, FauxMembre(5, 60)))
+         "au-dessus de celui de ModBot" in bot_mod.refus_hierarchie(
+             SERVEUR, FauxMembre(8, 70), FauxMembre(5, 60)))
 verifier("le proprietaire du serveur, lui, ne bute pas sur la hierarchie",
          bot_mod.refus_hierarchie(SERVEUR, FauxMembre(7, 1), FauxMembre(4, 40)) == "")
 verifier("vingt-huit jours au plus pour un mute",
