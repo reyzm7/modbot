@@ -93,6 +93,10 @@ def lire_config(brut):
         # Le staff doit pouvoir publier dans le salon d'annonces qu'il
         # protege : par defaut, il y ecrit librement.
         "staff_ecrit": brut.get("staff_ecrit", True) is not False,
+        # La regle est annoncee dans le salon lui-meme : personne ne lit
+        # un reglage du tableau de bord, et se faire supprimer un message
+        # sans savoir pourquoi est la meilleure facon de recommencer.
+        "annoncer": brut.get("annoncer", True) is not False,
         "roles_autorises": roles[:ROLES_MAX],
     }
 
@@ -160,3 +164,24 @@ def doit_avertir(derniers, cle, maintenant, pause=PAUSE_AVERTISSEMENT):
         return False
     derniers[cle] = maintenant
     return True
+
+
+def annonces_a_faire(avant, apres, annoncees=()):
+    """
+    (salons à annoncer, annonces à retirer) entre deux configurations.
+
+    Un salon nouvellement protégé reçoit son annonce ; un salon dont la
+    règle change la voit corrigée ; un salon retiré de la liste la perd,
+    comme tout le monde quand on coupe l'interrupteur ou l'annonce.
+
+    `annoncees` : les salons qui portent déjà une annonce.
+    """
+    ancien = {s["id"]: s["mode"] for s in lire_config(avant)["salons"]}
+    config = lire_config(apres)
+    vise = ({s["id"]: s["mode"] for s in config["salons"]}
+            if config["enabled"] and config["annoncer"] else {})
+    portees = {str(x) for x in annoncees or ()}
+    poser = [ident for ident, mode in vise.items()
+             if ancien.get(ident) != mode or ident not in portees]
+    retirer = [ident for ident in sorted(portees) if ident not in vise]
+    return poser, retirer

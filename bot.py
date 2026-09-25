@@ -453,6 +453,12 @@ TAILLE_MAX_SAUVEGARDE = 6 * 1024 * 1024
 # fait l'inverse — elle oublie de sauvegarder, ce qui se repare.
 FICHIERS_SAUVEGARDES = (
     "config.json",        # les reglages : c'est le fichier qui compte
+    # Les avertissements et le journal des bannissements. Ils manquaient :
+    # l'historique des infractions survivait a un redeploiement, mais
+    # l'echelle des sanctions repartait de zero, et le journal des bans
+    # avec elle.
+    "data.json",
+    "bans.json",
     # Un bannissement temporaire perdu ne se leve jamais : on aurait dit
     # « une semaine » et ce serait devenu « pour toujours ».
     "tempbans.json",
@@ -1874,7 +1880,25 @@ def get_hist(uid, gid):
 def get_nb(uid, gid):
     return len(get_hist(uid, gid))
 
-def add_avert(uid, gid, raison):
+def add_avert(uid, gid, raison, infraction=True):
+    """
+    Un avertissement de plus, et la trace qui va avec.
+
+    Deux compteurs vivaient en parallele : celui-ci, qui pilote l'echelle
+    des sanctions, et l'historique des infractions, que lisent
+    `/infractions` et le tableau de bord. Le filtre de langage remplissait
+    les deux, mais `/warn`, l'anti-spam et les salons proteges seulement
+    celui-ci : ces sanctions-la n'apparaissaient donc nulle part.
+    C'est ici que ca se decide desormais, pour tout le monde a la fois.
+    `infraction=False` pour l'appelant qui a deja ecrit sa propre ligne,
+    plus detaillee.
+    """
+    if infraction:
+        try:
+            INFRACTIONS.add(gid, uid, str(raison or "Avertissement"), points=1)
+        except Exception as erreur:
+            # Compter ne doit jamais empecher de sanctionner.
+            print(f"infraction non enregistree ({gid}/{uid}) : {erreur}")
     data = jload(F_DATA)
     u, g = str(uid), str(gid)
     if g not in data:
@@ -1975,30 +1999,175 @@ async def envoyer_dossier(member, nb, raison):
         return False  # MP fermes : la sanction s'applique quand meme
 
 
+class ModalContestation(discord.ui.Modal, title="🤔 Contester une sanction"):
+    """
+    Ce que le membre a a dire, avant que l'equipe ne le lise.
+
+    Le bouton prevenait l'equipe sans un mot d'explication : elle voyait
+    « quelqu'un conteste » et devait aller chercher qui, quoi, pourquoi.
+    """
+    texte = discord.ui.TextInput(
+        label="Pourquoi contestes-tu ?",
+        style=discord.TextStyle.paragraph,
+        placeholder="Explique ce qui s'est passe. L'equipe du serveur te repondra ici.",
+        max_length=800)
+
+    def __init__(self, gid):
+        super().__init__()
+        self.gid = str(gid)
+
+    async def on_submit(self, i: discord.Interaction):
+        guild = bot.get_guild(int(self.gid)) if self.gid.isdigit() else None
+        depose = await deposer_contestation(guild, i.user, str(self.texte.value))
+        if depose:
+            reponse = E("✅ C'est transmis",
+                        "L'equipe du serveur a ete prevenue. Sa reponse arrivera ici.",
+                        Palette.SUCCESS)
+        else:
+            reponse = E("Envoi impossible",
+                        "Ce serveur n'a pas de salon ou recevoir les contestations. "
+                        "Ecris a son equipe directement.", Palette.WARNING)
+        try:
+            await i.response.send_message(embed=reponse, ephemeral=True)
+        except Exception:
+            pass
+
+
+class ModalReponseContestation(discord.ui.Modal, title="✉️ Repondre a la contestation"):
+    """La reponse de l'equipe, qui part en message prive au membre."""
+    texte = discord.ui.TextInput(
+        label="Ta reponse",
+        style=discord.TextStyle.paragraph,
+        placeholder="Elle est envoyee en message prive au membre, telle quelle.",
+        max_length=900)
+
+    def __init__(self, gid, uid, message):
+        super().__init__()
+        self.gid, self.uid, self.message = str(gid), str(uid), message
+
+    async def on_submit(self, i: discord.Interaction):
+        guild = bot.get_guild(int(self.gid)) if self.gid.isdigit() else None
+        membre = guild.get_member(int(self.uid)) if guild and self.uid.isdigit() else None
+        recu = False
+        if membre is not None:
+            embed = EG(f"Reponse de l'equipe de {guild.name}", str(self.texte.value),
+                       Palette.INFO, self.gid)
+            embed.set_footer(text=f"Repondu par {i.user}")
+            try:
+                await membre.send(embed=embed)
+                recu = True
+            except Exception:
+                recu = False
+        # L'embed du salon garde la trace : qui a repondu, quoi, et si le
+        # membre a pu le recevoir. Une reponse perdue dans un fil de
+        # discussion ne sert a personne.
+        try:
+            embed = self.message.embeds[0]
+            embed.add_field(
+                name=f"✉️ Reponse de {i.user}",
+                value=str(self.texte.value)[:1024]
+                      + ("" if recu else "\n-# Ses messages prives sont fermes : previens-le autrement."),
+                inline=False)
+            embed.colour = discord.Colour(Palette.SUCCESS if recu else Palette.WARNING)
+            await self.message.edit(embed=embed, view=None)
+        except Exception as erreur:
+            print(f"contestation : embed non mis a jour ({erreur})")
+        try:
+            await i.response.send_message(
+                embed=E("Reponse envoyee" if recu else "Reponse enregistree",
+                        "Le membre l'a recue en message prive." if recu
+                        else "Ses messages prives sont fermes : il faudra le joindre autrement.",
+                        Palette.SUCCESS if recu else Palette.WARNING),
+                ephemeral=True)
+        except Exception:
+            pass
+
+
+def vue_repondre_contestation(gid, uid):
+    """Le bouton « Repondre », sous la contestation, dans le salon de l'equipe."""
+    vue = discord.ui.View(timeout=None)
+    vue.add_item(discord.ui.Button(
+        label="Repondre", emoji="✉️", style=discord.ButtonStyle.primary,
+        custom_id=f"sanc:repondre:{gid}:{uid}"))
+    return vue
+
+
+async def deposer_contestation(guild, membre, texte):
+    """
+    Pose la contestation dans le salon choisi par le serveur.
+
+    Repli sur le salon de logs : une contestation qui ne se pose nulle
+    part est une contestation perdue. Rend False si meme le repli manque.
+    """
+    if guild is None:
+        return False
+    gid = str(guild.id)
+    salon = (salon_du_serveur(guild, get_cfg(gid).get("salon_contestations"))
+             or salon_du_serveur(guild, get_cfg(gid).get("salon_logs")))
+    if salon is None:
+        return False
+    points = INFRACTIONS.points(gid, membre.id)
+    historique = INFRACTIONS.history(gid, membre.id)
+    derniere = historique[-1] if historique else {}
+    embed = E("🤔 Contestation d'une sanction",
+              f"{membre.mention} (`{membre.id}`) conteste sa derniere sanction.",
+              Palette.WARNING)
+    embed.add_field(name="💬 Ce qu'il dit", value=str(texte)[:1024] or "-", inline=False)
+    if derniere:
+        quand = sc.parse_iso(derniere.get("date"))
+        embed.add_field(name="⚡ Derniere sanction",
+                        value=f"{derniere.get('reason', '?')} — {fmt(quand) if quand else '?'}",
+                        inline=False)
+    embed.add_field(name="📊 Points", value=str(points), inline=True)
+    embed.add_field(name="📋 Historique", value=f"`/infractions membre:{membre}`", inline=True)
+    embed.set_footer(text="Le bouton ci-dessous repond en message prive.")
+    try:
+        await salon.send(embed=embed, view=vue_repondre_contestation(guild.id, membre.id))
+    except Exception as erreur:
+        print(f"contestation : envoi impossible ({guild.id}) : {erreur}")
+        return False
+    await alert_staff(guild, "CONTESTATION", membre, membre, str(texte)[:200])
+    dashboard_log("contestation", guild, str(membre), str(texte)[:200])
+    return True
+
+
 async def sanction_interaction(interaction):
-    """Le bouton « sanc:contester:<serveur> », clique depuis un message prive."""
+    """Les deux boutons d'une contestation : « Contester », puis « Repondre »."""
     donnees = interaction.data or {}
     custom_id = str(donnees.get("custom_id") or "")
+
+    if custom_id.startswith("sanc:repondre:"):
+        _, _, gid, uid = custom_id.split(":")
+        guild = bot.get_guild(int(gid)) if gid.isdigit() else None
+        auteur = guild.get_member(interaction.user.id) if guild else None
+        if guild is None or auteur is None or not est_du_staff(auteur, str(guild.id)):
+            try:
+                await interaction.response.send_message(
+                    embed=E("Reserve a l'equipe",
+                            "Seule l'equipe du serveur peut repondre a une contestation.",
+                            Palette.WARNING), ephemeral=True)
+            except Exception:
+                pass
+            return
+        try:
+            await interaction.response.send_modal(
+                ModalReponseContestation(gid, uid, interaction.message))
+        except Exception as erreur:
+            print(f"contestation : fenetre de reponse impossible ({erreur})")
+        return
+
     if not custom_id.startswith("sanc:contester:"):
         return
     gid = custom_id.split(":")[-1]
-    guild = bot.get_guild(int(gid)) if gid.isdigit() else None
-    membre = interaction.user
-
-    if guild is not None:
-        embed = E("🤔 Contestation d'une sanction",
-                  f"**{membre}** (`{membre.id}`) conteste sa derniere sanction.\n"
-                  "Son historique est dans `/infractions`.", Palette.WARNING)
-        await send_log(guild, embed)
-        await alert_staff(guild, "CONTESTATION", membre, membre, "Le membre conteste sa sanction")
     try:
-        await interaction.response.send_message(
-            embed=E("✅ C'est transmis",
-                    "L'equipe du serveur a ete prevenue. Elle te repondra ici.",
-                    Palette.SUCCESS),
-            ephemeral=True)
+        await interaction.response.send_modal(ModalContestation(gid))
+        return
     except Exception:
         pass
+    # La fenetre ne s'est pas ouverte : l'equipe est prevenue quand meme,
+    # sans le texte du membre. Une contestation perdue est une rancune.
+    guild = bot.get_guild(int(gid)) if gid.isdigit() else None
+    await deposer_contestation(guild, interaction.user, "(sans explication)")
 
 
 async def appliquer_sanction(member, nb, raison):
@@ -6822,6 +6991,11 @@ def serialize_dashboard_config(guild):
             "suggestions": str(cfg.get("salon_suggestions") or ""),
             "reports": str(cfg.get("salon_reports") or ""),
             "patchnotes": str(cfg.get("salon_patchnotes") or ""),
+            # Ces deux-la etaient proposes par le tableau de bord et
+            # n'etaient lus par personne : le reglage ne s'enregistrait
+            # pas, et la ligne restait « Inactif » quoi qu'on choisisse.
+            "staff_alert": str(cfg.get("salon_staff_alert") or ""),
+            "contestations": str(cfg.get("salon_contestations") or ""),
         },
         "tickets": {
             "author": cfg.get("ticket_panel_author") or tr(gid, "ticket_panel_author", guild_name=guild.name),
@@ -6985,6 +7159,8 @@ async def apply_dashboard_config(guild, payload):
         "suggestions": "salon_suggestions",
         "reports": "salon_reports",
         "patchnotes": "salon_patchnotes",
+        "staff_alert": "salon_staff_alert",
+        "contestations": "salon_contestations",
     }
     for public_key, cfg_key in channel_map.items():
         if public_key not in channels:
@@ -7071,10 +7247,13 @@ async def apply_dashboard_config(guild, payload):
     # AUTRE serveur est ecarte, comme partout ailleurs.
     proteges = payload.get("salons_proteges")
     if isinstance(proteges, dict):
+        avant_proteges = cfg.get("salons_proteges") or {}
         propre = sp.lire_config(proteges)
         propre["salons"] = [s for s in propre["salons"] if id_salon_du_serveur(guild, s["id"])]
         propre["roles_autorises"] = [r for r in propre["roles_autorises"]
                                      if guild.get_role(int(r))]
+        # L'annonce suit le reglage, dans le salon lui-meme.
+        propre["annonces"] = await accorder_annonces_proteges(guild, avant_proteges, propre)
         cfg["salons_proteges"] = propre
     masse = payload.get("roles_masse")
     if isinstance(masse, dict):
@@ -15590,7 +15769,8 @@ class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
         self.membre = membre
 
     async def on_submit(self, i: discord.Interaction):
-        nb = add_avert(str(self.membre.id), str(i.guild.id), f"[Manuel] {self.raison.value}")
+        nb = add_avert(str(self.membre.id), str(i.guild.id),
+                       f"Avertissement de {i.user} : {self.raison.value}")
         c = 0xFFA500 if nb == 1 else (0xFF4500 if nb < MAX_AVERT else 0xED4245)
         gid = str(i.guild.id)
 
@@ -20483,8 +20663,10 @@ async def handle_bad_word(message, detection):
         method=detection["method"],
         channel=str(message.channel.id),
     )
-    # Maintient l'ancien compteur pour les commandes existantes
-    add_avert(str(member.id), gid, detection["word"])
+    # Maintient l'ancien compteur pour les commandes existantes. La
+    # ligne d'infraction est deja ecrite juste au-dessus, avec le mot et
+    # la methode de detection : on ne la double pas.
+    add_avert(str(member.id), gid, detection["word"], infraction=False)
 
     step = sc.resolve_sanction(points, filt["ladder"])
     result = await apply_ladder_sanction(member, step, detection["word"])
@@ -22486,6 +22668,91 @@ async def poser_reactions_auto(message, cfg):
 
 # ── Les salons proteges ───────────────────────────────────────────────
 
+def embed_salon_protege(guild, salon, regle, config):
+    """L'annonce posee dans le salon : la regle, la sanction, les exceptions."""
+    if regle.get("mode") == "medias":
+        titre = "🔒 Salon d'images"
+        texte = (f"Dans {salon.mention}, seules les images et les fichiers restent. "
+                 "Un message en texte seul est supprime tout de suite.")
+    else:
+        titre = "🔒 Salon protege"
+        texte = (f"On n'ecrit pas dans {salon.mention} : chaque message y est "
+                 "supprime tout de suite.")
+    embed = EG(titre, texte, Palette.WARNING, str(guild.id))
+    if config["infraction"]:
+        embed.add_field(
+            name="⚠️ Sanction",
+            value="Un avertissement officiel est enregistre a chaque fois. "
+                  "Les avertissements menent au mute, puis au bannissement.",
+            inline=False)
+    else:
+        embed.add_field(name="⚠️ Sanction",
+                        value="Aucune sanction : le message est simplement retire.",
+                        inline=False)
+    qui = ["l'equipe du serveur"] if config["staff_ecrit"] else []
+    for rid in config["roles_autorises"][:5]:
+        role = guild.get_role(parse_int(rid) or 0)
+        if role:
+            qui.append(role.mention)
+    if qui:
+        embed.add_field(name="✍️ Peuvent ecrire ici", value=", ".join(qui), inline=False)
+    return embed
+
+
+async def accorder_annonces_proteges(guild, avant, apres):
+    """
+    Pose, corrige ou retire l'annonce de chaque salon protege.
+
+    L'annonce suit le reglage : un salon ajoute la recoit, un salon dont
+    la regle change la voit corrigee, un salon retire la perd. Rend la
+    table {salon: message} a enregistrer avec la configuration.
+    """
+    annonces = {str(k): str(v) for k, v in ((avant or {}).get("annonces") or {}).items()
+                if str(v).isdigit()}
+    poser, retirer = sp.annonces_a_faire(avant, apres, list(annonces))
+    config = sp.lire_config(apres)
+
+    for ident in retirer:
+        salon = salon_du_serveur(guild, ident)
+        message_id = annonces.pop(ident, "")
+        if salon is None or not message_id:
+            continue
+        try:
+            message = await salon.fetch_message(int(message_id))
+            await message.delete()
+        except Exception as erreur:
+            print(f"salon protege : annonce non retiree ({guild.id}/{ident}) : {erreur}")
+
+    for ident in poser:
+        salon = salon_du_serveur(guild, ident)
+        regle = next((s for s in config["salons"] if s["id"] == ident), None)
+        if salon is None or regle is None:
+            continue
+        embed = embed_salon_protege(guild, salon, regle, config)
+        ancienne = annonces.get(ident)
+        if ancienne:
+            try:
+                message = await salon.fetch_message(int(ancienne))
+                await message.edit(embed=embed)
+                continue
+            except Exception:
+                # Quelqu'un l'a supprimee : on en repose une.
+                annonces.pop(ident, None)
+        try:
+            message = await salon.send(embed=embed)
+            annonces[ident] = str(message.id)
+        except Exception as erreur:
+            print(f"salon protege : annonce impossible ({guild.id}/{ident}) : {erreur}")
+            continue
+        # Epinglee, elle reste lisible quand le salon se remplit. Sans le
+        # droit d'epingler, l'annonce vit quand meme.
+        try:
+            await message.pin(reason="[ModBot] Regle du salon protege")
+        except Exception:
+            pass
+    return annonces
+
+
 # Qui a ete averti, et quand : une seule remontrance par rafale.
 _avertis_salons_proteges = {}
 
@@ -22533,7 +22800,7 @@ async def filtrer_salon_protege(message, cfg):
     elif not texte:
         texte = f"{auteur.mention}, on n'ecrit pas dans {salon.mention} : ton message a ete supprime."
     if config["infraction"] and isinstance(auteur, discord.Member):
-        nb = add_avert(str(auteur.id), gid, f"[Salon protege] Message dans #{salon.name}")
+        nb = add_avert(str(auteur.id), gid, f"Salon protege : message dans #{salon.name}")
         sanction = await appliquer_sanction(auteur, nb, "salon protege")
         texte += f"\n{sanction['label']}"
     if config["avertir"] == "salon":
@@ -23057,7 +23324,7 @@ async def on_message(message):
                 and not message.author.guild_permissions.manage_messages):
             if not await claim_message_by_delete(message):
                 return
-            nb = add_avert(uid, gid, "[Anti-Spam] Messages trop rapides")
+            nb = add_avert(uid, gid, "Anti-spam : messages trop rapides")
             sanction = await appliquer_sanction(message.author, nb, "spam")
             e = EG("🔇 Anti-Spam", f"{message.author.mention}, tu envoies des messages trop rapidement.\n{sanction['label']}", 0xED4245, gid)
             await message.channel.send(embed=e, delete_after=8)
