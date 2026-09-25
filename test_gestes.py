@@ -58,8 +58,10 @@ source = io.open("bot.py", encoding="utf-8").read()
 
 # ══════════════════════════════════════════════════════════════════════
 print("--- Les commandes existent, et demandent ce qu'il faut ---")
+# Les menus contextuels portent un espace dans leur nom : ce ne sont pas
+# des commandes slash, et l aide ne les range pas.
 plates = {c.name: c for c in bot_mod.bot.tree.get_commands()
-          if not isinstance(c, discord.app_commands.Group)}
+          if not isinstance(c, discord.app_commands.Group) and " " not in c.name}
 groupes = {c.name: [s.name for s in c.commands] for c in bot_mod.bot.tree.get_commands()
            if isinstance(c, discord.app_commands.Group)}
 
@@ -127,8 +129,15 @@ class FauxServeur:
 
 MOI = FauxMembre(1, 50)
 SERVEUR = FauxServeur(7, MOI)
-bot_mod.bot.user = FauxMembre(1, 50)
 MODO = FauxMembre(2, 10)
+
+
+class FauxBot:
+    """`bot.user` n a pas de setter : on remplace le bot, pas son compte."""
+    user = FauxMembre(1, 50)
+
+
+bot_mod.bot = FauxBot()
 
 verifier("un membre ordinaire peut etre sanctionne",
          bot_mod.refus_hierarchie(SERVEUR, MODO, FauxMembre(3, 5)) == "")

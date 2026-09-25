@@ -24357,6 +24357,9 @@ async def note_retirer(i: discord.Interaction, membre: discord.Member, numero: i
         "Note effacee", f"La note {numero} sur {membre.mention} n'existe plus.", gid))
 
 
+bot.tree.add_command(note_group)
+
+
 # ════════════════════════════════════════════════
 #  ROLES EN MASSE
 # ════════════════════════════════════════════════
