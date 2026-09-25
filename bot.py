@@ -24033,8 +24033,12 @@ def refus_hierarchie(guild, auteur, membre):
         return "Le proprietaire du serveur ne peut pas etre sanctionne."
     if membre.id == auteur.id:
         return "Tu ne peux pas te sanctionner toi-meme."
-    if isinstance(auteur, discord.Member) and auteur.id != guild.owner_id \
-            and membre.top_role >= auteur.top_role:
+    # On regarde le role de l'auteur, pas son type : un `isinstance` sur
+    # discord.Member sautait la verification des que l'objet n'en etait pas
+    # exactement un — et le garde-fou ne gardait plus rien.
+    sommet_auteur = getattr(auteur, "top_role", None)
+    if sommet_auteur is not None and getattr(auteur, "id", 0) != guild.owner_id \
+            and membre.top_role >= sommet_auteur:
         return f"{membre.mention} a un role superieur ou egal au tien."
     if membre.top_role >= guild.me.top_role:
         return (f"Le role de {membre.mention} est au-dessus de celui de ModBot. "
