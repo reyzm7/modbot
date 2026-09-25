@@ -229,8 +229,14 @@ annonce = ANNONCES.messages[0] if ANNONCES.messages else None
 verifier("et épinglée", annonce is not None and annonce.epingle)
 verifier("son identifiant est retenu",
          cfg["salons_proteges"]["annonces"].get("700") == str(annonce.id))
-texte = " ".join([annonce.embeds[0].title or ""]
-                 + [f.value for f in annonce.embeds[0].fields]) if annonce else ""
+def lire_annonce(message):
+    """Le texte complet de l embed : titre, description et champs."""
+    embed = message.embeds[0]
+    return " ".join([embed.title or "", embed.description or ""]
+                    + [f.value or "" for f in embed.fields])
+
+
+texte = lire_annonce(annonce) if annonce else ""
 verifier("elle dit que les messages sont supprimés", "supprime" in texte)
 verifier("elle annonce la sanction", "avertissement" in texte.lower())
 verifier("elle dit qui peut écrire quand même",
@@ -242,8 +248,7 @@ verifier("un enregistrement sans changement n'en repose pas une seconde",
          len(ANNONCES.messages) == 1)
 
 cfg = sauver({"salons_proteges": {"enabled": True, "salons": [{"id": "700", "mode": "medias"}]}})
-texte = " ".join([ANNONCES.messages[0].embeds[0].title or ""]
-                 + [f.value for f in ANNONCES.messages[0].embeds[0].fields])
+texte = lire_annonce(ANNONCES.messages[0])
 verifier("changer la règle corrige l'annonce, sans en reposer une",
          len(ANNONCES.messages) == 1 and "image" in texte.lower())
 verifier("sans infraction, l'annonce le dit", "aucune sanction" in texte.lower())
