@@ -21967,7 +21967,12 @@ def embed_bienvenue_serveur(guild):
               "activé — c'est voulu : aucun bot ne devrait modérer un serveur "
               "sans qu'on le lui ait demandé.", Palette.INFO)
     embed.add_field(
-        name="⚡ Les trois choses à activer en premier",
+        name="🧭 Trois questions, et c'est réglé",
+        value=("`/installer` demande où écrire le journal, où souhaiter la bienvenue,"
+               " et quel rôle donner à l'arrivée. Une minute, et le bot sert à quelque chose."),
+        inline=False)
+    embed.add_field(
+        name="⚡ Les trois choses à activer ensuite",
         value=("**1.** L'anti-raid — il veille sur les arrivées en masse\n"
                "**2.** Le filtre de langage — il nettoie sans que personne ait à lire\n"
                "**3.** Les tickets — pour que tes membres puissent écrire à l'équipe"),
@@ -24365,6 +24370,194 @@ bot.tree.add_command(note_group)
 
 
 # ════════════════════════════════════════════════
+#  L'INSTALLATION EN TROIS QUESTIONS
+# ════════════════════════════════════════════════
+#
+# Un serveur qui invitait ModBot recevait des liens, et devait ensuite
+# ouvrir un tableau de bord que la plupart n'ouvrent jamais : le bot
+# restait muet, et on le retirait en croyant qu'il ne servait a rien.
+# Trois listes deroulantes suffisent a le rendre utile — le journal, la
+# bienvenue, le role d'arrivee — et le reste se decouvre apres.
+
+
+class VueInstallation(discord.ui.View):
+    """
+    Les trois questions, dans un seul message ephemere.
+
+    Rien n'est ecrit tant qu'on n'a pas clique sur « Terminer » : on peut
+    changer d'avis, ou fermer la fenetre sans avoir rien touche.
+    """
+
+    def __init__(self, auteur_id, gid):
+        super().__init__(timeout=300)
+        self.auteur_id = int(auteur_id)
+        self.gid = str(gid)
+        self.salon_logs = None
+        self.salon_bienvenue = None
+        self.role_arrivee = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.auteur_id:
+            return True
+        await safe_ephemeral(interaction, embed=E(
+            "Ce n'est pas ta fenetre",
+            "Lance `/installer` de ton cote pour regler ce serveur.", Palette.WARNING))
+        return False
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, row=0, min_values=0, max_values=1,
+                       channel_types=[discord.ChannelType.text],
+                       placeholder="1. Ou ModBot ecrit son journal")
+    async def choix_logs(self, interaction, select):
+        self.salon_logs = select.values[0] if select.values else None
+        await interaction.response.defer()
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, row=1, min_values=0, max_values=1,
+                       channel_types=[discord.ChannelType.text],
+                       placeholder="2. Ou souhaiter la bienvenue aux arrivants")
+    async def choix_bienvenue(self, interaction, select):
+        self.salon_bienvenue = select.values[0] if select.values else None
+        await interaction.response.defer()
+
+    @discord.ui.select(cls=discord.ui.RoleSelect, row=2, min_values=0, max_values=1,
+                       placeholder="3. Le role donne a l'arrivee (facultatif)")
+    async def choix_role(self, interaction, select):
+        self.role_arrivee = select.values[0] if select.values else None
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Terminer", emoji="✅", style=discord.ButtonStyle.success, row=3)
+    async def terminer(self, interaction, bouton):
+        await appliquer_installation(interaction, self)
+        self.stop()
+
+    @discord.ui.button(label="Plus tard", emoji="✖️", style=discord.ButtonStyle.secondary, row=3)
+    async def plus_tard(self, interaction, bouton):
+        self.stop()
+        try:
+            await interaction.response.edit_message(
+                embed=E("Rien n'a ete change",
+                        "Relance `/installer` quand tu veux — ou regle tout depuis le "
+                        f"tableau de bord : {DASHBOARD_SITE_URL}", Palette.INFO),
+                view=None)
+        except Exception:
+            pass
+
+
+async def appliquer_installation(interaction, vue):
+    """Ecrit les trois reglages, puis dit ce qui marche et ce qui manque."""
+    guild = interaction.guild
+    gid = str(guild.id)
+    cfg = get_cfg(gid)
+    faits, avertissements = [], []
+
+    salon_logs = guild.get_channel(vue.salon_logs.id) if vue.salon_logs else None
+    if salon_logs is not None:
+        cfg["salon_logs"] = salon_logs.id
+        faits.append(f"📋 Journal dans {salon_logs.mention}")
+        if not salon_logs.permissions_for(guild.me).send_messages:
+            avertissements.append(f"ModBot ne peut pas ecrire dans {salon_logs.mention}.")
+
+    salon_bienvenue = guild.get_channel(vue.salon_bienvenue.id) if vue.salon_bienvenue else None
+    if salon_bienvenue is not None:
+        accueil = {**WELCOME_DEFAULTS, **(cfg.get("welcome_system") or {})}
+        accueil["enabled"] = True
+        accueil["channel_id"] = str(salon_bienvenue.id)
+        cfg["welcome_system"] = accueil
+        faits.append(f"👋 Bienvenue dans {salon_bienvenue.mention}")
+        if not salon_bienvenue.permissions_for(guild.me).send_messages:
+            avertissements.append(f"ModBot ne peut pas ecrire dans {salon_bienvenue.mention}.")
+
+    if vue.role_arrivee is not None:
+        role = guild.get_role(vue.role_arrivee.id)
+        if role is not None:
+            auto = autoroles_cfg(gid)
+            cfg["auto_roles"] = {"enabled": True, "roles": [str(role.id)],
+                                 "after_captcha": auto["after_captcha"]}
+            faits.append(f"🎭 {role.mention} donne a l'arrivee")
+            if role >= guild.me.top_role:
+                avertissements.append(
+                    f"{role.mention} est au-dessus de ModBot : il ne pourra pas le donner. "
+                    "Remonte **ModBot** dans Parametres du serveur, Roles.")
+
+    if not faits:
+        return await safe_ephemeral(interaction, embed=E(
+            "Rien de choisi",
+            "Choisis au moins un salon dans les listes, puis clique sur **Terminer**.",
+            Palette.WARNING))
+
+    set_cfg(gid, cfg)
+    dashboard_log("installation", guild, str(interaction.user), ", ".join(faits))
+
+    embed = embed_success("C'est en place", "\n".join(faits), gid)
+    embed.add_field(
+        name="🛡️ Deja actif, sans rien faire",
+        value="L'anti-raid, l'anti-nuke, l'anti-arnaque et le filtre de langage "
+              "veillent depuis l'invitation. `/securite status` dit ou en est le serveur.",
+        inline=False)
+    embed.add_field(
+        name="👉 Ce qui merite dix minutes",
+        value="`/panel` ouvre les outils du staff · un salon de tickets, un captcha a "
+              f"l'arrivee et les niveaux se reglent au tableau de bord : {DASHBOARD_SITE_URL}",
+        inline=False)
+    if avertissements:
+        embed.add_field(name="⚠️ A corriger", value="\n".join(avertissements), inline=False)
+        embed.colour = discord.Colour(Palette.WARNING)
+    try:
+        await interaction.response.edit_message(embed=embed, view=None)
+    except Exception:
+        await safe_ephemeral(interaction, embed=embed)
+    await log_event(guild, "admin", "ModBot installe",
+                    f"{interaction.user.mention} a regle le serveur avec `/installer`.",
+                    fields=[("✅ Regle", "\n".join(faits))], severity="success",
+                    actor=interaction.user)
+
+
+@bot.tree.command(name="installer", description="🧭 Regler ModBot en trois questions")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def cmd_installer(i: discord.Interaction):
+    gid = str(i.guild.id)
+    cfg = get_cfg(gid)
+    accueil = cfg.get("welcome_system") or {}
+    deja = []
+    salon = salon_du_serveur(i.guild, cfg.get("salon_logs"))
+    if salon is not None:
+        deja.append(f"📋 Journal : {salon.mention}")
+    salon = salon_du_serveur(i.guild, accueil.get("channel_id"))
+    if salon is not None and accueil.get("enabled"):
+        deja.append(f"👋 Bienvenue : {salon.mention}")
+    roles = [i.guild.get_role(int(r)) for r in autoroles_cfg(gid)["roles"]]
+    roles = [r for r in roles if r]
+    if roles and autoroles_cfg(gid)["enabled"]:
+        deja.append("🎭 A l'arrivee : " + ", ".join(r.mention for r in roles))
+
+    embed = E("🧭 Installation de ModBot",
+              "Trois questions, et le bot devient utile. Rien n'est enregistre "
+              "tant que tu n'as pas clique sur **Terminer**.", Palette.INFO)
+    embed.add_field(
+        name="1️⃣ Le journal",
+        value="Le salon ou ModBot ecrit ce qu'il fait : messages supprimes, "
+              "sanctions, arrivees. C'est la que l'equipe regarde quand elle doute.",
+        inline=False)
+    embed.add_field(
+        name="2️⃣ La bienvenue",
+        value="Le salon ou saluer les arrivants, avec une carte a leur nom.",
+        inline=False)
+    embed.add_field(
+        name="3️⃣ Le role d'arrivee",
+        value="Le role donne a chaque nouveau membre. Facultatif : laisse vide "
+              "si ton serveur n'en a pas.",
+        inline=False)
+    if deja:
+        embed.add_field(name="Deja regle", value="\n".join(deja), inline=False)
+    try:
+        await i.response.send_message(embed=embed, view=VueInstallation(i.user.id, gid),
+                                      ephemeral=True)
+    except Exception as erreur:
+        print(f"installer {gid}: {erreur}")
+
+
+# ════════════════════════════════════════════════
 #  ROLES EN MASSE
 # ════════════════════════════════════════════════
 #
@@ -24734,7 +24927,7 @@ CATEGORIES_COMMANDES = [
     ("💾", "Sauvegardes", ["backup"]),
     ("📊", "Statistiques", ["serverstats", "modstats", "profilestats"]),
     ("⭐", "Premium", ["premium", "voter"]),
-    ("🧰", "Outils", ["panel", "aide", "info-bot"]),
+    ("🧰", "Outils", ["installer", "panel", "aide", "info-bot"]),
 ]
 
 # Il n'y a plus de commande a prefixe : `/role` et `/salon-acces` les
