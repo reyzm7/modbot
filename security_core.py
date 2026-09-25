@@ -735,8 +735,13 @@ class NukeGuard:
         tripped = count >= limit
         if tripped:
             guard_key = (str(guild_id), str(actor_id))
-            last = self._triggered.get(guard_key, 0)
-            if now_ts - last < NUKE_COOLDOWN_SECONDS:
+            # `None`, et non zero : `time.monotonic()` compte depuis le
+            # demarrage de la machine. Compare a zero, la toute premiere
+            # alerte d un acteur etait avalee tant que l hote avait moins
+            # de trente secondes de vie — soit, pour un bot, juste apres
+            # un redeploiement.
+            last = self._triggered.get(guard_key)
+            if last is not None and now_ts - last < NUKE_COOLDOWN_SECONDS:
                 tripped = False
             else:
                 self._triggered[guard_key] = now_ts

@@ -263,6 +263,25 @@ class TestAntiNuke(unittest.TestCase):
         declenchements = [r for r in resultats if r["tripped"]]
         self.assertEqual(len(declenchements), 1, "l'alerte doit etre unique par rafale")
 
+    def test_premiere_alerte_sur_machine_fraiche(self):
+        """
+        La premiere alerte ne doit pas dependre de l age de la machine.
+
+        `time.monotonic()` compte depuis le demarrage de l hote. Le delai
+        de garde comparait cette valeur a zero : sur une machine qui vient
+        de demarrer — un conteneur relance, un runner neuf — la toute
+        premiere alerte d un acteur etait prise pour un doublon et avalee.
+        """
+        garde = sc.NukeGuard()
+        vrai_monotonic = sc.time.monotonic
+        sc.time.monotonic = lambda: 5.0   # la machine a cinq secondes
+        try:
+            resultats = [garde.register("1", "99", "channel_delete") for _ in range(6)]
+        finally:
+            sc.time.monotonic = vrai_monotonic
+        self.assertEqual(len([r for r in resultats if r["tripped"]]), 1,
+                         "la premiere alerte doit partir, meme sur une machine fraiche")
+
     def test_acteurs_independants(self):
         garde = sc.NukeGuard()
         for _ in range(3):
