@@ -419,6 +419,22 @@ verifier("lever le mute d'un membre parti se dit, au lieu de faire semblant",
          fait is False and "serveur" in souci)
 
 
+# ── L'echelle des avertissements suit le meme delai ───────────────────
+
+_cfg_reelle = bot_mod.get_cfg
+recent = datetime.now(timezone.utc)
+bot_mod.jsave(bot_mod.F_DATA, {GID: {"11": {"historique": [
+    {"raison": "vieux", "date": (recent - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")},
+    {"raison": "recent", "date": recent.strftime("%Y-%m-%d %H:%M:%S")}]}}})
+bot_mod.get_cfg = lambda gid: {"expiration_infractions": 3}
+verifier("l'échelle ne compte plus un avertissement périmé",
+         [a["raison"] for a in bot_mod.get_hist("11", GID)] == ["recent"])
+bot_mod.get_cfg = lambda gid: {"expiration_infractions": 0}
+verifier("le serveur qui ne veut rien oublier les garde tous",
+         len(bot_mod.get_hist("11", GID)) == 2)
+bot_mod.get_cfg = _cfg_reelle
+
+
 # ══════════════════════════════════════════════════════════════════════
 rates = [n for n, ok, _ in resultats if not ok]
 print("\n" + "=" * 62)

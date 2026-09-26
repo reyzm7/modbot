@@ -101,7 +101,20 @@ for palier in (1, 2, 3, bot_mod.MAX_AVERT):
 embed = bot_mod.embed_dossier_sanction(guild, 2, "spam repete")
 corps = str(embed.to_dict())
 verifier("le dossier dit ce qui l'a declenche", "spam repete" in corps)
-verifier("il dit que ca s'efface", "cinq mois" in corps)
+verifier("il dit que ca s'efface, avec la duree du serveur", "6 mois" in corps)
+
+# Le delai appartient au serveur : le dossier doit dire le sien, y
+# compris quand ce serveur a choisi de ne rien oublier.
+_jours_reels = bot_mod.jours_infractions
+bot_mod.jours_infractions = lambda gid: 0
+verifier("un serveur qui ne veut rien oublier le dit au membre",
+         "sans limite de temps" in str(
+             bot_mod.embed_dossier_sanction(guild, 2, "spam repete").to_dict()))
+bot_mod.jours_infractions = lambda gid: 30
+verifier("un delai court est annonce tel quel",
+         "30 jours" in str(
+             bot_mod.embed_dossier_sanction(guild, 2, "spam repete").to_dict()))
+bot_mod.jours_infractions = _jours_reels
 verifier("il dit comment contester", "Contester" in corps or "contest" in corps.lower())
 verifier("il nomme le serveur", "Ligue" in corps)
 

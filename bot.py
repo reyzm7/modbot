@@ -1891,8 +1891,14 @@ def est_immunise(member, gid):
 # ════════════════════════════════════════════════
 
 def get_hist(uid, gid):
-    cutoff = now() - timedelta(days=150)
+    # Le delai du serveur, comme pour l'historique des infractions. Il
+    # etait ecrit en dur ici : l'echelle purgeait au bon rythme quand on
+    # ecrivait, et comptait a l'ancien quand on lisait.
     hist = jload(F_DATA).get(str(gid), {}).get(str(uid), {}).get("historique", [])
+    jours = jours_infractions(gid)
+    if not jours:
+        return list(hist)
+    cutoff = now() - timedelta(days=jours)
     return [a for a in hist
             if datetime.strptime(a["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) > cutoff]
 
