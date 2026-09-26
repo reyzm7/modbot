@@ -47,6 +47,12 @@ verifier("coupé par défaut", vide["enabled"] is False and vide["salon"] == "")
 verifier("anonyme par défaut : le membre en colère ne retient pas un nom",
          vide["anonyme"] is True)
 verifier("une pause raisonnable par défaut", vide["pause"] == mm.PAUSE_DEFAUT)
+verifier("aucune condition d'accès par défaut",
+         vide["anciennete"] == 0 and vide["role_requis"] == "")
+verifier("l'ancienneté demandée est bornée à un an",
+         mm.lire_config({"anciennete": 9000})["anciennete"] == mm.ANCIENNETE_MAX)
+verifier("un rôle illisible n'en est pas une condition",
+         mm.lire_config({"role_requis": "le role des anciens"})["role_requis"] == "")
 verifier("la traduction et le brouillon sont coupés par défaut",
          vide["traduire"] is False and vide["ia"] is False)
 verifier("et s'allument quand le serveur le demande",
@@ -92,7 +98,24 @@ verifier("une pause à zéro n'arrête personne",
                           "9", 0) == "")
 verifier("chaque refus a une phrase à montrer",
          all(code in mm.REFUS for code in
-             ("inactif", "sans_salon", "bloque", "trop_vite", "vide")))
+             ("inactif", "sans_salon", "bloque", "trop_vite", "vide",
+              "trop_neuf", "sans_role")))
+
+# Les conditions posees aux membres : elles regardent QUI ecrit, la ou
+# refus_message regarde le message et le module.
+exigeant = mm.lire_config({"enabled": True, "salon": "5",
+                           "anciennete": 7, "role_requis": "900"})
+verifier("sans condition, tout le monde passe",
+         mm.refus_acces(mm.lire_config({}), 0, []) == "")
+verifier("un membre arrivé hier attend son ancienneté",
+         mm.refus_acces(exigeant, 1, ["900"]) == "trop_neuf")
+verifier("passé le délai, il entre", mm.refus_acces(exigeant, 30, ["900"]) == "")
+verifier("sans le rôle demandé, non",
+         mm.refus_acces(exigeant, 30, ["42"]) == "sans_role")
+verifier("un rôle en nombre vaut le même rôle en texte",
+         mm.refus_acces(exigeant, 30, [900]) == "")
+verifier("une arrivée inconnue ne bloque personne",
+         mm.refus_acces(exigeant, None, ["900"]) == "")
 
 ferme = {"enabled": False, "salon": "1"}
 ouvert_a = {"enabled": True, "salon": "1"}
@@ -213,6 +236,10 @@ verifier("la traduction passe par le traducteur du bot",
          and "await translate_text(texte, vers)" in source)
 verifier("le bot ne se répète pas quand un membre insiste",
          "MODMAIL_PAUSE_REFUS" in source and "MODMAIL_DIT" in source)
+verifier("le bot mesure l'ancienneté avant de porter le message",
+         "mm.refus_acces(" in source and "(now() - arrivee).days" in source)
+verifier("le rôle exigé est vérifié sur ce serveur",
+         'propre["role_requis"] = str(requis.id) if requis else ""' in source)
 verifier("le courrier part au tableau de bord et en revient",
          '"modmail": mm.lire_config(cfg.get("modmail"))' in source
          and 'courrier = payload.get("modmail")' in source)

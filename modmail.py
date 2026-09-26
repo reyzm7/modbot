@@ -37,7 +37,14 @@ REFUS = {
     "bloque": "L'équipe de ce serveur ne reçoit plus tes messages.",
     "trop_vite": "Doucement : attends un instant avant d'écrire à nouveau.",
     "vide": "Écris quelque chose : un message vide n'apprend rien à l'équipe.",
+    "trop_neuf": ("Ce serveur demande un peu d'ancienneté avant d'écrire à son "
+                  "équipe. Reviens dans quelques jours."),
+    "sans_role": "Ce serveur réserve sa messagerie à certains membres.",
 }
+
+# Combien de jours d'anciennete un serveur peut exiger. Un an suffit :
+# au-dela, autant fermer le module.
+ANCIENNETE_MIN, ANCIENNETE_MAX = 0, 365
 
 
 def _ident(brut):
@@ -79,6 +86,9 @@ def lire_config(brut):
         "anonyme": brut.get("anonyme", True) is not False,
         "bloques": bloques[:BLOQUES_MAX],
         "pause": _entier(brut.get("pause"), PAUSE_DEFAUT, PAUSE_MIN, PAUSE_MAX),
+        # Les conditions posees aux membres. Zero et vide : aucune.
+        "anciennete": _entier(brut.get("anciennete"), 0, ANCIENNETE_MIN, ANCIENNETE_MAX),
+        "role_requis": _ident(brut.get("role_requis")),
         # Traduire le courrier dans les deux sens. Coupe par defaut : un
         # serveur d'une seule langue n'a rien a y gagner.
         "traduire": bool(brut.get("traduire")),
@@ -109,6 +119,25 @@ def refus_message(config, membre_id, depuis_le_dernier=None):
     pause = int(config.get("pause") or 0)
     if pause and depuis_le_dernier is not None and depuis_le_dernier < pause:
         return "trop_vite"
+    return ""
+
+
+def refus_acces(config, jours_sur_le_serveur=None, roles=()):
+    """
+    Les conditions que ce serveur pose a ses membres. Vide : il peut écrire.
+
+    Elles ne remplacent pas les refus de `refus_message` : celles-ci
+    regardent QUI écrit, l'autre regarde le message et le module. Un
+    serveur peut vouloir n'ouvrir sa messagerie qu'aux anciens, ou aux
+    porteurs d'un rôle — sans quoi elle devient une boîte à spam le jour
+    où un raid arrive.
+    """
+    exige = int(config.get("anciennete") or 0)
+    if exige and jours_sur_le_serveur is not None and jours_sur_le_serveur < exige:
+        return "trop_neuf"
+    requis = str(config.get("role_requis") or "")
+    if requis and requis not in [str(role) for role in (roles or ())]:
+        return "sans_role"
     return ""
 
 

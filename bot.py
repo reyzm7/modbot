@@ -7547,6 +7547,9 @@ async def apply_dashboard_config(guild, payload):
         propre["salon"] = str(salon) if salon else ""
         role = guild.get_role(int(propre["role"])) if propre["role"] else None
         propre["role"] = str(role.id) if role else ""
+        requis = (guild.get_role(int(propre["role_requis"]))
+                  if propre["role_requis"] else None)
+        propre["role_requis"] = str(requis.id) if requis else ""
         cfg["modmail"] = propre
 
     masse = payload.get("roles_masse")
@@ -23969,6 +23972,13 @@ async def modmail_poster(guild, membre, texte, pieces=()):
     gid = str(guild.id)
     config = modmail_cfg(gid)
     refus = mm.refus_message(config, membre.id, modmail_secondes_depuis(gid, membre.id))
+    if refus:
+        return refus
+    arrivee = getattr(membre, "joined_at", None)
+    refus = mm.refus_acces(
+        config,
+        (now() - arrivee).days if arrivee else None,
+        [role.id for role in getattr(membre, "roles", [])])
     if refus:
         return refus
     contenu = mm.message_relayable(texte, len(pieces))
