@@ -116,7 +116,15 @@ verifier("le numero porte la date du jour", numero.startswith("MB-260911-"), num
 verifier("le numero est valide", bq.numero_valide(numero))
 verifier("un numero fantaisiste ne l'est pas",
          not bq.numero_valide("MB-260911-0000") and not bq.numero_valide("x"))
-deja = {bq.nouveau_numero() for _ in range(200)}
+# Les numeros sont tires au hasard dans un peu plus d un million de
+# combinaisons : sur deux cents tirages a l aveugle, deux coincident une
+# fois sur cinquante — ce test rougissait donc sans raison. La
+# production ne tire jamais a l aveugle : elle passe les numeros deja
+# pris, et la boucle de nouvel_identifiant recommence tant qu il faut.
+# C est cela qu on verifie.
+deja = set()
+for _ in range(200):
+    deja.add(bq.nouveau_numero(existants=deja))
 verifier("deux cents numeros tires, deux cents numeros differents", len(deja) == 200)
 meta = bq.metadonnees_stripe(numero, commande)
 verifier("les metadonnees tiennent dans les limites de Stripe",
