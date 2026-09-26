@@ -29,6 +29,7 @@ import rapport as rp
 import salons_proteges as sp
 import roles_masse as rm
 import annulation as an
+import modmail as mm
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -333,6 +334,7 @@ F_XP = chemin_donnees("xp.json")
 F_ANNIVERSAIRES = chemin_donnees("anniversaires.json")
 F_RAPPELS = chemin_donnees("rappels.json")
 F_ANNULATIONS = chemin_donnees("annulations.json")
+F_MODMAIL = chemin_donnees("modmail.json")
 F_MUR = chemin_donnees("mur.json")
 F_VOTES = chemin_donnees("votes.json")
 # Le salon de comptage : ou en est la serie, qui a compte le dernier, le
@@ -7333,6 +7335,7 @@ def serialize_dashboard_config(guild):
             "xp_vocal": bool(cfg.get("xp_vocal")),
         },
         "salons_proteges": sp.lire_config(cfg.get("salons_proteges")),
+        "modmail": mm.lire_config(cfg.get("modmail")),
         "roles_masse": {**rm.lire_config(cfg.get("roles_masse")),
                         "travail": massrole_etat(gid)},
         "events": evenements_cfg(gid),
@@ -7523,6 +7526,18 @@ async def apply_dashboard_config(guild, payload):
         # L'annonce suit le reglage, dans le salon lui-meme.
         propre["annonces"] = await accorder_annonces_proteges(guild, avant_proteges, propre)
         cfg["salons_proteges"] = propre
+    courrier = payload.get("modmail")
+    if isinstance(courrier, dict):
+        propre = mm.lire_config(courrier)
+        # Un salon ou un role d'un AUTRE serveur est refuse ici comme
+        # ailleurs : le navigateur garde parfois les listes du serveur
+        # precedent, et le courrier partirait chez lui.
+        salon = id_salon_du_serveur(guild, propre["salon"])
+        propre["salon"] = str(salon) if salon else ""
+        role = guild.get_role(int(propre["role"])) if propre["role"] else None
+        propre["role"] = str(role.id) if role else ""
+        cfg["modmail"] = propre
+
     masse = payload.get("roles_masse")
     if isinstance(masse, dict):
         propre = rm.lire_config(masse)
@@ -23566,9 +23581,472 @@ class _SelecteurTraductionCiblee(discord.ui.Select):
 
 _en_cours: set = set()
 
+# ══════════════════════════════════════════════════════════════════════
+#  LE MODMAIL : ecrire a l'equipe, en prive
+# ══════════════════════════════════════════════════════════════════════
+#
+# Jusqu'ici, un message prive au bot tombait dans le vide : `on_message`
+# rendait la main des qu'il n'y avait pas de serveur. Un membre qui
+# voulait signaler quelqu'un sans se faire voir, demander une
+# permission ou poser une question genante avait le choix entre le dire
+# devant tout le monde et ecrire a un moderateur au hasard.
+#
+# Le courrier ouvre un fil cote equipe, un par membre. Ce qu'ils y
+# ecrivent repart en prive ; ce qui commence par « // » reste entre eux.
+# C'est un module : coupe par defaut, il ne change rien.
+
+MODMAIL_CHOIX_MINUTES = 30
+MODMAIL_ATTENTE_MAX = 20
+
+# Le serveur choisi par un membre qui en partage plusieurs, et le
+# message qu'il attendait d'envoyer. En memoire vive seulement : apres
+# un redemarrage on redemande, ce qui coute une question, tandis
+# qu'ecrire le brouillon d'un membre sur le disque coute sa confiance.
+MODMAIL_CHOIX = {}
+MODMAIL_ATTENTE = {}
+
+
+def modmail_cfg(gid):
+    """Le courrier de ce serveur, nettoye."""
+    return mm.lire_config(get_cfg(gid).get("modmail"))
+
+
+def modmail_table():
+    table = jload(F_MODMAIL)
+    return table if isinstance(table, dict) else {}
+
+
+def modmail_ecrire(table):
+    jsave(F_MODMAIL, table)
+
+
+def modmail_serveurs_du_membre(utilisateur):
+    """Les serveurs partages ou ce membre peut ecrire a l'equipe."""
+    partages = []
+    for guild in bot.guilds:
+        if guild.get_member(utilisateur.id) is None:
+            continue
+        config = modmail_cfg(str(guild.id))
+        if str(utilisateur.id) in config["bloques"]:
+            continue
+        partages.append((str(guild.id), guild.name, config))
+    return mm.serveurs_ouverts(partages)
+
+
+def modmail_secondes_depuis(gid, uid):
+    """Depuis combien de temps ce membre n'a rien envoye, ou None."""
+    fiche = mm.lire_fil(modmail_table(), gid, uid)
+    quand = sc.parse_iso((fiche or {}).get("dernier"))
+    if quand is None:
+        return None
+    return max(0, (now() - quand).total_seconds())
+
+
+def embed_modmail_ouverture(guild, membre):
+    """La fiche qui ouvre le fil : qui ecrit, et ce qu'on sait de lui."""
+    gid = str(guild.id)
+    embed = EG("✉️ Nouveau courrier", f"{membre.mention} écrit à l'équipe.",
+               Palette.INFO, gid)
+    try:
+        embed.set_thumbnail(url=membre.display_avatar.url)
+    except Exception:
+        pass
+    embed.add_field(name="👤 Membre", value=f"{membre} (`{membre.id}`)", inline=False)
+    embed.add_field(name="📅 Arrivé le",
+                    value=fmt(membre.joined_at) if getattr(membre, "joined_at", None) else "inconnu",
+                    inline=True)
+    embed.add_field(name="📊 Points", value=f"`{INFRACTIONS.points(gid, membre.id)}`", inline=True)
+    embed.add_field(
+        name="✍️ Répondre",
+        value=("Écris dans ce fil : ton message part en privé, sous le nom du serveur.\n"
+               f"Commence par `{mm.NOTE_PREFIXE}` pour une note qui reste entre vous."),
+        inline=False)
+    return embed
+
+
+def vue_modmail(gid, uid):
+    """Fermer, ou ne plus recevoir ce membre. Sous la fiche d'ouverture."""
+    vue = discord.ui.View(timeout=None)
+    vue.add_item(discord.ui.Button(
+        label="Fermer", emoji="📪", style=discord.ButtonStyle.secondary,
+        custom_id=f"mm:fermer:{gid}:{uid}"))
+    vue.add_item(discord.ui.Button(
+        label="Bloquer", emoji="🚫", style=discord.ButtonStyle.danger,
+        custom_id=f"mm:bloquer:{gid}:{uid}"))
+    return vue
+
+
+def vue_modmail_serveurs(ouverts):
+    """Le choix du serveur, quand le membre en partage plusieurs."""
+    vue = discord.ui.View(timeout=None)
+    options = [discord.SelectOption(label=nom[:100], value=str(ident))
+               for ident, nom in ouverts[:25]]
+    vue.add_item(discord.ui.Select(placeholder="À quel serveur écris-tu ?",
+                                   options=options, custom_id="mm:serveur"))
+    return vue
+
+
+async def modmail_fil_du_membre(guild, membre, config, creer=True):
+    """
+    Le fil de ce membre : celui qui existe, ou un neuf.
+
+    Rend (fil, il_vient_d_etre_cree). Un fil archive se rouvre : le
+    courrier d'un membre garde son historique, c'est tout l'interet.
+    """
+    fiche = mm.lire_fil(modmail_table(), guild.id, membre.id)
+    fil = None
+    if fiche and str(fiche.get("fil", "")).isdigit():
+        fil = guild.get_thread(int(fiche["fil"]))
+        if fil is None:
+            try:
+                fil = await bot.fetch_channel(int(fiche["fil"]))
+            except Exception:
+                fil = None
+        if fil is not None and getattr(fil, "archived", False):
+            try:
+                await fil.edit(archived=False)
+            except Exception:
+                fil = None
+    if fil is not None:
+        return fil, False
+    if not creer:
+        return None, False
+    salon = salon_du_serveur(guild, config["salon"])
+    if salon is None:
+        return None, False
+    nom = mm.nom_du_fil(getattr(membre, "display_name", str(membre)), membre.id)
+    fil = None
+    try:
+        # Un fil prive d'abord : le courrier d'un membre ne regarde que
+        # l'equipe, meme si le salon venait a s'ouvrir un jour.
+        fil = await salon.create_thread(name=nom, invitable=False,
+                                        type=discord.ChannelType.private_thread)
+    except Exception:
+        try:
+            fil = await salon.create_thread(name=nom)
+        except Exception as erreur:
+            print(f"modmail : fil impossible ({guild.id}) : {erreur}")
+            return None, False
+    modmail_ecrire(mm.poser_fil(modmail_table(), guild.id, membre.id,
+                                fil.id, now().isoformat()))
+    return fil, True
+
+
+async def modmail_poster(guild, membre, texte, pieces=()):
+    """
+    Porte le message d'un membre dans le fil de l'equipe.
+
+    Rend une chaine vide si c'est parti, sinon le code du refus.
+    """
+    gid = str(guild.id)
+    config = modmail_cfg(gid)
+    refus = mm.refus_message(config, membre.id, modmail_secondes_depuis(gid, membre.id))
+    if refus:
+        return refus
+    contenu = mm.message_relayable(texte, len(pieces))
+    if not contenu:
+        return "vide"
+    fil, neuf = await modmail_fil_du_membre(guild, membre, config)
+    if fil is None:
+        return "sans_salon"
+
+    if neuf:
+        role = guild.get_role(int(config["role"])) if config["role"] else None
+        try:
+            await fil.send(
+                content=role.mention if role else None,
+                embed=embed_modmail_ouverture(guild, membre),
+                view=vue_modmail(guild.id, membre.id),
+                allowed_mentions=discord.AllowedMentions(roles=True, users=False,
+                                                         everyone=False))
+        except Exception as erreur:
+            print(f"modmail : entete impossible ({guild.id}) : {erreur}")
+
+    embed = EG("💬 Message du membre", contenu, Palette.INFO, gid)
+    embed.set_author(name=str(membre), icon_url=getattr(membre.display_avatar, "url", None))
+    if pieces:
+        liens = "\n".join(str(getattr(p, "url", p))[:200] for p in list(pieces)[:5])
+        embed.add_field(name="📎 Pièces jointes", value=liens[:1024], inline=False)
+    try:
+        await fil.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as erreur:
+        print(f"modmail : message non pose ({guild.id}) : {erreur}")
+        return "sans_salon"
+
+    table = modmail_table()
+    fiche = mm.lire_fil(table, guild.id, membre.id) or {}
+    fiche["dernier"] = now().isoformat()
+    table.setdefault(gid, {})[str(membre.id)] = fiche
+    modmail_ecrire(table)
+    if neuf:
+        dashboard_log("modmail", guild, str(membre), contenu[:200])
+    return ""
+
+
+async def modmail_recevoir(message):
+    """
+    Un message prive adresse au bot.
+
+    Rien ne part tant que le membre n'a pas dit a QUEL serveur il ecrit
+    — le bot en partage souvent plusieurs avec lui, et le courrier
+    arriverait chez des inconnus.
+    """
+    utilisateur = message.author
+    texte = message.content or ""
+    pieces = list(getattr(message, "attachments", []) or [])
+    if not mm.message_relayable(texte, len(pieces)):
+        return
+    ouverts = modmail_serveurs_du_membre(utilisateur)
+    if not ouverts:
+        return  # aucun serveur ouvert : le silence vaut mieux qu'un refus
+
+    choisi = MODMAIL_CHOIX.get(utilisateur.id)
+    if choisi and choisi[1] < now():
+        MODMAIL_CHOIX.pop(utilisateur.id, None)
+        choisi = None
+    gid = choisi[0] if choisi else (ouverts[0][0] if len(ouverts) == 1 else "")
+
+    if not gid:
+        if len(MODMAIL_ATTENTE) < MODMAIL_ATTENTE_MAX:
+            MODMAIL_ATTENTE[utilisateur.id] = (texte, pieces, now())
+        try:
+            await utilisateur.send(
+                embed=E("✉️ À quel serveur ?",
+                        "Tu partages plusieurs serveurs avec ModBot. "
+                        "Choisis celui dont tu veux joindre l'équipe : "
+                        "ton message part aussitôt.", Palette.INFO),
+                view=vue_modmail_serveurs(ouverts))
+        except Exception:
+            pass
+        return
+
+    guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
+    membre = guild.get_member(utilisateur.id) if guild else None
+    if guild is None or membre is None:
+        return
+    refus = await modmail_poster(guild, membre, texte, pieces)
+    try:
+        if refus:
+            await utilisateur.send(embed=E("✉️ Message non transmis",
+                                           mm.REFUS.get(refus, mm.REFUS["inactif"]),
+                                           Palette.WARNING))
+            return
+        await message.add_reaction("✅")
+        config = modmail_cfg(str(guild.id))
+        if config["accueil"] and MODMAIL_CHOIX.get(utilisateur.id) is None:
+            await utilisateur.send(embed=EG(f"✉️ {guild.name}", config["accueil"],
+                                            Palette.INFO, str(guild.id)))
+    except Exception:
+        pass
+    # Le serveur reste choisi une demi-heure : la suite de la
+    # conversation ne repose pas la question a chaque phrase.
+    MODMAIL_CHOIX[utilisateur.id] = (str(guild.id),
+                                     now() + timedelta(minutes=MODMAIL_CHOIX_MINUTES))
+
+
+async def modmail_depuis_le_fil(message):
+    """
+    Un message ecrit dans un fil de courrier.
+
+    Rend True quand le message appartient au courrier : l'appelant
+    s'arrete la, sans experience ni filtre — un fil d'equipe n'est pas
+    un salon de discussion.
+    """
+    guild = message.guild
+    salon = message.channel
+    if guild is None:
+        return False
+    # C est la table qui dit si ce salon porte du courrier. Verifier le
+    # type du salon n economiserait qu une lecture, et refuserait tout
+    # ce qui n est pas exactement un fil.
+    uid = mm.membre_du_fil(modmail_table(), guild.id, getattr(salon, "id", 0))
+    if not uid:
+        return False
+    gid = str(guild.id)
+
+    if mm.est_note(message.content):
+        try:
+            await message.add_reaction("📝")
+        except Exception:
+            pass
+        return True
+    if not est_du_staff(message.author, gid):
+        return True
+
+    contenu = mm.message_relayable(message.content, len(message.attachments or []))
+    if not contenu:
+        return True
+    config = modmail_cfg(gid)
+    embed = EG(f"✉️ Réponse de {guild.name}", contenu, Palette.SUCCESS, gid)
+    embed.set_footer(text="L'équipe" if config["anonyme"] else str(message.author))
+    if message.attachments:
+        liens = "\n".join(p.url[:200] for p in message.attachments[:5])
+        embed.add_field(name="📎 Pièces jointes", value=liens[:1024], inline=False)
+    try:
+        cible = guild.get_member(int(uid)) or await bot.fetch_user(int(uid))
+        await cible.send(embed=embed)
+        await message.add_reaction("✅")
+    except Exception:
+        try:
+            await salon.send(embed=embed_error(
+                "Message non remis",
+                "Ses messages privés sont fermés, ou il a quitté le serveur.", gid))
+        except Exception:
+            pass
+    return True
+
+
+async def modmail_fermer(guild, uid, par, raison=""):
+    """Range le fil et previent le membre. Le prochain message en rouvrira un."""
+    gid = str(guild.id)
+    table = modmail_table()
+    fiche = mm.lire_fil(table, guild.id, uid)
+    modmail_ecrire(mm.fermer_fil(table, guild.id, uid))
+    if fiche and str(fiche.get("fil", "")).isdigit():
+        try:
+            fil = guild.get_thread(int(fiche["fil"])) or await bot.fetch_channel(int(fiche["fil"]))
+            await fil.send(embed=EG("📪 Courrier fermé",
+                                    f"Fermé par {par}." + (f"\n**Raison :** {raison}" if raison else ""),
+                                    Palette.INFO, gid))
+            await fil.edit(archived=True)
+        except Exception as erreur:
+            print(f"modmail : fermeture partielle ({guild.id}) : {erreur}")
+    try:
+        cible = guild.get_member(int(uid)) or await bot.fetch_user(int(uid))
+        await cible.send(embed=EG(
+            f"📪 {guild.name}",
+            "L'équipe a clos cet échange. Écris de nouveau si tu en as besoin : "
+            "un nouveau courrier s'ouvrira.", Palette.INFO, gid))
+    except Exception:
+        pass
+    await log_event(guild, "tickets", "Courrier fermé",
+                    f"Le courrier de <@{uid}> a été fermé par {par}.",
+                    fields=[("📋 Raison", raison or "—")], severity="info")
+
+
+async def modmail_interaction(interaction):
+    """Les boutons du courrier : fermer, bloquer, et le choix du serveur."""
+    donnees = interaction.data or {}
+    custom_id = str(donnees.get("custom_id") or "")
+    if not custom_id.startswith("mm:"):
+        return
+
+    if custom_id == "mm:serveur":
+        valeurs = donnees.get("values") or []
+        gid = str(valeurs[0]) if valeurs else ""
+        guild = bot.get_guild(int(gid)) if gid.isdigit() else None
+        membre = guild.get_member(interaction.user.id) if guild else None
+        if membre is None:
+            return await safe_ephemeral(interaction, embed=embed_error(
+                "Serveur introuvable", "Tu n'es plus sur ce serveur.", None))
+        MODMAIL_CHOIX[interaction.user.id] = (
+            gid, now() + timedelta(minutes=MODMAIL_CHOIX_MINUTES))
+        attente = MODMAIL_ATTENTE.pop(interaction.user.id, None)
+        if not attente:
+            return await safe_ephemeral(interaction, embed=embed_success(
+                "C'est noté", f"Écris ton message : il partira à **{guild.name}**.", gid))
+        refus = await modmail_poster(guild, membre, attente[0], attente[1])
+        if refus:
+            return await safe_ephemeral(interaction, embed=embed_error(
+                "Message non transmis", mm.REFUS.get(refus, mm.REFUS["inactif"]), gid))
+        return await safe_ephemeral(interaction, embed=embed_success(
+            "Message transmis", f"L'équipe de **{guild.name}** l'a reçu.", gid))
+
+    morceaux = custom_id.split(":")
+    if len(morceaux) != 4:
+        return
+    _, action, gid, uid = morceaux
+    guild = bot.get_guild(int(gid)) if gid.isdigit() else None
+    auteur = guild.get_member(interaction.user.id) if guild else None
+    if guild is None or auteur is None or not est_du_staff(auteur, gid):
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Réservé à l'équipe", "Seule l'équipe du serveur agit sur le courrier.",
+            gid if guild else None))
+
+    if action == "fermer":
+        await _safe_defer(interaction)
+        await modmail_fermer(guild, uid, str(interaction.user))
+        return await safe_ephemeral(interaction, embed=embed_success(
+            "Courrier fermé", "Le fil est archivé, le membre est prévenu.", gid))
+
+    if action == "bloquer":
+        await _safe_defer(interaction)
+        update_cfg(gid, "modmail", mm.bloquer(get_cfg(gid).get("modmail"), uid, True))
+        await modmail_fermer(guild, uid, str(interaction.user), "membre bloqué")
+        await log_event(guild, "tickets", "Courrier bloqué",
+                        f"<@{uid}> ne peut plus écrire à l'équipe.",
+                        severity="warning", actor=interaction.user)
+        return await safe_ephemeral(interaction, embed=embed_success(
+            "Membre bloqué",
+            "Ses messages n'arriveront plus. `/modmail debloquer` fait le chemin inverse.",
+            gid))
+
+
+bot.add_listener(modmail_interaction, "on_interaction")
+
+
+modmail_group = app_commands.Group(
+    name="modmail", description="✉️ La messagerie privée de l'équipe",
+    default_permissions=discord.Permissions(manage_messages=True),
+    guild_only=True)
+
+
+@modmail_group.command(name="fermer", description="📪 Fermer le courrier d'un membre")
+@app_commands.describe(membre="Le membre dont on ferme le courrier",
+                       raison="Ce qui sera écrit dans le fil")
+async def modmail_cmd_fermer(i: discord.Interaction, membre: discord.User, raison: str = ""):
+    gid = str(i.guild.id)
+    if not est_du_staff(i.user, gid):
+        return await send_error(i, "Réservé à l'équipe",
+                                "Seule l'équipe du serveur agit sur le courrier.")
+    await _safe_defer(i)
+    if mm.lire_fil(modmail_table(), i.guild.id, membre.id) is None:
+        return await i.followup.send(embed=embed_info(
+            "Rien à fermer", f"{membre.mention} n'a pas de courrier ouvert.", gid),
+            ephemeral=True)
+    await modmail_fermer(i.guild, str(membre.id), str(i.user), raison)
+    await i.followup.send(embed=embed_success(
+        "Courrier fermé", f"Celui de {membre.mention} est archivé.", gid), ephemeral=True)
+
+
+@modmail_group.command(name="bloquer", description="🚫 Ne plus recevoir les messages d'un membre")
+@app_commands.describe(membre="Le membre à bloquer")
+async def modmail_cmd_bloquer(i: discord.Interaction, membre: discord.User):
+    gid = str(i.guild.id)
+    if not est_du_staff(i.user, gid):
+        return await send_error(i, "Réservé à l'équipe",
+                                "Seule l'équipe du serveur agit sur le courrier.")
+    await _safe_defer(i)
+    update_cfg(gid, "modmail", mm.bloquer(get_cfg(gid).get("modmail"), membre.id, True))
+    await modmail_fermer(i.guild, str(membre.id), str(i.user), "membre bloqué")
+    await i.followup.send(embed=embed_success(
+        "Membre bloqué", f"Les messages de {membre.mention} n'arriveront plus.", gid),
+        ephemeral=True)
+
+
+@modmail_group.command(name="debloquer", description="✅ Recevoir de nouveau les messages d'un membre")
+@app_commands.describe(membre="Le membre à débloquer")
+async def modmail_cmd_debloquer(i: discord.Interaction, membre: discord.User):
+    gid = str(i.guild.id)
+    if not est_du_staff(i.user, gid):
+        return await send_error(i, "Réservé à l'équipe",
+                                "Seule l'équipe du serveur agit sur le courrier.")
+    await _safe_defer(i)
+    update_cfg(gid, "modmail", mm.bloquer(get_cfg(gid).get("modmail"), membre.id, False))
+    await i.followup.send(embed=embed_success(
+        "Membre débloqué", f"{membre.mention} peut de nouveau écrire à l'équipe.", gid),
+        ephemeral=True)
+
+
+bot.tree.add_command(modmail_group)
+
+
 @bot.event
 async def on_message(message):
+    # Un message prive : c'est le courrier. Il tombait dans le vide.
     if not message.guild:
+        if not message.author.bot:
+            await modmail_recevoir(message)
         return
 
     # Les messages de bots etaient ignores en bloc. C'est par la qu'est
@@ -23578,6 +24056,11 @@ async def on_message(message):
     if message.author.bot:
         if message.author.id != getattr(bot.user, "id", 0):
             await verifier_arnaque(message)
+        return
+
+    # Le courrier de l'equipe, avant tout le reste : ce qui s'ecrit la
+    # part au membre, et ne rapporte ni statistique ni experience.
+    if await modmail_depuis_le_fil(message):
         return
 
     if message.id in _en_cours:
