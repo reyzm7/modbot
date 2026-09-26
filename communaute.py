@@ -389,6 +389,98 @@ def lire_seuil(brut, defaut=SEUIL_MUR):
     return seuil if SEUIL_MUR_MIN <= seuil <= SEUIL_MUR_MAX else defaut
 
 
+MUR_EMOJI_MAX = 8
+
+
+def lire_emoji_mur(brut, defaut=ETOILE):
+    """
+    L'emoji qui compte pour le mur.
+
+    Un serveur de joueurs prefere parfois une manette a une etoile. On
+    accepte un emoji unicode, ou un emoji du serveur ecrit `<:nom:123>`.
+    Tout le reste — un mot, une phrase, une lettre — retombe sur
+    l'etoile : ce serait un mur que personne n'alimente.
+    """
+    texte = str(brut or "").strip()
+    if not texte:
+        return defaut
+    if re.fullmatch(r"<a?:[A-Za-z0-9_]{2,32}:\d{15,25}>", texte):
+        return texte
+    if len(texte) <= MUR_EMOJI_MAX and not texte.isascii() and " " not in texte:
+        return texte
+    return defaut
+
+
+def est_emoji_du_mur(lu, regle):
+    """
+    Cette reaction est-elle celle du mur ?
+
+    `lu` peut etre un caractere, un emoji partiel ou un emoji du
+    serveur : on compare ce qui s'ecrit, pas le type.
+    """
+    lu, regle = str(lu or "").strip(), str(regle or "").strip()
+    if not lu or not regle:
+        return False
+    if lu == regle:
+        return True
+    # Un emoji du serveur se compare par son identifiant : le nom peut
+    # changer sans que ce soit un autre emoji.
+    ids = [re.search(r":(\d{15,25})>$", valeur) for valeur in (lu, regle)]
+    if all(ids):
+        return ids[0].group(1) == ids[1].group(1)
+    return False
+
+
+def etoiles_comptees(compte, auteur_a_vote=False):
+    """
+    Les etoiles qui comptent vraiment : la sienne ne compte pas.
+
+    S'etoiler soi-meme sur un serveur au seuil de deux suffisait a
+    entrer au mur avec une seule vraie etoile.
+    """
+    return max(0, int(compte or 0) - (1 if auteur_a_vote else 0))
+
+
+def doit_quitter_le_mur(compte, seuil=SEUIL_MUR):
+    """Les etoiles sont retirees : le message redescend du mur."""
+    return int(compte or 0) < lire_seuil(seuil)
+
+
+def fiche_mur(post_id, compte, auteur_id="", quand=""):
+    """Ce qu'on retient d'un message pose au mur."""
+    return {"post": str(post_id), "compte": int(compte or 0),
+            "auteur": str(auteur_id or ""), "date": str(quand or "")}
+
+
+def lire_fiche_mur(valeur):
+    """
+    La fiche d'un message du mur, ancien format compris.
+
+    Les premieres versions n'ecrivaient que l'identifiant du message
+    recopie, une chaine toute seule : on la relit sans rien perdre.
+    """
+    if isinstance(valeur, dict):
+        return {"post": str(valeur.get("post") or ""),
+                "compte": int(valeur.get("compte") or 0),
+                "auteur": str(valeur.get("auteur") or ""),
+                "date": str(valeur.get("date") or "")}
+    texte = str(valeur or "")
+    return {"post": texte if texte.isdigit() else "", "compte": 0,
+            "auteur": "", "date": ""}
+
+
+def classement_mur(table, limite=5):
+    """Les messages les plus etoiles, du plus etoile au moins."""
+    lignes = []
+    for message_id, valeur in (table or {}).items():
+        fiche = lire_fiche_mur(valeur)
+        if not fiche["post"]:
+            continue
+        lignes.append({**fiche, "message": str(message_id)})
+    lignes.sort(key=lambda ligne: (-ligne["compte"], ligne["date"]))
+    return lignes[:max(1, int(limite or 5))]
+
+
 def merite_le_mur(compte, seuil=SEUIL_MUR, auteur_est_bot=False, deja=False):
     """
     (True, "") si ce message doit rejoindre le mur, (False, raison) sinon.
@@ -404,8 +496,9 @@ def merite_le_mur(compte, seuil=SEUIL_MUR, auteur_est_bot=False, deja=False):
     return True, ""
 
 
-def entete_mur(compte, seuil=SEUIL_MUR):
-    return f"{ETOILE} **{int(compte or 0)}**" + ("" if int(compte or 0) >= lire_seuil(seuil) else " (bientôt)")
+def entete_mur(compte, seuil=SEUIL_MUR, emoji=ETOILE):
+    return (f"{emoji or ETOILE} **{int(compte or 0)}**"
+            + ("" if int(compte or 0) >= lire_seuil(seuil) else " (bientôt)"))
 
 
 # ══════════════════════════════════════════════════════════════════════

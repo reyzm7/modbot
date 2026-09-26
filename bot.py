@@ -7324,6 +7324,8 @@ def serialize_dashboard_config(guild):
             "anniv_salon": str(cfg.get("anniv_salon") or ""),
             "mur_salon": str(cfg.get("mur_salon") or ""),
             "mur_seuil": cm.lire_seuil(cfg.get("mur_seuil")),
+            "mur_emoji": cm.lire_emoji_mur(cfg.get("mur_emoji")),
+            "mur_exclus": [str(x) for x in (cfg.get("mur_exclus") or [])],
             "anniv_role": str(cfg.get("anniv_role") or ""),
             "anniv_message": cfg.get("anniv_message") or "",
             "comptage_salon": str(cfg.get("comptage_salon") or ""),
@@ -7457,6 +7459,15 @@ async def apply_dashboard_config(guild, payload):
     if isinstance(vie, dict):
         cfg["xp_enabled"] = bool(vie.get("xp"))
         cfg["mur_seuil"] = cm.lire_seuil(vie.get("mur_seuil"))
+        if "mur_emoji" in vie:
+            cfg["mur_emoji"] = cm.lire_emoji_mur(vie.get("mur_emoji"))
+        if isinstance(vie.get("mur_exclus"), list):
+            gardes = []
+            for brut in vie["mur_exclus"][:40]:
+                parsed = id_salon_du_serveur(guild, brut)
+                if parsed and str(parsed) not in gardes:
+                    gardes.append(str(parsed))
+            cfg["mur_exclus"] = gardes
         if "xp_message" in vie:
             cfg["xp_message"] = clean_short_text(vie.get("xp_message"), "", 400)
         if "recompenses_cumul" in vie:
@@ -23171,38 +23182,72 @@ async def mur_reaction(payload):
     Une etoile de plus, ou de moins, sur un message.
 
     Le mur appartient aux membres : c'est leur reaction qui decide, pas
-    l'equipe. Un message deja au mur voit seulement son compte change.
+    l'equipe. L'auteur, lui, ne vote pas pour lui-meme, et un message
+    qui perd ses etoiles quitte le mur — sinon il suffisait de
+    s'etoiler soi-meme pour y rester.
     """
-    if str(getattr(payload.emoji, "name", "")) != cm.ETOILE or not payload.guild_id:
+    if not payload.guild_id:
         return
     guild = bot.get_guild(payload.guild_id)
     if guild is None:
         return
     cfg = get_cfg(str(guild.id))
+    emoji = cm.lire_emoji_mur(cfg.get("mur_emoji"))
+    if not cm.est_emoji_du_mur(getattr(payload, "emoji", ""), emoji):
+        return
     mur = salon_du_serveur(guild, cfg.get("mur_salon"))
     source = salon_du_serveur(guild, payload.channel_id)
     if mur is None or source is None or mur.id == source.id:
+        return
+    # Un salon mis de cote n'alimente pas le mur : un salon de tests ou
+    # de memes n'a pas a remplir la vitrine du serveur.
+    if str(payload.channel_id) in [str(x) for x in (cfg.get("mur_exclus") or [])]:
         return
     try:
         message = await source.fetch_message(payload.message_id)
     except Exception:
         return
-    etoiles = next((r.count for r in message.reactions
-                    if str(getattr(r.emoji, "name", r.emoji)) == cm.ETOILE), 0)
+
+    reaction = next((r for r in message.reactions
+                     if cm.est_emoji_du_mur(getattr(r, "emoji", ""), emoji)), None)
+    brut = int(getattr(reaction, "count", 0) or 0)
+    auteur_a_vote = False
+    if reaction is not None and brut:
+        try:
+            async for personne in reaction.users(limit=60):
+                if personne.id == message.author.id:
+                    auteur_a_vote = True
+                    break
+        except Exception:
+            pass
+    etoiles = cm.etoiles_comptees(brut, auteur_a_vote)
+
     table = _par_serveur(F_MUR, guild.id)
-    deja = str(table.get(str(message.id)) or "")
+    fiche = cm.lire_fiche_mur(table.get(str(message.id)))
     seuil = cm.lire_seuil(cfg.get("mur_seuil"))
 
-    if deja.isdigit():
-        try:
-            copie = await mur.fetch_message(int(deja))
-            await copie.edit(content=cm.entete_mur(etoiles, seuil))
-        except Exception:
+    if fiche["post"]:
+        if cm.doit_quitter_le_mur(etoiles, seuil):
+            try:
+                copie = await mur.fetch_message(int(fiche["post"]))
+                await copie.delete()
+            except Exception:
+                pass
             table.pop(str(message.id), None)
             _ecrire_par_serveur(F_MUR, guild.id, table)
+            return
+        try:
+            copie = await mur.fetch_message(int(fiche["post"]))
+            await copie.edit(content=cm.entete_mur(etoiles, seuil, emoji))
+            table[str(message.id)] = cm.fiche_mur(
+                fiche["post"], etoiles, message.author.id,
+                fiche["date"] or now().isoformat())
+        except Exception:
+            table.pop(str(message.id), None)
+        _ecrire_par_serveur(F_MUR, guild.id, table)
         return
 
-    droit, _ = cm.merite_le_mur(etoiles, seuil, message.author.bot, bool(deja))
+    droit, _ = cm.merite_le_mur(etoiles, seuil, message.author.bot, False)
     if not droit:
         return
     embed = E(f"Message de {message.author.display_name}",
@@ -23211,12 +23256,133 @@ async def mur_reaction(payload):
     if message.attachments and str(message.attachments[0].content_type or "").startswith("image"):
         embed.set_image(url=message.attachments[0].url)
     try:
-        pose = await mur.send(content=cm.entete_mur(etoiles, seuil), embed=embed)
+        pose = await mur.send(content=cm.entete_mur(etoiles, seuil, emoji), embed=embed)
     except Exception as erreur:
         print(f"mur: {guild.id} : {erreur}")
         return
-    table[str(message.id)] = str(pose.id)
+    table[str(message.id)] = cm.fiche_mur(pose.id, etoiles, message.author.id,
+                                          now().isoformat())
     _ecrire_par_serveur(F_MUR, guild.id, table)
+
+
+@bot.tree.command(name="mur", description="⭐ Les messages les plus étoilés du serveur")
+@app_commands.guild_only()
+async def cmd_mur(i: discord.Interaction):
+    """Le classement du mur, lisible par tout le monde."""
+    gid = str(i.guild.id)
+    cfg = get_cfg(gid)
+    salon = salon_du_serveur(i.guild, cfg.get("mur_salon"))
+    if salon is None:
+        return await safe_ephemeral(i, embed=embed_info(
+            "Le mur n'est pas en place",
+            "Un administrateur choisit son salon dans le tableau de bord, "
+            "rubrique « Vie du serveur ».", gid))
+    emoji = cm.lire_emoji_mur(cfg.get("mur_emoji"))
+    lignes = cm.classement_mur(_par_serveur(F_MUR, i.guild.id), limite=5)
+    if not lignes:
+        return await safe_ephemeral(i, embed=embed_info(
+            "Le mur est vide",
+            f"Réagis avec {emoji} sur un message que tu trouves bon : "
+            f"à **{cm.lire_seuil(cfg.get('mur_seuil'))}** réactions, il arrive dans "
+            f"{salon.mention}.", gid))
+    embed = EG(f"{emoji} Le mur de {i.guild.name}",
+               f"Les messages les plus étoilés, dans {salon.mention}.",
+               Palette.INFO, gid)
+    for rang, ligne in enumerate(lignes, 1):
+        auteur = f"<@{ligne['auteur']}>" if ligne["auteur"] else "quelqu'un"
+        lien = f"https://discord.com/channels/{i.guild.id}/{salon.id}/{ligne['post']}"
+        embed.add_field(
+            name=f"{rang}. {emoji} {ligne['compte']}",
+            value=f"{auteur} — [aller voir]({lien})", inline=False)
+    await safe_ephemeral(i, embed=embed)
+
+
+@bot.tree.command(name="mesdonnees",
+                  description="🔐 Ce que ModBot garde sur toi, sur ce serveur")
+@app_commands.guild_only()
+async def cmd_mesdonnees(i: discord.Interaction):
+    """
+    Le droit d'acces, en une commande.
+
+    La politique de confidentialite promet ce droit depuis le debut ; il
+    fallait ecrire a l'equipe pour l'exercer. La reponse part en message
+    prive : ce sont ses donnees, pas celles du salon.
+    """
+    await _safe_defer(i)
+    gid, uid = str(i.guild.id), str(i.user.id)
+    jours = jours_infractions(gid)
+    historique = INFRACTIONS.history(gid, i.user.id)
+    embed = EG(f"🔐 Tes données sur {i.guild.name}",
+               "Voici tout ce que ModBot garde sur toi pour ce serveur. "
+               "Rien d'autre n'est enregistré.", Palette.INFO, gid)
+
+    lignes = [f"**{INFRACTIONS.points(gid, i.user.id)}** point(s), "
+              f"**{len(historique)}** infraction(s) enregistrée(s)"]
+    if historique:
+        derniere = sc.parse_iso(historique[-1].get("date"))
+        fin = sc.date_expiration(historique[-1].get("date"), jours)
+        lignes.append(f"la dernière le `{fmt(derniere) if derniere else '?'}`"
+                      + (f", elle cesse de compter le `{fmt(fin)}`" if fin else ""))
+    lignes.append(f"**{get_nb(uid, gid)}** avertissement(s) dans l'échelle des sanctions")
+    lignes.append("l'oubli : " + (f"au bout de **{sc.libelle_retention(jours)}**"
+                                  if jours else "ce serveur ne les oublie pas"))
+    embed.add_field(name="⚖️ Modération", value="\n".join(lignes)[:1024], inline=False)
+
+    # Les notes de l'equipe sont comptees, pas citees : leur contenu
+    # s'obtient aupres de l'equipe, qui saura dire de quoi il retourne.
+    notes = notes_du_membre(gid, i.user.id)
+    embed.add_field(
+        name="📝 Notes de l'équipe",
+        value=(f"**{len(notes)}** note(s) écrite(s) par l'équipe. Leur contenu "
+               "se demande à l'équipe du serveur." if notes else "aucune"),
+        inline=False)
+
+    if get_cfg(gid).get("xp_enabled"):
+        table = xp_du_serveur(gid)
+        fiche = table.get(uid) or {}
+        niveau, _, _ = cm.progression(fiche.get("xp"))
+        embed.add_field(name="📈 Expérience",
+                        value=f"niveau **{niveau}**, **{int(fiche.get('xp') or 0)}** point(s), "
+                              f"rang **{cm.rang_de(table, i.user.id)}**", inline=True)
+
+    anniversaire = (_par_serveur(F_ANNIVERSAIRES, gid) or {}).get(uid)
+    if anniversaire:
+        embed.add_field(name="🎂 Anniversaire",
+                        value=f"`{anniversaire}` (jour et mois, jamais l'année)",
+                        inline=True)
+
+    divers = []
+    if mm.lire_fil(modmail_table(), i.guild.id, i.user.id):
+        divers.append("un courrier ouvert avec l'équipe")
+    if est_immunise(i.user, gid):
+        divers.append("exempté des sanctions automatiques")
+    bans = [b for b in (jload(F_BANS).get(gid) or [])
+            if str(b.get("user_id") or b.get("id") or "") == uid]
+    if bans:
+        divers.append(f"**{len(bans)}** bannissement(s) dans l'historique du serveur")
+    embed.add_field(name="📌 Autre", value="\n".join(divers) if divers else "rien d'autre",
+                    inline=False)
+
+    embed.add_field(
+        name="🚫 Ce que ModBot ne garde pas",
+        value=("Le texte de tes messages : il est lu au passage par l'automodération, "
+               "puis oublié. Ni adresse, ni moyen de paiement, ni historique de lecture."),
+        inline=False)
+    embed.add_field(
+        name="🧹 Faire effacer",
+        value="Demande-le à l'équipe du serveur : `/infractions-reset` efface ton "
+              "casier, et quitter le serveur arrête tout traitement.",
+        inline=False)
+    embed.set_footer(text="Envoyé en privé : ce sont tes données.")
+
+    try:
+        await i.user.send(embed=embed)
+        await i.followup.send(embed=embed_success(
+            "C'est parti en message privé", "Regarde tes messages privés.", gid),
+            ephemeral=True)
+    except Exception:
+        # MP fermes : la reponse reste ephemere, visible de lui seul.
+        await i.followup.send(embed=embed, ephemeral=True)
 
 
 # ── Les votes des suggestions ─────────────────────────────────────────
@@ -25987,7 +26153,7 @@ CATEGORIES_COMMANDES = [
     ("🧹", "Messages", ["clear-message", "clear-all", "annonce", "patchnotes", "massdm"]),
     ("🎫", "Support", ["addticket", "report", "suggest", "modmail"]),
     ("🎉", "Communauté", ["giveaway", "translate", "niveau", "classement",
-                         "anniversaire", "rappel"]),
+                         "anniversaire", "rappel", "mur"]),
     ("🔇", "Sanctions", ["mute", "unmute"]),
     ("🔒", "Salons", ["lock", "unlock", "salon-acces"]),
     ("🎭", "Roles", ["role", "massrole", "demassrole"]),
@@ -25996,7 +26162,7 @@ CATEGORIES_COMMANDES = [
     ("💾", "Sauvegardes", ["backup"]),
     ("📊", "Statistiques", ["serverstats", "modstats", "profilestats"]),
     ("⭐", "Premium", ["premium", "voter"]),
-    ("🧰", "Outils", ["installer", "panel", "aide", "info-bot"]),
+    ("🧰", "Outils", ["installer", "panel", "aide", "info-bot", "mesdonnees"]),
 ]
 
 # Il n'y a plus de commande a prefixe : `/role` et `/salon-acces` les
