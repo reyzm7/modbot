@@ -178,9 +178,10 @@ source = open("bot.py", encoding="utf-8").read()
 verifier("le module est importé", "import modmail as mm" in source)
 verifier("un message privé n'est plus jeté",
          "await modmail_recevoir(message)" in source)
+corps = source[source.index("async def on_message(message):"):]
 verifier("le fil de courrier passe avant l'expérience et les filtres",
-         source.index("await modmail_depuis_le_fil(message)")
-         < source.index("track_msg(uid, gid)"))
+         corps.index("await modmail_depuis_le_fil(message)")
+         < corps.index("track_msg(uid, gid)"))
 verifier("les boutons du courrier ont leur écouteur",
          'bot.add_listener(modmail_interaction, "on_interaction")' in source)
 

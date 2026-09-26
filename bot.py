@@ -23699,7 +23699,9 @@ async def modmail_fil_du_membre(guild, membre, config, creer=True):
         fil = guild.get_thread(int(fiche["fil"]))
         if fil is None:
             try:
-                fil = await bot.fetch_channel(int(fiche["fil"]))
+                # Sur CE serveur : une recherche globale rendrait le fil
+                # d'un autre, et le courrier partirait chez lui.
+                fil = await guild.fetch_channel(int(fiche["fil"]))
             except Exception:
                 fil = None
         if fil is not None and getattr(fil, "archived", False):
@@ -23904,7 +23906,8 @@ async def modmail_fermer(guild, uid, par, raison=""):
     modmail_ecrire(mm.fermer_fil(table, guild.id, uid))
     if fiche and str(fiche.get("fil", "")).isdigit():
         try:
-            fil = guild.get_thread(int(fiche["fil"])) or await bot.fetch_channel(int(fiche["fil"]))
+            fil = (guild.get_thread(int(fiche["fil"]))
+                   or await guild.fetch_channel(int(fiche["fil"])))
             await fil.send(embed=EG("📪 Courrier fermé",
                                     f"Fermé par {par}." + (f"\n**Raison :** {raison}" if raison else ""),
                                     Palette.INFO, gid))
@@ -25707,7 +25710,7 @@ CATEGORIES_COMMANDES = [
     ("🔨", "Modération", ["warn", "ban", "deban", "ban-list", "avert-count",
                           "reset-avert", "infractions", "infractions-reset", "insultes"]),
     ("🧹", "Messages", ["clear-message", "clear-all", "annonce", "patchnotes", "massdm"]),
-    ("🎫", "Support", ["addticket", "report", "suggest"]),
+    ("🎫", "Support", ["addticket", "report", "suggest", "modmail"]),
     ("🎉", "Communauté", ["giveaway", "translate", "niveau", "classement",
                          "anniversaire", "rappel"]),
     ("🔇", "Sanctions", ["mute", "unmute"]),
