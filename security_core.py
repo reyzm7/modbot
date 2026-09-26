@@ -390,6 +390,53 @@ def resolve_sanction(points, ladder=None):
 #  4. HISTORIQUE DES INFRACTIONS
 # ════════════════════════════════════════════════════════════════════
 
+RETENTION_DEFAUT = 180
+RETENTION_MAX = 3650
+
+
+def jours_de_retention(valeur, defaut=RETENTION_DEFAUT):
+    """
+    Combien de jours une infraction continue de compter.
+
+    Rien du tout : la valeur par defaut. Zero ou moins : le serveur
+    garde tout, pour toujours — c'est un choix legitime. Au-dela de dix
+    ans on borne, pour qu'un nombre errant ne fabrique pas des dates
+    impossibles.
+    """
+    if valeur is None or (isinstance(valeur, str) and not valeur.strip()):
+        return int(defaut)
+    try:
+        jours = int(float(valeur))
+    except (TypeError, ValueError):
+        return int(defaut)
+    if jours <= 0:
+        return 0
+    return min(jours, RETENTION_MAX)
+
+
+def libelle_retention(jours):
+    """« 90 jours », « 6 mois », « 1 an ». Vide quand rien ne s'efface."""
+    jours = int(jours or 0)
+    if jours <= 0:
+        return ""
+    if jours >= 365 and jours % 365 == 0:
+        annees = jours // 365
+        return "1 an" if annees == 1 else f"{annees} ans"
+    if jours >= 60 and jours % 30 == 0:
+        return f"{jours // 30} mois"
+    return "1 jour" if jours == 1 else f"{jours} jours"
+
+
+def date_expiration(date_iso, jours):
+    """Le jour ou cette infraction cesse de compter, ou None si jamais."""
+    if not jours or int(jours) <= 0:
+        return None
+    stamp = parse_iso(date_iso)
+    if stamp is None:
+        return None
+    return stamp + timedelta(days=int(jours))
+
+
 class InfractionStore:
     """
     Historique persistant des infractions, par serveur puis par membre.
@@ -402,9 +449,22 @@ class InfractionStore:
 
     MAX_ENTRIES_PER_MEMBER = 100
 
-    def __init__(self, path, retention_days=180):
+    def __init__(self, path, retention_days=RETENTION_DEFAUT, retention_resolver=None):
         self.path = path
         self.retention_days = retention_days
+        # Chaque serveur decide combien de temps une faute le suit. Le
+        # magasin ne connait pas la configuration : il demande.
+        self.retention_resolver = retention_resolver
+
+    def jours(self, guild_id):
+        """La duree de vie d'une infraction sur CE serveur."""
+        if self.retention_resolver is None:
+            return jours_de_retention(self.retention_days)
+        try:
+            return jours_de_retention(self.retention_resolver(str(guild_id)),
+                                      defaut=self.retention_days)
+        except Exception:
+            return jours_de_retention(self.retention_days)
 
     def _load(self):
         if not os.path.exists(self.path):
@@ -425,10 +485,14 @@ class InfractionStore:
         except OSError:
             pass
 
-    def _fresh(self, entries):
+    def _fresh(self, entries, jours=None):
         if not isinstance(entries, list):
             return []
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
+        jours = self.retention_days if jours is None else jours
+        if not jours or int(jours) <= 0:
+            # Le serveur ne veut rien oublier : on ne jette rien.
+            return [entry for entry in entries if isinstance(entry, dict)]
+        cutoff = datetime.now(timezone.utc) - timedelta(days=int(jours))
         kept = []
         for entry in entries:
             if not isinstance(entry, dict):
@@ -451,7 +515,8 @@ class InfractionStore:
 
     def history(self, guild_id, user_id):
         data = self._load()
-        return self._fresh(data.get(str(guild_id), {}).get(str(user_id), []))
+        return self._fresh(data.get(str(guild_id), {}).get(str(user_id), []),
+                           self.jours(guild_id))
 
     def points(self, guild_id, user_id):
         return self._points(self.history(guild_id, user_id))
@@ -461,7 +526,7 @@ class InfractionStore:
         data = self._load()
         gid, uid = str(guild_id), str(user_id)
         guild_bucket = data.setdefault(gid, {})
-        entries = self._fresh(guild_bucket.get(uid, []))
+        entries = self._fresh(guild_bucket.get(uid, []), self.jours(gid))
         try:
             weight = max(1, int(points or 1))
         except (TypeError, ValueError):
@@ -488,12 +553,37 @@ class InfractionStore:
             return True
         return False
 
+    def remove(self, guild_id, user_id, stamp):
+        """
+        Retire UNE infraction, celle posee a cet instant precis.
+
+        C'est ce que fait le bouton « Annuler » : une sanction levee ne
+        doit pas continuer a peser dans l'echelle. Rend (retiree, points
+        restants).
+        """
+        data = self._load()
+        gid, uid = str(guild_id), str(user_id)
+        entries = data.get(gid, {}).get(uid, [])
+        if not isinstance(entries, list) or not str(stamp or ""):
+            return False, self._points(self._fresh(entries, self.jours(gid)))
+        gardees, retiree = [], False
+        for entry in entries:
+            if (not retiree and isinstance(entry, dict)
+                    and str(entry.get("date")) == str(stamp)):
+                retiree = True
+                continue
+            gardees.append(entry)
+        if retiree:
+            data[gid][uid] = gardees
+            self._save(data)
+        return retiree, self._points(self._fresh(gardees, self.jours(gid)))
+
     def guild_summary(self, guild_id, limit=50):
         """Classement des membres par points, pour le dashboard."""
         data = self._load().get(str(guild_id), {})
         rows = []
         for uid, entries in data.items():
-            fresh = self._fresh(entries)
+            fresh = self._fresh(entries, self.jours(guild_id))
             if not fresh:
                 continue
             rows.append({

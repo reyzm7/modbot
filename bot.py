@@ -28,6 +28,7 @@ import communaute as cm
 import rapport as rp
 import salons_proteges as sp
 import roles_masse as rm
+import annulation as an
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -331,6 +332,7 @@ F_AVIS = chemin_donnees("avis.json")
 F_XP = chemin_donnees("xp.json")
 F_ANNIVERSAIRES = chemin_donnees("anniversaires.json")
 F_RAPPELS = chemin_donnees("rappels.json")
+F_ANNULATIONS = chemin_donnees("annulations.json")
 F_MUR = chemin_donnees("mur.json")
 F_VOTES = chemin_donnees("votes.json")
 # Le salon de comptage : ou en est la serie, qui a compte le dernier, le
@@ -930,6 +932,17 @@ def update_cfg(gid, key, val):
     d[g][key] = val
     jsave(F_CONFIG, d)
     oublier_stats_publiques()
+
+def jours_infractions(gid):
+    """
+    Combien de jours une faute suit un membre, sur ce serveur.
+
+    Un casier a vie n'existe nulle part ailleurs : au bout d'un moment,
+    une betise cesse de compter. Le serveur choisit le delai ; zero
+    signifie qu'il ne veut rien oublier, et c'est son droit.
+    """
+    return sc.jours_de_retention(get_cfg(gid).get("expiration_infractions"))
+
 
 def get_ch(gid, key, default):
     v = get_cfg(gid).get(key)
@@ -1911,11 +1924,16 @@ def add_avert(uid, gid, raison, infraction=True):
         data[g] = {}
     if u not in data[g]:
         data[g][u] = {"historique": []}
-    cutoff = now() - timedelta(days=150)
-    data[g][u]["historique"] = [
-        a for a in data[g][u]["historique"]
-        if datetime.strptime(a["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) > cutoff
-    ]
+    # Les deux compteurs oublient ensemble. Ils avaient chacun leur
+    # duree — cinq mois ici, six ailleurs : un membre pouvait avoir un
+    # casier vide et un cran d'echelle encore pose, ou l'inverse.
+    jours = jours_infractions(g)
+    if jours:
+        cutoff = now() - timedelta(days=jours)
+        data[g][u]["historique"] = [
+            a for a in data[g][u]["historique"]
+            if datetime.strptime(a["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) > cutoff
+        ]
     data[g][u]["historique"].append({"raison": raison, "date": now().strftime("%Y-%m-%d %H:%M:%S")})
     jsave(F_DATA, data)
     return len(data[g][u]["historique"])
@@ -1961,9 +1979,13 @@ def embed_dossier_sanction(guild, nb, raison):
         marque = "**➜**" if palier_nb == nb else "　"
         etapes.append(f"{marque} {palier_nb}. {ECHELLE_LISIBLE[palier_nb]}")
     embed.add_field(name="⚖️ Ou tu en es", value="\n".join(etapes), inline=False)
+    jours = jours_infractions(str(getattr(guild, "id", "")))
     embed.add_field(
         name="⏱️ Ca s'efface",
-        value="Les avertissements de plus de cinq mois ne comptent plus.",
+        value=(f"Les avertissements de plus de **{sc.libelle_retention(jours)}** "
+               "ne comptent plus."
+               if jours else
+               "Ce serveur garde les avertissements sans limite de temps."),
         inline=False)
     embed.add_field(
         name="🤔 Ce n'est pas juste ?",
@@ -2137,10 +2159,244 @@ async def deposer_contestation(guild, membre, texte):
     return True
 
 
+# ── Annuler une sanction, en un clic ──────────────────────
+#
+# Se tromper arrive : le mauvais membre, une duree de trop, un filtre
+# qui prend un mot pour un autre. Sans bouton, revenir en arriere
+# demande de retrouver la commande inverse, de retirer le point a la
+# main, puis d'aller s'expliquer. Le plus souvent personne ne le fait,
+# et la sanction injuste reste.
+
+def annulations_tout():
+    table = jload(F_ANNULATIONS)
+    return table if isinstance(table, dict) else {}
+
+
+def annulations_ecrire(table):
+    jsave(F_ANNULATIONS, table)
+
+
+def dernier_stamp(gid, uid):
+    """La date exacte de la derniere infraction posee : de quoi la defaire."""
+    try:
+        historique = INFRACTIONS.history(gid, uid)
+    except Exception:
+        return ""
+    return str(historique[-1].get("date") or "") if historique else ""
+
+
+def type_annulable(genre):
+    """Ce que l'echelle vient d'appliquer, ramene a ce qu'on sait defaire."""
+    genre = str(genre or "")
+    if genre.startswith("mute"):
+        return "mute"
+    if genre == "ban":
+        return "ban"
+    # L'expulsion n'est pas de la liste : on ne remet personne sur un
+    # serveur qu'il a quitte, et le pretendre serait pire que rien.
+    return "warn" if genre in ("warn", "") else ""
+
+
+def memoriser_sanction(guild, genre, membre, auteur, raison="", stamp="", avert=False):
+    """
+    Retient de quoi defaire cette sanction, et rend le jeton du bouton.
+
+    Une fiche qui ne s'ecrit pas n'empeche jamais de sanctionner : sans
+    jeton il n'y a pas de bouton, et c'est tout.
+    """
+    if str(genre) not in an.TYPES:
+        return ""
+    try:
+        jeton = an.nouveau_jeton()
+        table = an.purger(annulations_tout())
+        table = an.poser(table, jeton, an.fabriquer(
+            genre, getattr(guild, "id", ""), getattr(membre, "id", membre),
+            nom=str(membre), auteur=getattr(auteur, "id", ""),
+            auteur_nom=str(auteur), raison=raison, stamp=stamp, avert=avert))
+        annulations_ecrire(table)
+        return jeton
+    except Exception as erreur:
+        print(f"annulation : fiche non ecrite ({erreur})")
+        return ""
+
+
+def vue_annuler(jeton):
+    """Le bouton « Annuler », sous la sanction, dans le journal."""
+    if not jeton:
+        return None
+    vue = discord.ui.View(timeout=None)
+    vue.add_item(discord.ui.Button(
+        label="Annuler", emoji="↩️", style=discord.ButtonStyle.secondary,
+        custom_id=f"sanc:annuler:{jeton}"))
+    return vue
+
+
+def retirer_dernier_avert(uid, gid):
+    """Rend un cran de l'echelle : le dernier avertissement disparait."""
+    data = jload(F_DATA)
+    u, g = str(uid), str(gid)
+    historique = (data.get(g, {}).get(u) or {}).get("historique") or []
+    if not historique:
+        return 0
+    historique.pop()
+    data[g][u]["historique"] = historique
+    jsave(F_DATA, data)
+    return len(historique)
+
+
+def retirer_de_la_liste_des_bans(gid, uid):
+    """Un bannissement annule sort de l'historique, et de la file des levees."""
+    table = jload(F_BANS)
+    g = str(gid)
+    liste = table.get(g) or []
+    restants = [b for b in liste
+                if str(b.get("user_id") or b.get("id") or "") != str(uid)]
+    if len(restants) != len(liste):
+        table[g] = restants
+        jsave(F_BANS, table)
+    try:
+        jsave(F_TEMPBANS, rp.retirer_ban(tempbans_tout(), g, str(uid)))
+    except Exception:
+        pass
+
+
+async def defaire_sanction(guild, action):
+    """
+    Le geste inverse. Rend (fait, ce qu'il y a a dire si ca a rate).
+
+    L'ordre compte : on rend d'abord la liberte, on nettoie les
+    compteurs ensuite. Un debannissement refuse ne doit pas laisser un
+    casier vide et un membre toujours dehors.
+    """
+    gid = str(getattr(guild, "id", ""))
+    uid = str(action.get("membre") or "")
+    genre = str(action.get("type") or "")
+    motif = "[ModBot] Sanction annulee"
+    membre = guild.get_member(int(uid)) if uid.isdigit() else None
+
+    if genre == "ban":
+        try:
+            await guild.unban(discord.Object(id=int(uid)), reason=motif)
+        except discord.NotFound:
+            pass  # deja debanni : on nettoie les compteurs quand meme
+        except Exception as erreur:
+            return False, f"Discord a refusé le débannissement : `{erreur}`"
+        retirer_de_la_liste_des_bans(gid, uid)
+    elif genre in ("mute", "warn"):
+        if membre is None and genre == "mute":
+            return False, "Ce membre n'est plus sur le serveur."
+        if membre is not None and getattr(membre, "timed_out_until", None):
+            try:
+                await membre.timeout(None, reason=motif)
+            except Exception as erreur:
+                if genre == "mute":
+                    return False, f"Discord a refusé la levée : `{erreur}`"
+
+    # Les compteurs en dernier, et separement : qu'un reset ait efface
+    # la ligne d'infraction entre-temps ne doit pas empecher de rendre
+    # le cran d'echelle.
+    if action.get("stamp"):
+        try:
+            INFRACTIONS.remove(gid, uid, action["stamp"])
+        except Exception as erreur:
+            print(f"annulation : point non retire ({erreur})")
+    if action.get("avert"):
+        try:
+            retirer_dernier_avert(uid, gid)
+        except Exception as erreur:
+            print(f"annulation : avertissement non retire ({erreur})")
+    return True, ""
+
+
+async def prevenir_annulation(guild, action):
+    """Le membre apprend que c'est efface. C'est la moitie du geste."""
+    uid = str(action.get("membre") or "")
+    if not uid.isdigit():
+        return
+    try:
+        cible = guild.get_member(int(uid)) or await bot.fetch_user(int(uid))
+    except Exception:
+        return
+    quoi = an.TYPES.get(str(action.get("type")), "la sanction")
+    embed = EG("↩️ Ta sanction a été annulée",
+               f"L'équipe de **{guild.name}** est revenue sur {quoi}. "
+               "Elle ne compte plus dans ton dossier.",
+               Palette.SUCCESS, str(guild.id))
+    if action.get("raison"):
+        embed.add_field(name="📋 C’était pour", value=str(action["raison"])[:1000],
+                        inline=False)
+    try:
+        await cible.send(embed=embed)
+    except Exception:
+        pass  # MP fermes : l'annulation tient quand meme
+
+
+async def annuler_interaction(interaction, jeton):
+    """Le clic sur « Annuler », sous une sanction du journal."""
+    guild = interaction.guild
+    auteur = guild.get_member(interaction.user.id) if guild else None
+    gid = str(getattr(guild, "id", "") or "")
+    table = annulations_tout()
+    action = an.lire(table, jeton) or {}
+    code = an.refus(action, getattr(interaction.user, "id", ""),
+                    staff=bool(auteur) and est_du_staff(auteur, gid))
+    # Une fiche d'un autre serveur ne se defait pas d'ici : un jeton
+    # peut avoir ete recopie d'un journal a l'autre.
+    if not code and str(action.get("guild") or "") != gid:
+        code = "inconnue"
+    if code:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Annulation impossible", an.REFUS.get(code, an.REFUS["inconnue"]), gid))
+
+    await _safe_defer(interaction)
+    fait, souci = await defaire_sanction(guild, action)
+    if not fait:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Annulation impossible", souci, gid))
+    annulations_ecrire(an.marquer(table, jeton, str(interaction.user)))
+
+    # Le journal garde la trace : le message d'origine dit qui est
+    # revenu dessus, et son bouton ne resservira pas.
+    message = getattr(interaction, "message", None)
+    if message is not None:
+        try:
+            embeds = list(getattr(message, "embeds", []) or [])
+            if embeds:
+                embeds[0].add_field(
+                    name="↩️ Annulée",
+                    value=f"Par {interaction.user.mention}, le {fmt(now())}.",
+                    inline=False)
+            eteinte = discord.ui.View(timeout=None)
+            eteinte.add_item(discord.ui.Button(
+                label="Annulée", emoji="↩️", disabled=True,
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"sanc:annulee:{jeton}"))
+            await message.edit(embeds=embeds, view=eteinte)
+        except Exception as erreur:
+            print(f"annulation : journal non mis a jour ({erreur})")
+
+    await prevenir_annulation(guild, action)
+    await log_event(guild, "moderation", "Sanction annulée",
+                    f"{interaction.user.mention} est revenu sur {an.resume(action)}.",
+                    fields=[("📋 C’était pour", str(action.get("raison") or "-")),
+                            ("👮 Sanction posée par", str(action.get("auteur_nom") or "-"))],
+                    severity="success", actor=interaction.user)
+    await safe_ephemeral(interaction, embed=embed_success(
+        "Sanction annulée",
+        f"{an.resume(action).capitalize()} est levé. Le point est retiré, "
+        "le membre prévenu.", gid))
+
+
 async def sanction_interaction(interaction):
-    """Les deux boutons d'une contestation : « Contester », puis « Repondre »."""
+    """
+    Les boutons d'une sanction : « Contester », « Repondre », « Annuler ».
+    """
     donnees = interaction.data or {}
     custom_id = str(donnees.get("custom_id") or "")
+
+    if custom_id.startswith("sanc:annuler:"):
+        await annuler_interaction(interaction, custom_id.split(":")[-1])
+        return
 
     if custom_id.startswith("sanc:repondre:"):
         _, _, gid, uid = custom_id.split(":")
@@ -4293,7 +4549,7 @@ async def apply_lockdown_permissions(channel, role, locked, previous_view=None):
 def channel_can_lockdown(channel):
     return hasattr(channel, "set_permissions") and hasattr(channel, "overwrites_for")
 
-async def send_log(guild, embed):
+async def send_log(guild, embed, view=None):
     # DEFAULT_LOGS designe un salon du serveur support. Passe a
     # `bot.get_channel`, il etait trouve depuis n'importe quel serveur :
     # tout serveur sans salon de logs configure deversait son journal
@@ -4304,7 +4560,7 @@ async def send_log(guild, embed):
     if ch is None:
         return
     try:
-        await ch.send(embed=embed)
+        await ch.send(embed=embed, view=view)
     except Exception:
         pass
 
@@ -7037,6 +7293,7 @@ def serialize_dashboard_config(guild):
             "sanctions": sanctions,
             "bans": sanctions,
             "max_warnings": MAX_AVERT,
+            "expiration_infractions": jours_infractions(gid),
         },
         "personalization": {
             "footer": cfg.get("embed_footer") or f"{get_bot_display_name(gid, guild)} - Protection de votre communaute",
@@ -7333,6 +7590,9 @@ async def apply_dashboard_config(guild, payload):
             elif not parsed and str(brut or "").strip():
                 print(f"config {guild.id}: salon libre {brut} refuse (autre serveur)")
         cfg[SALONS_EXEMPTS[quoi]] = libres
+    if "expiration_infractions" in security:
+        cfg["expiration_infractions"] = sc.jours_de_retention(
+            security.get("expiration_infractions"))
     if "insultes_enabled" in security:
         cfg["insultes_enabled"] = bool(security.get("insultes_enabled"))
     if "antispam" in security:
@@ -8605,13 +8865,22 @@ async def api_member_action(request):
     except discord.HTTPException as ex:
         raise web.HTTPBadRequest(text=f"Discord a refuse l'action : {ex}")
 
+    # Sanctionner depuis le site et corriger depuis Discord : le bouton
+    # voyage avec le journal, pas avec la page.
+    jeton = ""
+    if action in {"warn", "timeout", "ban"}:
+        jeton = memoriser_sanction(
+            guild, {"warn": "warn", "timeout": "mute", "ban": "ban"}[action],
+            membre, auteur, raison=raison,
+            stamp=dernier_stamp(gid, membre.id) if action == "warn" else "")
+
     libelle = ACTIONS_MEMBRE[action]["label"]
     dashboard_log(f"member_{action}", guild, auteur, f"{membre} — {resultat}")
     await log_event(
         guild, "moderation", f"{libelle} (dashboard)",
         f"{membre.mention} — {resultat}.",
         fields=[("👤 Par", auteur), ("📋 Raison", raison)],
-        severity="warning", target=membre)
+        severity="warning", target=membre, view=vue_annuler(jeton))
 
     membre_maj = guild.get_member(membre.id)
     return api_json({
@@ -15805,7 +16074,11 @@ class ModalWarn(discord.ui.Modal, title="⚠️ Avertissement manuel"):
         le.add_field(name="🆔 ID", value=f"`{self.membre.id}`", inline=True)
         le.add_field(name="📋 Raison", value=self.raison.value, inline=False)
         le.add_field(name="👮 Par", value=str(i.user), inline=True)
-        await send_log(i.guild, le)
+        jeton = memoriser_sanction(
+            i.guild, type_annulable(sanction.get("type")), self.membre, i.user,
+            raison=self.raison.value, stamp=dernier_stamp(gid, self.membre.id),
+            avert=True)
+        await send_log(i.guild, le, view=vue_annuler(jeton))
         await alert_staff(i.guild, f"WARN ({sanction['label']})", i.user, self.membre, self.raison.value)
         track_mod(str(i.user.id), gid, "warns")
 
@@ -17145,7 +17418,9 @@ effacer_contenu_des_journaux()
 F_INFRACTIONS = chemin_donnees("infractions.json")
 D_BACKUPS = os.environ.get("MODBOT_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
 
-INFRACTIONS = sc.InfractionStore(F_INFRACTIONS, retention_days=180)
+INFRACTIONS = sc.InfractionStore(F_INFRACTIONS,
+                                 retention_days=sc.RETENTION_DEFAUT,
+                                 retention_resolver=jours_infractions)
 RAID = sc.RaidDetector()
 NUKE = sc.NukeGuard()
 BACKUPS = sc.BackupStore(D_BACKUPS)
@@ -17396,7 +17671,8 @@ def db_purge_guild_logs(guild_id, keep=2000):
         pass
 
 async def log_event(guild, category, title, description="", fields=None, color=None,
-                    actor=None, target=None, severity="info", thumbnail=None):
+                    actor=None, target=None, severity="info", thumbnail=None,
+                    view=None):
     """
     Point d'entree unique du systeme de logs.
     Publie un embed propre dans le bon salon Discord ET enregistre en base
@@ -17456,7 +17732,8 @@ async def log_event(guild, category, title, description="", fields=None, color=N
         except Exception:
             pass
     try:
-        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(embed=embed, view=view,
+                           allowed_mentions=discord.AllowedMentions.none())
     except Exception:
         pass
 
@@ -20591,12 +20868,20 @@ async def cmd_infractions(i: discord.Interaction, membre: discord.Member):
             value=f"{next_step['fr']} a `{next_step['threshold']}` points "
                   f"(encore `{next_step['threshold'] - points}`)",
             inline=False)
+    jours = jours_infractions(gid)
     lines = []
     for entry in reversed(history[-10:]):
         stamp = sc.parse_iso(entry.get("date"))
+        fin = sc.date_expiration(entry.get("date"), jours)
         lines.append(f"`{fmt(stamp) if stamp else '?'}` — {entry.get('reason', '?')} "
-                     f"(+{entry.get('points', 1)} pt)")
+                     f"(+{entry.get('points', 1)} pt)"
+                     + (f" · expire le `{fmt(fin)}`" if fin else ""))
     embed.add_field(name="🕒 10 dernieres infractions", value="\n".join(lines)[:1024], inline=False)
+    # Le pied de page appartient au serveur : on ajoute, on ne remplace pas.
+    rappel = (f"Une infraction cesse de compter au bout de {sc.libelle_retention(jours)}."
+              if jours else "Ce serveur garde les infractions sans limite de temps.")
+    pied = getattr(getattr(embed, "footer", None), "text", "") or ""
+    embed.set_footer(text=(f"{pied} · {rappel}" if pied else rappel)[:2000])
     # Les notes de l'equipe, a cote du casier : c'est en les lisant
     # ensemble qu'on decide.
     notes = notes_du_membre(gid, membre.id)
@@ -20674,7 +20959,7 @@ async def handle_bad_word(message, detection):
         return
 
     weight = sc.word_severity(detection["word"], filt["severities"])
-    points, _ = INFRACTIONS.add(
+    points, lignes = INFRACTIONS.add(
         gid, member.id,
         f"Langage interdit : {detection['word']}",
         points=weight,
@@ -20690,6 +20975,12 @@ async def handle_bad_word(message, detection):
     step = sc.resolve_sanction(points, filt["ladder"])
     result = await apply_ladder_sanction(member, step, detection["word"])
     next_step = next((s for s in filt["ladder"] if s["threshold"] > points), None)
+    # Le filtre se trompe parfois de mot : l'equipe doit pouvoir revenir
+    # dessus sans rien retaper.
+    jeton = memoriser_sanction(
+        guild, type_annulable(step["action"]), member, bot.user,
+        raison=f"Langage interdit : {detection['word']}",
+        stamp=str(lignes[-1].get("date") or "") if lignes else "", avert=True)
 
     colors = {"warn": Palette.WARNING, "mute": 0xFF6B35,
               "kick": Palette.DANGER, "ban": Palette.CRITICAL}
@@ -20729,7 +21020,7 @@ async def handle_bad_word(message, detection):
             ("📝 Message original", f"```{(message.content or '')[:500]}```"),
         ],
         severity="danger" if step["action"] in ("kick", "ban") else "warning",
-        target=member, color=color,
+        target=member, color=color, view=vue_annuler(jeton),
     )
 
     # 3. DM au membre
@@ -22823,10 +23114,15 @@ async def filtrer_salon_protege(message, cfg):
         texte = f"{auteur.mention}, {salon.mention} n'accepte que les images et les fichiers : ton message a ete supprime."
     elif not texte:
         texte = f"{auteur.mention}, on n'ecrit pas dans {salon.mention} : ton message a ete supprime."
+    jeton = ""
     if config["infraction"] and isinstance(auteur, discord.Member):
         nb = add_avert(str(auteur.id), gid, f"Salon protege : message dans #{salon.name}")
         sanction = await appliquer_sanction(auteur, nb, "salon protege")
         texte += f"\n{sanction['label']}"
+        jeton = memoriser_sanction(
+            message.guild, type_annulable(sanction.get("type")), auteur, bot.user,
+            raison=f"Salon protégé : message dans #{salon.name}",
+            stamp=dernier_stamp(gid, auteur.id), avert=True)
     if config["avertir"] == "salon":
         try:
             await salon.send(embed=EG("🔒 Salon protege", texte, Palette.WARNING, gid),
@@ -22843,7 +23139,7 @@ async def filtrer_salon_protege(message, cfg):
     await log_event(
         message.guild, "moderation", "Message retire d'un salon protege",
         f"{auteur.mention} a ecrit dans {salon.mention}, qui est protege.",
-        severity="info", target=auteur)
+        severity="info", target=auteur, view=vue_annuler(jeton))
     return True
 
 
@@ -23710,6 +24006,7 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member,
 
     add_ban(gid, str(membre.id), str(membre), raison,
             duree_lisible or "Permanent", "manual_ban", i.user)
+    jeton = memoriser_sanction(i.guild, "ban", membre, i.user, raison=raison)
     # Apres le bannissement, jamais avant : on ne signale pas quelqu'un que
     # Discord a refuse de bannir.
     partage_reseau = signaler_au_reseau(gid, membre.id, motif_reseau) if motif_reseau else False
@@ -23739,7 +24036,8 @@ async def cmd_ban(i: discord.Interaction, membre: discord.Member,
                     f"**{membre}** a ete banni par {i.user.mention}.",
                     fields=[("📋 Raison", raison)],
                     severity="danger", actor=i.user, target=membre,
-                    thumbnail=membre.display_avatar.url)
+                    thumbnail=membre.display_avatar.url,
+                    view=vue_annuler(jeton))
     await alert_staff(i.guild, "BAN MANUEL", i.user, membre, raison)
     track_mod(str(i.user.id), gid, "bans")
 
@@ -24081,8 +24379,11 @@ async def cmd_mute(i: discord.Interaction, membre: discord.Member, duree: str = 
         return await i.followup.send(embed=embed_error("Echec", f"`{ex}`", gid), ephemeral=True)
 
     lisible = sc.human_duration(int(limite.total_seconds() // 60))
-    INFRACTIONS.add(gid, membre.id, f"Mute {lisible} par {i.user} : {raison}",
-                    points=1, source="mute")
+    _, lignes = INFRACTIONS.add(gid, membre.id,
+                                f"Mute {lisible} par {i.user} : {raison}",
+                                points=1, source="mute")
+    jeton = memoriser_sanction(i.guild, "mute", membre, i.user, raison=raison,
+                               stamp=str(lignes[-1].get("date") or "") if lignes else "")
     prevenu = await prevenir_sanction(
         membre, i.guild, "🔇 Tu as ete rendu muet",
         f"Sur **{i.guild.name}**, pour **{lisible}**.\n**Raison :** {raison}")
@@ -24094,7 +24395,8 @@ async def cmd_mute(i: discord.Interaction, membre: discord.Member, duree: str = 
     await log_event(i.guild, "moderation", "Membre rendu muet",
                     f"{membre.mention} pour **{lisible}**.",
                     fields=[("📋 Raison", raison), ("👮 Par", str(i.user))],
-                    severity="warning", actor=i.user, target=membre)
+                    severity="warning", actor=i.user, target=membre,
+                    view=vue_annuler(jeton))
     await alert_staff(i.guild, "MUTE", i.user, membre, f"{lisible} — {raison}")
     track_mod(str(i.user.id), gid, "mute")
 
