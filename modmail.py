@@ -31,7 +31,7 @@ FILS_MAX = 500
 PAUSE_MIN, PAUSE_MAX, PAUSE_DEFAUT = 0, 300, 5
 
 REFUS = {
-    "inactif": "La messagerie de l'équipe n'est pas ouverte sur ce serveur.",
+    "inactif": "Ce serveur a décidé de ne pas mettre cette fonction en place.",
     "sans_salon": ("La messagerie est activée mais aucun salon ne la reçoit. "
                    "Préviens un administrateur."),
     "bloque": "L'équipe de ce serveur ne reçoit plus tes messages.",
@@ -79,6 +79,12 @@ def lire_config(brut):
         "anonyme": brut.get("anonyme", True) is not False,
         "bloques": bloques[:BLOQUES_MAX],
         "pause": _entier(brut.get("pause"), PAUSE_DEFAUT, PAUSE_MIN, PAUSE_MAX),
+        # Traduire le courrier dans les deux sens. Coupe par defaut : un
+        # serveur d'une seule langue n'a rien a y gagner.
+        "traduire": bool(brut.get("traduire")),
+        # Proposer un brouillon de reponse a l'equipe. Jamais envoye
+        # tout seul : c'est un modérateur qui decide.
+        "ia": bool(brut.get("ia")),
     }
 
 
@@ -106,20 +112,37 @@ def refus_message(config, membre_id, depuis_le_dernier=None):
     return ""
 
 
-def serveurs_ouverts(serveurs):
+def serveurs_du_choix(serveurs, membre_id=""):
     """
-    Les serveurs où ce membre peut écrire, parmi ceux qu'il partage.
+    TOUS les serveurs que ce membre partage avec le bot, avec leur état.
 
     `serveurs` : une suite de (identifiant, nom, configuration). On rend
-    des couples (identifiant, nom), dans l'ordre des noms — le membre
-    choisit dans une liste, elle doit se lire.
+    des fiches {"id", "nom", "etat"}, dans l'ordre des noms.
+
+    Les serveurs fermés figurent dans la liste, et c'est voulu : un
+    membre qui ne voit pas son serveur croit que le bot est cassé.
+    Choisir un serveur fermé lui apprend que ce serveur a décidé de ne
+    pas mettre la fonction en place — ce qui est une réponse.
     """
-    ouverts = []
+    fiches = []
     for ident, nom, config in serveurs or ():
         propre = lire_config(config)
-        if ouvert(propre):
-            ouverts.append((str(ident), str(nom)))
-    return sorted(ouverts, key=lambda paire: paire[1].lower())
+        if str(membre_id) and str(membre_id) in propre["bloques"]:
+            etat = "bloque"
+        elif ouvert(propre):
+            etat = "ouvert"
+        else:
+            etat = "ferme"
+        fiches.append({"id": str(ident), "nom": str(nom), "etat": etat})
+    return sorted(fiches, key=lambda fiche: fiche["nom"].lower())
+
+
+def etat_du_serveur(config, membre_id=""):
+    """« ouvert », « ferme » ou « bloque » pour ce membre."""
+    propre = lire_config(config)
+    if str(membre_id) and str(membre_id) in propre["bloques"]:
+        return "bloque"
+    return "ouvert" if ouvert(propre) else "ferme"
 
 
 def est_note(texte):

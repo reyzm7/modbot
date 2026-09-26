@@ -47,6 +47,11 @@ verifier("coupé par défaut", vide["enabled"] is False and vide["salon"] == "")
 verifier("anonyme par défaut : le membre en colère ne retient pas un nom",
          vide["anonyme"] is True)
 verifier("une pause raisonnable par défaut", vide["pause"] == mm.PAUSE_DEFAUT)
+verifier("la traduction et le brouillon sont coupés par défaut",
+         vide["traduire"] is False and vide["ia"] is False)
+verifier("et s'allument quand le serveur le demande",
+         mm.lire_config({"traduire": 1, "ia": True})["traduire"] is True
+         and mm.lire_config({"traduire": 1, "ia": True})["ia"] is True)
 
 sale = mm.lire_config({
     "enabled": "oui", "salon": "12345", "role": "pas-un-id",
@@ -91,12 +96,19 @@ verifier("chaque refus a une phrase à montrer",
 
 ferme = {"enabled": False, "salon": "1"}
 ouvert_a = {"enabled": True, "salon": "1"}
-choix = mm.serveurs_ouverts([("2", "Zeta", ouvert_a), ("3", "alpha", ouvert_a),
-                             ("4", "Ferme", ferme)])
-verifier("seuls les serveurs ouverts sont proposés", [c[0] for c in choix] == ["3", "2"])
-verifier("et dans un ordre qui se lit", [c[1] for c in choix] == ["alpha", "Zeta"])
-verifier("aucun serveur ouvert : la liste est vide",
-         mm.serveurs_ouverts([("4", "Ferme", ferme)]) == [])
+bloquant = {"enabled": True, "salon": "1", "bloques": ["9"]}
+choix = mm.serveurs_du_choix([("2", "Zeta", ouvert_a), ("3", "alpha", ouvert_a),
+                              ("4", "Ferme", ferme), ("5", "Mur", bloquant)], "9")
+verifier("tous les serveurs partagés sont proposés, fermés compris",
+         [c["id"] for c in choix] == ["3", "4", "5", "2"])
+verifier("chacun porte son état",
+         [c["etat"] for c in choix] == ["ouvert", "ferme", "bloque", "ouvert"])
+verifier("un serveur fermé se reconnaît seul",
+         mm.etat_du_serveur(ferme) == "ferme"
+         and mm.etat_du_serveur(ouvert_a) == "ouvert"
+         and mm.etat_du_serveur(bloquant, "9") == "bloque")
+verifier("et le refus dit ce qu'il en est, pas une panne",
+         "pas mettre cette fonction en place" in mm.REFUS["inactif"])
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -190,6 +202,17 @@ verifier("la commande /modmail existe", "modmail" in commandes)
 verifier("avec ses trois gestes",
          sorted(c.name for c in commandes["modmail"].commands)
          == ["bloquer", "debloquer", "fermer"] if "modmail" in commandes else False)
+verifier("le brouillon d'IA ne part jamais tout seul",
+         "class VueBrouillonModmail" in source
+         and "Je réponds moi-même" in source
+         and source.count("await modmail_poser_reponse(") == 2)
+verifier("le brouillon demande l'IA du serveur et un quota",
+         'ai_cfg(gid)["enabled"]' in source and "MODMAIL_IA_QUOTA" in source)
+verifier("la traduction passe par le traducteur du bot",
+         "async def modmail_traduire(" in source
+         and "await translate_text(texte, vers)" in source)
+verifier("le bot ne se répète pas quand un membre insiste",
+         "MODMAIL_PAUSE_REFUS" in source and "MODMAIL_DIT" in source)
 verifier("le courrier part au tableau de bord et en revient",
          '"modmail": mm.lire_config(cfg.get("modmail"))' in source
          and 'courrier = payload.get("modmail")' in source)
@@ -300,7 +323,8 @@ GID = str(SERVEUR.id)
 
 dossier = tempfile.mkdtemp()
 bot_mod.F_MODMAIL = os.path.join(dossier, "modmail.json")
-reglages = {GID: {"modmail": {"enabled": True, "salon": "500", "pause": 0}}}
+reglages = {GID: {"modmail": {"enabled": True, "salon": "500", "pause": 0}},
+            "langue": "fr"}
 bot_mod.get_cfg = lambda gid: dict(reglages.get(str(gid), {}))
 bot_mod.update_cfg = lambda gid, cle, val: reglages.setdefault(str(gid), {}).__setitem__(cle, val)
 bot_mod.salon_du_serveur = lambda guild, ident: guild.get_channel(int(ident)) if str(ident).isdigit() else None
@@ -400,6 +424,17 @@ verifier("un membre bloqué n'atteint plus l'équipe",
          lancer(bot_mod.modmail_poster(SERVEUR, MEMBRE, "encore moi")) == "bloque")
 verifier("et il ne figure plus dans les serveurs qu'on lui propose",
          bot_mod.mm.lire_config(reglages[GID]["modmail"])["bloques"] == ["7"])
+
+
+# ── Un serveur qui n'a pas active le module ───────────────────────────
+
+ferme_serveur = FauxServeur(930000000000001001, "Ferme")
+ferme_serveur.membres = {7: MEMBRE}
+reglages[str(ferme_serveur.id)] = {"modmail": {"enabled": False}}
+verifier("un serveur fermé refuse, et le dit",
+         lancer(bot_mod.modmail_poster(ferme_serveur, MEMBRE, "coucou")) == "inactif")
+verifier("il figure quand même dans le choix du membre",
+         mm.etat_du_serveur(reglages[str(ferme_serveur.id)]["modmail"]) == "ferme")
 
 
 # ══════════════════════════════════════════════════════════════════════

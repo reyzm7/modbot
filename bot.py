@@ -23605,6 +23605,12 @@ MODMAIL_ATTENTE_MAX = 20
 MODMAIL_CHOIX = {}
 MODMAIL_ATTENTE = {}
 
+# Quelqu'un qui n'obtient pas de reponse recommence. Ce qu'on lui dit
+# — un refus, une liste de serveurs — ne se repete pas avant une
+# minute : le bot ne doit pas remplir sa boite a son tour.
+MODMAIL_PAUSE_REFUS = 60
+MODMAIL_DIT = {}
+
 
 def modmail_cfg(gid):
     """Le courrier de ce serveur, nettoye."""
@@ -23621,16 +23627,20 @@ def modmail_ecrire(table):
 
 
 def modmail_serveurs_du_membre(utilisateur):
-    """Les serveurs partages ou ce membre peut ecrire a l'equipe."""
+    """
+    TOUS les serveurs partages avec ce membre, et l'etat du courrier.
+
+    Les serveurs fermes figurent dans la liste, et c'est voulu : un
+    membre qui ne voit pas le sien croit que le bot est casse. En le
+    choisissant, il apprend que ce serveur a decide de ne pas mettre la
+    fonction en place — ce qui est une reponse.
+    """
     partages = []
     for guild in bot.guilds:
         if guild.get_member(utilisateur.id) is None:
             continue
-        config = modmail_cfg(str(guild.id))
-        if str(utilisateur.id) in config["bloques"]:
-            continue
-        partages.append((str(guild.id), guild.name, config))
-    return mm.serveurs_ouverts(partages)
+        partages.append((str(guild.id), guild.name, get_cfg(str(guild.id)).get("modmail")))
+    return mm.serveurs_du_choix(partages, utilisateur.id)
 
 
 def modmail_secondes_depuis(gid, uid):
@@ -23640,6 +23650,25 @@ def modmail_secondes_depuis(gid, uid):
     if quand is None:
         return None
     return max(0, (now() - quand).total_seconds())
+
+
+async def modmail_dire(utilisateur, embed, vue=None, cle=""):
+    """
+    Un mot au membre, sans se repeter.
+
+    Quelqu'un qui n'obtient pas de reponse recommence, parfois dix fois
+    de suite : `cle` empeche le bot de lui renvoyer dix fois le meme
+    refus.
+    """
+    if cle:
+        dernier = MODMAIL_DIT.get((utilisateur.id, cle))
+        if dernier and (now() - dernier).total_seconds() < MODMAIL_PAUSE_REFUS:
+            return
+        MODMAIL_DIT[(utilisateur.id, cle)] = now()
+    try:
+        await utilisateur.send(embed=embed, view=vue)
+    except Exception:
+        pass
 
 
 def embed_modmail_ouverture(guild, membre):
@@ -23664,8 +23693,8 @@ def embed_modmail_ouverture(guild, membre):
     return embed
 
 
-def vue_modmail(gid, uid):
-    """Fermer, ou ne plus recevoir ce membre. Sous la fiche d'ouverture."""
+def vue_modmail(gid, uid, ia=False):
+    """Fermer, bloquer, et — si le serveur le veut — demander un brouillon."""
     vue = discord.ui.View(timeout=None)
     vue.add_item(discord.ui.Button(
         label="Fermer", emoji="📪", style=discord.ButtonStyle.secondary,
@@ -23673,17 +23702,48 @@ def vue_modmail(gid, uid):
     vue.add_item(discord.ui.Button(
         label="Bloquer", emoji="🚫", style=discord.ButtonStyle.danger,
         custom_id=f"mm:bloquer:{gid}:{uid}"))
+    if ia:
+        vue.add_item(discord.ui.Button(
+            label="Brouillon", emoji="✍️", style=discord.ButtonStyle.primary,
+            custom_id=f"mm:brouillon:{gid}:{uid}"))
     return vue
 
 
-def vue_modmail_serveurs(ouverts):
-    """Le choix du serveur, quand le membre en partage plusieurs."""
+def vue_modmail_serveurs(fiches):
+    """Le choix du serveur, ferme ou non : le membre voit toute sa liste."""
     vue = discord.ui.View(timeout=None)
-    options = [discord.SelectOption(label=nom[:100], value=str(ident))
-               for ident, nom in ouverts[:25]]
+    options = []
+    for fiche in fiches[:25]:
+        ouvert = fiche["etat"] == "ouvert"
+        options.append(discord.SelectOption(
+            label=str(fiche["nom"])[:100], value=str(fiche["id"]),
+            emoji="✉️" if ouvert else "🚪",
+            description=("L'équipe y reçoit le courrier" if ouvert
+                         else "Cette fonction n'est pas en place ici")[:100]))
     vue.add_item(discord.ui.Select(placeholder="À quel serveur écris-tu ?",
                                    options=options, custom_id="mm:serveur"))
     return vue
+
+
+async def modmail_traduire(texte, vers):
+    """
+    (texte traduit, langue d'origine). Chaines vides si rien a faire.
+
+    Traduire un texte deja dans la bonne langue ne sert qu'a doubler le
+    message : on rend alors du vide, et l'appelant n'affiche rien.
+    """
+    try:
+        resultat = await translate_text(texte, vers)
+    except Exception as erreur:
+        print(f"modmail : traduction impossible ({erreur})")
+        return "", ""
+    if not resultat.get("ok"):
+        return "", ""
+    origine = str(resultat.get("source") or "")[:8]
+    traduit = str(resultat.get("text") or "").strip()
+    if not traduit or not origine or origine.split("-")[0] == str(vers).split("-")[0]:
+        return "", origine
+    return traduit, origine
 
 
 async def modmail_fil_du_membre(guild, membre, config, creer=True):
@@ -23758,7 +23818,7 @@ async def modmail_poster(guild, membre, texte, pieces=()):
             await fil.send(
                 content=role.mention if role else None,
                 embed=embed_modmail_ouverture(guild, membre),
-                view=vue_modmail(guild.id, membre.id),
+                view=vue_modmail(guild.id, membre.id, config["ia"]),
                 allowed_mentions=discord.AllowedMentions(roles=True, users=False,
                                                          everyone=False))
         except Exception as erreur:
@@ -23766,6 +23826,13 @@ async def modmail_poster(guild, membre, texte, pieces=()):
 
     embed = EG("💬 Message du membre", contenu, Palette.INFO, gid)
     embed.set_author(name=str(membre), icon_url=getattr(membre.display_avatar, "url", None))
+    langue = ""
+    if config["traduire"]:
+        vers = get_cfg(gid).get("langue") or DEFAULT_LANG
+        traduit, langue = await modmail_traduire(contenu, vers)
+        if traduit:
+            embed.add_field(name=f"🌍 Traduction ({langue} → {vers})",
+                            value=traduit[:1024], inline=False)
     if pieces:
         liens = "\n".join(str(getattr(p, "url", p))[:200] for p in list(pieces)[:5])
         embed.add_field(name="📎 Pièces jointes", value=liens[:1024], inline=False)
@@ -23778,10 +23845,47 @@ async def modmail_poster(guild, membre, texte, pieces=()):
     table = modmail_table()
     fiche = mm.lire_fil(table, guild.id, membre.id) or {}
     fiche["dernier"] = now().isoformat()
+    # La langue du membre, pour lui repondre dans la sienne. C'est un
+    # code de deux lettres, pas un texte : rien du message ne reste.
+    if langue:
+        fiche["langue"] = langue
     table.setdefault(gid, {})[str(membre.id)] = fiche
     modmail_ecrire(table)
     if neuf:
         dashboard_log("modmail", guild, str(membre), contenu[:200])
+    return ""
+
+
+async def modmail_envoyer_choisi(utilisateur, gid, texte, pieces, message=None):
+    """
+    Porte le message au serveur choisi, et dit pourquoi si ca ne part pas.
+
+    Rend le code du refus, ou une chaine vide.
+    """
+    guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
+    membre = guild.get_member(utilisateur.id) if guild else None
+    if guild is None or membre is None:
+        return "inactif"
+    refus = await modmail_poster(guild, membre, texte, pieces)
+    if refus:
+        await modmail_dire(utilisateur,
+                           EG(f"✉️ {guild.name}",
+                              mm.REFUS.get(refus, mm.REFUS["inactif"]),
+                              Palette.WARNING, str(guild.id)), cle=refus)
+        return refus
+    if message is not None:
+        try:
+            await message.add_reaction("✅")
+        except Exception:
+            pass
+    config = modmail_cfg(str(guild.id))
+    if config["accueil"] and utilisateur.id not in MODMAIL_CHOIX:
+        await modmail_dire(utilisateur, EG(f"✉️ {guild.name}", config["accueil"],
+                                           Palette.INFO, str(guild.id)))
+    # Le serveur reste choisi une demi-heure : la suite de la
+    # conversation ne repose pas la question a chaque phrase.
+    MODMAIL_CHOIX[utilisateur.id] = (str(guild.id),
+                                     now() + timedelta(minutes=MODMAIL_CHOIX_MINUTES))
     return ""
 
 
@@ -23798,52 +23902,59 @@ async def modmail_recevoir(message):
     pieces = list(getattr(message, "attachments", []) or [])
     if not mm.message_relayable(texte, len(pieces)):
         return
-    ouverts = modmail_serveurs_du_membre(utilisateur)
-    if not ouverts:
-        return  # aucun serveur ouvert : le silence vaut mieux qu'un refus
+    fiches = modmail_serveurs_du_membre(utilisateur)
+    if not fiches:
+        return  # aucun serveur en commun : le bot n'a rien a dire
 
     choisi = MODMAIL_CHOIX.get(utilisateur.id)
     if choisi and choisi[1] < now():
         MODMAIL_CHOIX.pop(utilisateur.id, None)
         choisi = None
-    gid = choisi[0] if choisi else (ouverts[0][0] if len(ouverts) == 1 else "")
+    gid = choisi[0] if choisi else (fiches[0]["id"] if len(fiches) == 1 else "")
 
     if not gid:
         if len(MODMAIL_ATTENTE) < MODMAIL_ATTENTE_MAX:
             MODMAIL_ATTENTE[utilisateur.id] = (texte, pieces, now())
-        try:
-            await utilisateur.send(
-                embed=E("✉️ À quel serveur ?",
-                        "Tu partages plusieurs serveurs avec ModBot. "
-                        "Choisis celui dont tu veux joindre l'équipe : "
-                        "ton message part aussitôt.", Palette.INFO),
-                view=vue_modmail_serveurs(ouverts))
-        except Exception:
-            pass
+        await modmail_dire(
+            utilisateur,
+            E("✉️ À quel serveur ?",
+              "Tu partages plusieurs serveurs avec ModBot. Choisis celui dont tu "
+              "veux joindre l'équipe : ton message part aussitôt.", Palette.INFO),
+            vue_modmail_serveurs(fiches), cle="choix")
         return
+    await modmail_envoyer_choisi(utilisateur, gid, texte, pieces, message)
 
-    guild = bot.get_guild(int(gid)) if str(gid).isdigit() else None
-    membre = guild.get_member(utilisateur.id) if guild else None
-    if guild is None or membre is None:
-        return
-    refus = await modmail_poster(guild, membre, texte, pieces)
+
+async def modmail_repondre_au_membre(guild, uid, contenu, signature, pieces=()):
+    """
+    La reponse de l'equipe, portee au membre. Rend True si elle est partie.
+
+    Quand le serveur traduit, le membre lit dans SA langue et garde
+    l'original dessous : une traduction approximative ne doit pas
+    remplacer ce que l'equipe a vraiment ecrit.
+    """
+    gid = str(guild.id)
+    config = modmail_cfg(gid)
+    embed = EG(f"✉️ Réponse de {guild.name}", contenu, Palette.SUCCESS, gid)
+    embed.set_footer(text=signature)
+    if config["traduire"]:
+        fiche = mm.lire_fil(modmail_table(), guild.id, uid) or {}
+        vers = str(fiche.get("langue") or "")
+        if vers:
+            traduit, _ = await modmail_traduire(contenu, vers)
+            if traduit:
+                embed.description = traduit[:4000]
+                embed.add_field(name="💬 Message original", value=contenu[:1024],
+                                inline=False)
+    if pieces:
+        liens = "\n".join(str(getattr(p, "url", p))[:200] for p in list(pieces)[:5])
+        embed.add_field(name="📎 Pièces jointes", value=liens[:1024], inline=False)
     try:
-        if refus:
-            await utilisateur.send(embed=E("✉️ Message non transmis",
-                                           mm.REFUS.get(refus, mm.REFUS["inactif"]),
-                                           Palette.WARNING))
-            return
-        await message.add_reaction("✅")
-        config = modmail_cfg(str(guild.id))
-        if config["accueil"] and MODMAIL_CHOIX.get(utilisateur.id) is None:
-            await utilisateur.send(embed=EG(f"✉️ {guild.name}", config["accueil"],
-                                            Palette.INFO, str(guild.id)))
+        cible = guild.get_member(int(uid)) or await bot.fetch_user(int(uid))
+        await cible.send(embed=embed)
+        return True
     except Exception:
-        pass
-    # Le serveur reste choisi une demi-heure : la suite de la
-    # conversation ne repose pas la question a chaque phrase.
-    MODMAIL_CHOIX[utilisateur.id] = (str(guild.id),
-                                     now() + timedelta(minutes=MODMAIL_CHOIX_MINUTES))
+        return False
 
 
 async def modmail_depuis_le_fil(message):
@@ -23879,23 +23990,173 @@ async def modmail_depuis_le_fil(message):
     if not contenu:
         return True
     config = modmail_cfg(gid)
-    embed = EG(f"✉️ Réponse de {guild.name}", contenu, Palette.SUCCESS, gid)
-    embed.set_footer(text="L'équipe" if config["anonyme"] else str(message.author))
-    if message.attachments:
-        liens = "\n".join(p.url[:200] for p in message.attachments[:5])
-        embed.add_field(name="📎 Pièces jointes", value=liens[:1024], inline=False)
+    signature = "L'équipe" if config["anonyme"] else str(message.author)
+    partie = await modmail_repondre_au_membre(guild, uid, contenu, signature,
+                                              message.attachments or [])
     try:
-        cible = guild.get_member(int(uid)) or await bot.fetch_user(int(uid))
-        await cible.send(embed=embed)
-        await message.add_reaction("✅")
-    except Exception:
-        try:
+        if partie:
+            await message.add_reaction("✅")
+        else:
             await salon.send(embed=embed_error(
                 "Message non remis",
                 "Ses messages privés sont fermés, ou il a quitté le serveur.", gid))
+    except Exception:
+        pass
+    return True
+
+
+# ── Le brouillon de reponse ───────────────────────────────────────────
+#
+# L'IA n'ecrit jamais au membre : elle propose, un moderateur decide.
+# C'est la seule forme acceptable ici — une reponse automatique a
+# quelqu'un qui conteste une sanction ferait plus de degats que le
+# silence.
+
+MODMAIL_IA_QUOTA = (20, 3600)
+
+
+async def modmail_brouillon(guild, fil):
+    """Un brouillon tire de ce que le fil contient deja. Vide si rien a lire."""
+    lignes = []
+    try:
+        async for message in fil.history(limit=14, oldest_first=False):
+            for embed in (getattr(message, "embeds", None) or []):
+                titre = str(getattr(embed, "title", "") or "")
+                corps = str(getattr(embed, "description", "") or "").strip()
+                if not corps:
+                    continue
+                if "Message du membre" in titre:
+                    lignes.append({"role": "user", "content": corps[:800]})
+                elif "ponse de" in titre:
+                    lignes.append({"role": "assistant", "content": corps[:800]})
+            if len(lignes) >= 6:
+                break
+    except Exception as erreur:
+        print(f"modmail : historique illisible ({erreur})")
+        return ""
+    if not lignes:
+        return ""
+    lignes.reverse()
+    consigne = (
+        f"Tu aides l'equipe de moderation du serveur Discord « {guild.name} ». "
+        "Ecris un BROUILLON de reponse au membre, que le moderateur relira et "
+        "enverra lui-meme. Reste court (quatre phrases au plus), poli et concret. "
+        "Reponds dans la langue du membre. N'invente aucune regle, aucune "
+        "sanction et aucune promesse : si l'information manque, dis simplement "
+        "que l'equipe verifie. Ne signe pas."
+    )
+    return (await ask_ai(lignes, consigne)).strip()
+
+
+class ModalBrouillonModmail(discord.ui.Modal, title="✍️ Corriger le brouillon"):
+    """Le brouillon, avant envoi : le moderateur le reecrit comme il veut."""
+    texte = discord.ui.TextInput(label="La réponse", style=discord.TextStyle.paragraph,
+                                 max_length=1500)
+
+    def __init__(self, gid, uid, brouillon):
+        super().__init__()
+        self.gid, self.uid = str(gid), str(uid)
+        self.texte.default = (brouillon or "")[:1500]
+
+    async def on_submit(self, i: discord.Interaction):
+        await _safe_defer(i)
+        guild = bot.get_guild(int(self.gid)) if self.gid.isdigit() else None
+        if guild is None:
+            return
+        await modmail_poser_reponse(i, guild, self.uid, str(self.texte.value))
+
+
+async def modmail_poser_reponse(interaction, guild, uid, contenu):
+    """Envoie la reponse au membre et en laisse la trace dans le fil."""
+    gid = str(guild.id)
+    config = modmail_cfg(gid)
+    signature = "L'équipe" if config["anonyme"] else str(interaction.user)
+    partie = await modmail_repondre_au_membre(guild, uid, contenu, signature)
+    fil = getattr(interaction, "channel", None)
+    if fil is not None:
+        try:
+            trace = EG("✉️ Réponse de " + guild.name, contenu, Palette.SUCCESS, gid)
+            trace.set_footer(text=f"Envoyé par {interaction.user}"
+                                  + ("" if partie else " — non remis"))
+            await fil.send(embed=trace, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             pass
-    return True
+    await safe_ephemeral(interaction, embed=(
+        embed_success("Réponse envoyée", "Le membre l'a reçue en message privé.", gid)
+        if partie else
+        embed_error("Message non remis",
+                    "Ses messages privés sont fermés, ou il a quitté le serveur.", gid)))
+
+
+class VueBrouillonModmail(discord.ui.View):
+    """Envoyer, corriger, ou s'en passer. Rien ne part sans un clic."""
+
+    def __init__(self, gid, uid, brouillon):
+        super().__init__(timeout=600)
+        self.gid, self.uid, self.brouillon = str(gid), str(uid), brouillon
+
+    @discord.ui.button(label="Envoyer", emoji="✅", style=discord.ButtonStyle.success)
+    async def envoyer(self, i: discord.Interaction, bouton: discord.ui.Button):
+        await _safe_defer(i)
+        guild = bot.get_guild(int(self.gid)) if self.gid.isdigit() else None
+        if guild is not None:
+            await modmail_poser_reponse(i, guild, self.uid, self.brouillon)
+
+    @discord.ui.button(label="Corriger", emoji="✏️", style=discord.ButtonStyle.primary)
+    async def corriger(self, i: discord.Interaction, bouton: discord.ui.Button):
+        try:
+            await i.response.send_modal(
+                ModalBrouillonModmail(self.gid, self.uid, self.brouillon))
+        except Exception as erreur:
+            print(f"modmail : fenetre de correction impossible ({erreur})")
+
+    @discord.ui.button(label="Je réponds moi-même", emoji="🙋",
+                       style=discord.ButtonStyle.secondary)
+    async def laisser(self, i: discord.Interaction, bouton: discord.ui.Button):
+        await safe_ephemeral(i, embed=embed_info(
+            "À toi", "Le brouillon est oublié. Écris ta réponse dans le fil.", self.gid))
+
+
+async def modmail_brouillon_interaction(interaction, gid, uid):
+    """Le bouton « Brouillon », sous la fiche d'ouverture."""
+    guild = bot.get_guild(int(gid)) if gid.isdigit() else None
+    if guild is None:
+        return
+    config = modmail_cfg(gid)
+    if not config["ia"]:
+        return await safe_ephemeral(interaction, embed=embed_info(
+            "Brouillon coupé",
+            "Ce serveur n'a pas activé les brouillons dans la rubrique Modmail.", gid))
+    if not ai_cfg(gid)["enabled"]:
+        return await safe_ephemeral(interaction, embed=embed_info(
+            "Assistant IA coupé",
+            "Active l'assistant dans la rubrique « Assistant IA » pour t'en servir ici.",
+            gid))
+    limite, fenetre = MODMAIL_IA_QUOTA
+    if not rate_limit_ok(f"modmail_ia:{gid}", limite, fenetre):
+        return await safe_ephemeral(interaction, embed=embed_info(
+            "Quota atteint", "Trop de brouillons demandés cette heure-ci.", gid))
+
+    await _safe_defer(interaction)
+    try:
+        brouillon = await modmail_brouillon(guild, interaction.channel)
+    except AIError as erreur:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "IA indisponible", str(erreur), gid))
+    except Exception as erreur:
+        print(f"modmail : brouillon impossible ({guild.id}) : {erreur}")
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Brouillon impossible", "L'assistant n'a rien pu écrire cette fois.", gid))
+    if not brouillon:
+        return await safe_ephemeral(interaction, embed=embed_info(
+            "Rien à lire", "Le membre n'a encore rien écrit dans ce fil.", gid))
+    embed = EG("✍️ Brouillon de réponse", brouillon[:4000], Palette.INFO, gid)
+    embed.set_footer(text="Relis-le : rien ne part tant que tu n'as pas cliqué.")
+    try:
+        await interaction.followup.send(
+            embed=embed, view=VueBrouillonModmail(gid, uid, brouillon), ephemeral=True)
+    except Exception as erreur:
+        print(f"modmail : brouillon non affiche ({erreur})")
 
 
 async def modmail_fermer(guild, uid, par, raison=""):
@@ -23942,16 +24203,27 @@ async def modmail_interaction(interaction):
         if membre is None:
             return await safe_ephemeral(interaction, embed=embed_error(
                 "Serveur introuvable", "Tu n'es plus sur ce serveur.", None))
-        MODMAIL_CHOIX[interaction.user.id] = (
-            gid, now() + timedelta(minutes=MODMAIL_CHOIX_MINUTES))
+        # Un serveur ferme repond qu'il est ferme. Le choix n'est pas
+        # retenu : le message suivant ne doit pas y repartir tout seul.
+        etat = mm.etat_du_serveur(get_cfg(gid).get("modmail"), interaction.user.id)
+        if etat != "ouvert":
+            MODMAIL_ATTENTE.pop(interaction.user.id, None)
+            MODMAIL_CHOIX.pop(interaction.user.id, None)
+            return await safe_ephemeral(interaction, embed=embed_info(
+                guild.name,
+                mm.REFUS["bloque"] if etat == "bloque" else mm.REFUS["inactif"], gid))
         attente = MODMAIL_ATTENTE.pop(interaction.user.id, None)
         if not attente:
+            MODMAIL_CHOIX[interaction.user.id] = (
+                gid, now() + timedelta(minutes=MODMAIL_CHOIX_MINUTES))
             return await safe_ephemeral(interaction, embed=embed_success(
                 "C'est noté", f"Écris ton message : il partira à **{guild.name}**.", gid))
         refus = await modmail_poster(guild, membre, attente[0], attente[1])
         if refus:
-            return await safe_ephemeral(interaction, embed=embed_error(
-                "Message non transmis", mm.REFUS.get(refus, mm.REFUS["inactif"]), gid))
+            return await safe_ephemeral(interaction, embed=embed_info(
+                guild.name, mm.REFUS.get(refus, mm.REFUS["inactif"]), gid))
+        MODMAIL_CHOIX[interaction.user.id] = (
+            gid, now() + timedelta(minutes=MODMAIL_CHOIX_MINUTES))
         return await safe_ephemeral(interaction, embed=embed_success(
             "Message transmis", f"L'équipe de **{guild.name}** l'a reçu.", gid))
 
@@ -23965,6 +24237,9 @@ async def modmail_interaction(interaction):
         return await safe_ephemeral(interaction, embed=embed_error(
             "Réservé à l'équipe", "Seule l'équipe du serveur agit sur le courrier.",
             gid if guild else None))
+
+    if action == "brouillon":
+        return await modmail_brouillon_interaction(interaction, gid, uid)
 
     if action == "fermer":
         await _safe_defer(interaction)
