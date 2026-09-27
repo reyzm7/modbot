@@ -32,6 +32,7 @@ import annulation as an
 import modmail as mm
 import repetition as rep
 import assistance as ass
+import membres as mb
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -337,6 +338,7 @@ F_ANNIVERSAIRES = chemin_donnees("anniversaires.json")
 F_RAPPELS = chemin_donnees("rappels.json")
 F_ANNULATIONS = chemin_donnees("annulations.json")
 F_MODMAIL = chemin_donnees("modmail.json")
+F_PSEUDOS = chemin_donnees("pseudos.json")
 F_MUR = chemin_donnees("mur.json")
 F_VOTES = chemin_donnees("votes.json")
 # Le salon de comptage : ou en est la serie, qui a compte le dernier, le
@@ -7296,6 +7298,7 @@ def serialize_dashboard_config(guild):
             "custom_words": custom_words,
             "filtered_words": filtered_words,
             "repetition": rep.lire_config(cfg.get("repetition")),
+            "pseudos_suivis": suit_les_pseudos(gid),
         },
         "moderation": {
             "default_words": INSULTES_BASE,
@@ -7642,6 +7645,8 @@ async def apply_dashboard_config(guild, payload):
     if "expiration_infractions" in security:
         cfg["expiration_infractions"] = sc.jours_de_retention(
             security.get("expiration_infractions"))
+    if "pseudos_suivis" in security:
+        cfg["pseudos_suivis"] = bool(security.get("pseudos_suivis"))
     if isinstance(security.get("repetition"), dict):
         cfg["repetition"] = rep.lire_config(security["repetition"])
     if "insultes_enabled" in security:
@@ -18931,6 +18936,18 @@ async def on_member_unban(guild, user):
 @bot.event
 async def on_member_update(before, after):
     guild = after.guild
+
+    # Le pseudo de serveur. Discord n'en garde aucune trace : une fois
+    # change, l'ancien nom n'existe plus nulle part.
+    avant = before.nick or before.name
+    apres = after.nick or after.name
+    if avant != apres:
+        try:
+            noter_ancien_pseudo(guild, after, avant)
+            await journaliser_pseudo(guild, after, avant, apres)
+        except Exception as erreur:
+            print(f"pseudo ({guild.id}) : {erreur}")
+
     added = [r for r in after.roles if r not in before.roles]
     removed = [r for r in before.roles if r not in after.roles]
 
@@ -21005,6 +21022,12 @@ async def cmd_infractions(i: discord.Interaction, membre: discord.Member):
               if jours else "Ce serveur garde les infractions sans limite de temps.")
     pied = getattr(getattr(embed, "footer", None), "text", "") or ""
     embed.set_footer(text=(f"{pied} · {rappel}" if pied else rappel)[:2000])
+    # Les anciens pseudos : reconnaitre quelqu'un qui s'est rebaptise
+    # apres un esclandre vaut pour la moitie du travail.
+    anciens = mb.resume_pseudos(pseudos_du_serveur(gid), membre.id, 3)
+    if anciens:
+        embed.add_field(name="🕒 Anciens pseudos", value=anciens[:1024], inline=False)
+
     # Les notes de l'equipe, a cote du casier : c'est en les lisant
     # ensemble qu'on decide.
     notes = notes_du_membre(gid, membre.id)
@@ -24060,6 +24083,9 @@ def embed_modmail_ouverture(guild, membre):
                     value=fmt(membre.joined_at) if getattr(membre, "joined_at", None) else "inconnu",
                     inline=True)
     embed.add_field(name="📊 Points", value=f"`{INFRACTIONS.points(gid, membre.id)}`", inline=True)
+    anciens = mb.resume_pseudos(pseudos_du_serveur(gid), membre.id, 3)
+    if anciens:
+        embed.add_field(name="🕒 Anciens pseudos", value=anciens[:1024], inline=False)
     embed.add_field(
         name="✍️ Répondre",
         value=("Écris dans ce fil : ton message part en privé, sous le nom du serveur.\n"
@@ -25966,6 +25992,133 @@ async def cmd_salon_acces(i: discord.Interaction, membre: discord.Member,
                     actor=i.user, target=membre)
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  LES ANCIENS PSEUDOS, ET LES MEMBRES SILENCIEUX
+# ══════════════════════════════════════════════════════════════════════
+#
+# « Ce n'est pas le meme pseudo qu'hier » : changer de nom trois fois en
+# deux jours se fait rarement par gout. Discord garde l'identifiant,
+# mais personne ne lit les identifiants.
+
+def pseudos_du_serveur(gid):
+    return _par_serveur(F_PSEUDOS, gid)
+
+
+def suit_les_pseudos(gid):
+    """Coupe, rien n'est ecrit : c'est une donnee de membre."""
+    return get_cfg(gid).get("pseudos_suivis", True) is not False
+
+
+def noter_ancien_pseudo(guild, membre, ancien):
+    """Retient un nom abandonne, si le serveur le veut."""
+    gid = str(getattr(guild, "id", "") or "")
+    if not gid or not suit_les_pseudos(gid):
+        return
+    table = mb.noter_pseudo(pseudos_du_serveur(gid), membre.id, ancien, now().isoformat())
+    _ecrire_par_serveur(F_PSEUDOS, gid, table)
+
+
+async def journaliser_pseudo(guild, membre, ancien, nouveau):
+    """Le changement passe dans les logs, avec ce qu'on savait deja."""
+    gid = str(guild.id)
+    anciens = mb.resume_pseudos(pseudos_du_serveur(gid), membre.id, 3)
+    await log_event(
+        guild, "members", "Changement de pseudo",
+        f"{membre.mention} s'appelle maintenant **{nouveau}**.",
+        fields=[("↩️ Avant", f"**{ancien}**")]
+        + ([("🕒 Noms precedents", anciens)] if anciens else []),
+        severity="info", target=membre)
+
+
+@bot.tree.command(name="inactifs",
+                  description="🧹 Les membres qui n'ont rien écrit depuis longtemps")
+@app_commands.describe(jours="Depuis combien de jours ils se taisent (90 par défaut)",
+                       expulser="Expulser ceux de la liste, après confirmation")
+@app_commands.default_permissions(kick_members=True)
+@app_commands.checks.has_permissions(kick_members=True)
+@app_commands.guild_only()
+async def cmd_inactifs(i: discord.Interaction, jours: int = mb.INACTIF_DEFAUT,
+                       expulser: bool = False):
+    gid = str(i.guild.id)
+    jours = mb.jours_valides(jours)
+    await _safe_defer(i)
+
+    stats = _par_serveur(F_STATS, i.guild.id)
+    maintenant = now()
+    fiches = []
+    for membre in i.guild.members:
+        # Un membre a qui on a donne un role a ete remarque par
+        # quelqu'un : le silence n'est pas une faute.
+        protege = (membre.bot
+                   or est_du_staff(membre, gid)
+                   or est_immunise(membre, gid)
+                   or membre.id == i.guild.owner_id
+                   or any(not role.is_default() for role in membre.roles)
+                   or getattr(membre, "premium_since", None) is not None)
+        fiches.append({"id": membre.id, "nom": str(membre),
+                       "arrive_le": membre.joined_at, "protege": protege})
+    trouves = mb.candidats(fiches, stats, jours, maintenant)
+
+    if not trouves:
+        return await i.followup.send(embed=embed_success(
+            "Personne à ranger",
+            f"Aucun membre sans rôle ne s'est tu depuis **{jours}** jours.", gid),
+            ephemeral=True)
+
+    embed = EG("🧹 Membres silencieux",
+               f"**{len(trouves)}** membre(s) sans rôle n'ont rien écrit depuis "
+               f"**{jours}** jours ou plus.", Palette.WARNING, gid)
+    embed.add_field(name="👥 Les premiers",
+                    value="\n".join(mb.resume_candidats(trouves, 15))[:1024], inline=False)
+    embed.add_field(
+        name="🛡️ Jamais proposés",
+        value="Le staff, les membres immunisés, les boosters, les bots, "
+              "et quiconque porte un rôle.", inline=False)
+    if not expulser:
+        embed.set_footer(text="Relance avec expulser: Oui pour les retirer du serveur.")
+        return await i.followup.send(embed=embed, ephemeral=True)
+
+    lot = trouves[:mb.EXPULSIONS_MAX]
+    confirmed, view = await ask_confirmation(
+        i, "Expulser ces membres",
+        f"Tu es sur le point d'expulser **{len(lot)}** membre(s) de "
+        f"**{i.guild.name}**. Ils pourront revenir avec une invitation.",
+        confirm_label=f"Expulser {len(lot)}",
+        fields=[("👥 Combien", f"{len(lot)} sur {len(trouves)} trouvés"),
+                ("🕒 Critère", f"aucun message depuis {jours} jours"),
+                ("↩️ Réversible", "Une expulsion n'est pas un bannissement : "
+                                  "ils peuvent revenir.")])
+    if not confirmed:
+        return
+    cible = view.interaction or i
+
+    partis, refuses = 0, 0
+    for fiche in lot:
+        membre = i.guild.get_member(int(fiche["id"]))
+        if membre is None:
+            continue
+        try:
+            await membre.kick(reason=f"[ModBot] Inactif depuis {fiche['depuis']} jours "
+                                     f"— /inactifs par {i.user}")
+            partis += 1
+        except Exception:
+            refuses += 1
+        await asyncio.sleep(0.6)  # Discord n'aime pas les rafales
+
+    resultat = embed_success(
+        "Ménage terminé",
+        f"**{partis}** membre(s) expulsé(s)"
+        + (f", **{refuses}** refusé(s) par Discord." if refuses else "."), gid)
+    await cible.followup.send(embed=resultat, ephemeral=True)
+    await log_event(i.guild, "moderation", "Membres inactifs expulsés",
+                    f"{i.user.mention} a fait le ménage des membres silencieux.",
+                    fields=[("🕒 Critère", f"aucun message depuis {jours} jours"),
+                            ("👥 Expulsés", f"`{partis}`"),
+                            ("🚫 Refusés", f"`{refuses}`")],
+                    severity="warning", actor=i.user)
+    dashboard_log("inactifs", i.guild, str(i.user), f"{partis} expulses ({jours} j)")
+
+
 note_group = app_commands.Group(
     name="note", description="Les notes de l'equipe sur un membre",
     default_permissions=discord.Permissions(manage_messages=True), guild_only=True)
@@ -26577,7 +26730,7 @@ CATEGORIES_COMMANDES = [
     ("💾", "Sauvegardes", ["backup"]),
     ("📊", "Statistiques", ["serverstats", "modstats", "profilestats"]),
     ("⭐", "Premium", ["premium", "voter"]),
-    ("🧰", "Outils", ["installer", "panel", "aide", "info-bot", "mesdonnees"]),
+    ("🧰", "Outils", ["installer", "panel", "aide", "info-bot", "mesdonnees", "inactifs"]),
 ]
 
 # Il n'y a plus de commande a prefixe : `/role` et `/salon-acces` les
