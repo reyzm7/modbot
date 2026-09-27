@@ -223,8 +223,8 @@ verifier("l'ancien journal aussi",
          and "await ch.send(embed=embed, view=view)" in source)
 verifier("le routeur des boutons reconnaît l'annulation",
          'if custom_id.startswith("sanc:annuler:"):' in source)
-verifier("le bouton est posé sous les six sanctions qui se défont",
-         source.count("view=vue_annuler(jeton)") == 6
+verifier("le bouton est posé sous les sept sanctions qui se défont",
+         source.count("view=vue_annuler(jeton)") == 7
          and source.count("send_log(i.guild, le, view=vue_annuler(jeton))") == 1)
 verifier("l'échelle des avertissements n'a plus sa durée en dur",
          "timedelta(days=150)" not in source

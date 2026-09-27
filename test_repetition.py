@@ -273,9 +273,10 @@ verifier("le troisième déclenche", poster(SALONS[2], PUB) is True)
 verifier("et les trois messages sont effacés, pas seulement le dernier",
          all(list(s.messages.values())[0].efface for s in SALONS))
 verifier("le salon prévient une fois", len(SALONS[2].envoyes) == 1)
+boutons = [getattr(b, "custom_id", "") for b in getattr(journal[-1][1], "children", [])]
 verifier("le journal en garde la trace, avec le bouton d'annulation",
-         journal and journal[-1][0].startswith("Même message")
-         and journal[-1][1] == "jeton" or journal[-1][1] is not None)
+         bool(journal) and journal[-1][0].startswith("Même message")
+         and boutons == ["sanc:annuler:jeton"], str(boutons))
 
 for salon in SALONS:
     salon.messages.clear()
