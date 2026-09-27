@@ -148,8 +148,15 @@ for quoi, contexte in (("arrivees", "async def on_member_join"),
     depart = source.index(contexte)
     verifier(f"« {quoi} » est compte", f'"{quoi}")' in source[depart:depart + 1500])
 
-verifier("les quatre compteurs du module sont tous branches",
-         set(rp.COMPTEURS) == {"arrivees", "sanctions", "filtres", "tickets"})
+for quoi, contexte in (("courriers", 'dashboard_log("modmail"'),
+                       ("mur", "_ecrire_par_serveur(F_MUR, guild.id, table)"),
+                       ("departs", "async def on_member_remove")):
+    depart = source.index(contexte)
+    verifier(f"« {quoi} » est compte", f'"{quoi}")' in source[depart:depart + 1500])
+
+verifier("les sept compteurs du module sont tous branches",
+         set(rp.COMPTEURS) == {"arrivees", "sanctions", "filtres", "tickets",
+                               "courriers", "mur", "departs"})
 verifier("un comptage rate n'empeche jamais de moderer",
          "except Exception" in source[source.index("def rapport_compter"):][:800])
 

@@ -224,7 +224,7 @@ verifier("le fil de courrier passe avant l'expérience et les filtres",
 verifier("les pièces jointes sont recopiées, pas citées par leur adresse",
          "async def fichiers_du_message(" in source
          and "await piece.to_file()" in source
-         and source.count("files=fichiers") == 2)
+         and source.count("files=fichiers") == 3)
 verifier("ce qui est trop gros garde son lien, faute de mieux",
          "Trop volumineux pour être recopiés" in source
          and "def champ_des_liens(" in source)
@@ -313,7 +313,7 @@ class FauxMembre:
     def __str__(self):
         return self.name
 
-    async def send(self, content=None, embed=None, view=None):
+    async def send(self, content=None, embed=None, view=None, files=None):
         self.recus.append(embed)
 
 
@@ -324,8 +324,10 @@ class FauxFil:
         self.messages = []
         self.vues = []
 
-    async def send(self, content=None, embed=None, view=None, allowed_mentions=None):
+    async def send(self, content=None, embed=None, view=None, files=None,
+                   allowed_mentions=None):
         self.messages.append((content, embed))
+        self.fichiers = list(files or [])
         if view is not None:
             self.vues.append(view)
 

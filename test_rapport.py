@@ -39,7 +39,7 @@ table = rp.compter({}, GID, "arrivees", T0)
 verifier("un serveur inconnu ouvre sa semaine", table[GID]["arrivees"] == 1
          and table[GID]["debut"] == T0.isoformat())
 verifier("les autres compteurs existent a zero",
-         rp.chiffres(table[GID]) == {"arrivees": 1, "sanctions": 0, "filtres": 0, "tickets": 0},
+         rp.chiffres(table[GID]) == {**{clef: 0 for clef in rp.COMPTEURS}, "arrivees": 1},
          str(rp.chiffres(table[GID])))
 
 table = rp.compter(table, GID, "arrivees", T0 + timedelta(hours=3))
