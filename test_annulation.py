@@ -226,9 +226,12 @@ verifier("le routeur des boutons reconnaît l'annulation",
 verifier("le bouton est posé sous les huit sanctions qui se défont",
          source.count("view=vue_annuler(jeton)") == 8
          and source.count("send_log(i.guild, le, view=vue_annuler(jeton))") == 1)
-verifier("l'échelle des avertissements n'a plus sa durée en dur",
+# L echelle avait sa propre duree, ecrite en dur : cinq mois ici, six
+# ailleurs. Elle n en a plus du tout — elle lit le casier, qui demande
+# la sienne au serveur.
+verifier("l'échelle n'a plus de durée à elle : elle lit le casier",
          "timedelta(days=150)" not in source
-         and "jours = jours_infractions(g)" in source)
+         and "return INFRACTIONS.history(gid, uid)" in source)
 verifier("le magasin d'infractions demande sa durée au serveur",
          "retention_resolver=jours_infractions" in source)
 verifier("une expulsion ne reçoit pas de bouton",
