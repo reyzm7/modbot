@@ -33,6 +33,7 @@ import modmail as mm
 import repetition as rep
 import assistance as ass
 import membres as mb
+import historique_config as hc
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -340,6 +341,7 @@ F_ANNULATIONS = chemin_donnees("annulations.json")
 F_MODMAIL = chemin_donnees("modmail.json")
 F_PSEUDOS = chemin_donnees("pseudos.json")
 F_ROLES_TEMPORAIRES = chemin_donnees("roles_temporaires.json")
+F_HISTORIQUE_CONFIG = chemin_donnees("historique_config.json")
 F_MUR = chemin_donnees("mur.json")
 F_VOTES = chemin_donnees("votes.json")
 # Le salon de comptage : ou en est la serie, qui a compte le dernier, le
@@ -522,6 +524,11 @@ FICHIERS_SAUVEGARDES = (
     # Le compteur de visites : le perdre le ferait repartir a son
     # chiffre de depart, ce qui serait faux.
     "visites.json",
+    # Ce qu'etait la configuration avant chaque changement. Sans volume
+    # monte, un redeploiement l'effacerait — et un historique qui se
+    # vide tout seul ne sert a personne, c'est justement le jour du
+    # redeploiement qu'on veut revenir en arriere.
+    "historique_config.json",
 )
 
 # dashboard_sessions.json n'y sera JAMAIS : il contient les jetons OAuth
@@ -7471,9 +7478,44 @@ def sanitize_recurring_messages(guild, brut, existants):
     return propres
 
 
+def historique_config_tout():
+    table = jload(F_HISTORIQUE_CONFIG)
+    return table if isinstance(table, dict) else {}
+
+
+def noter_version_config(guild, avant, auteur="", motif=""):
+    """
+    Garde ce qu'etait la configuration avant ce changement.
+
+    L'instantane est pris sur ce que le tableau de bord envoie : reposer
+    une version repasse alors par `apply_dashboard_config`, avec toutes
+    ses verifications, au lieu d'ecrire un fichier de reglages a la
+    main.
+    """
+    try:
+        version = hc.fabriquer(avant, serialize_dashboard_config(guild),
+                               auteur=auteur, quand=now(), motif=motif)
+        if version is None:
+            return None  # rien n'a bouge : pas de ligne pour rien
+        jsave(F_HISTORIQUE_CONFIG,
+              hc.poser(historique_config_tout(), guild.id, version))
+        return version
+    except Exception as erreur:
+        # Garder l'historique ne doit jamais empecher d'enregistrer.
+        print(f"historique de configuration ({guild.id}) : {erreur}")
+        return None
+
+
 async def apply_dashboard_config(guild, payload):
     gid = str(guild.id)
     cfg = get_cfg(gid)
+    # L etat d avant, pour l historique. Pris ici, avant la premiere
+    # ecriture : apres, il serait deja perdu.
+    try:
+        avant = hc.instantane(serialize_dashboard_config(guild))
+    except Exception as erreur:
+        print(f"historique de configuration ({gid}) : {erreur}")
+        avant = None
 
     channels = payload.get("channels") or {}
     channel_map = {
@@ -7791,6 +7833,9 @@ async def apply_dashboard_config(guild, payload):
 
     set_cfg(gid, cfg)
     dashboard_log("config_update", guild, payload.get("actor", "dashboard"), "Configuration sauvegardee depuis le dashboard")
+    if avant is not None:
+        noter_version_config(guild, avant, auteur=payload.get("actor", ""),
+                             motif=str(payload.get("motif_historique") or ""))
     return cfg
 
 # Ce que Discord a accepte au dernier demarrage. Une synchronisation
@@ -8139,6 +8184,45 @@ async def api_save_guild_config(request):
     payload["actor"] = identity.get("username") or identity.get("user_id")
     await apply_dashboard_config(guild, payload)
     return api_json({"ok": True, "config": serialize_dashboard_config(guild)})
+
+async def api_guild_historique(request):
+    """Les versions successives de la configuration, la plus recente en tete."""
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    return api_json({"ok": True,
+                     "versions": hc.resume(historique_config_tout(), guild.id),
+                     "max": hc.MAX_VERSIONS})
+
+
+async def api_restaurer_config(request):
+    """
+    Reposer une version : le tableau de bord la renvoie telle qu'elle
+    etait, et elle repasse par le chemin d'une sauvegarde ordinaire.
+
+    La version d'avant la restauration est notee elle aussi : se
+    tromper de version ne doit pas etre un aller sans retour.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    jeton = str((payload or {}).get("jeton") or "")
+    version = hc.version_de(historique_config_tout(), guild.id, jeton)
+    if version is None:
+        raise web.HTTPNotFound(text="Cette version n'est plus dans l'historique.")
+
+    reglages = hc.payload_de(version)
+    if not reglages:
+        raise web.HTTPBadRequest(text="Cette version ne contient aucun reglage.")
+    quand = sc.parse_iso(version.get("date"))
+    reglages["actor"] = identity.get("username") or identity.get("user_id")
+    reglages["motif_historique"] = ("Retour a la version du "
+                                    + (fmt(quand) if quand else "?"))
+    await apply_dashboard_config(guild, reglages)
+    dashboard_log("config_restore", guild, identity.get("username"),
+                  f"Retour a la version du {fmt(quand) if quand else '?'}")
+    return api_json({"ok": True, "config": serialize_dashboard_config(guild),
+                     "versions": hc.resume(historique_config_tout(), guild.id)})
+
 
 async def api_publish_ticket(request):
     identity = await api_identity(request)
@@ -13729,6 +13813,8 @@ async def start_dashboard_api():
     app.router.add_get("/api/guilds/{guild_id}/config", api_get_guild_config)
     app.router.add_put("/api/guilds/{guild_id}/config", api_save_guild_config)
     app.router.add_get("/api/guilds/{guild_id}/sanctions", api_get_guild_sanctions)
+    app.router.add_get("/api/guilds/{guild_id}/historique", api_guild_historique)
+    app.router.add_post("/api/guilds/{guild_id}/historique/restaurer", api_restaurer_config)
 
     # Securite, logs, infractions
     app.router.add_get("/api/guilds/{guild_id}/security", api_get_guild_security)
@@ -22694,6 +22780,12 @@ async def on_guild_remove(guild):
     perd des serveurs vaut mieux que de l'apprendre en comptant.
     """
     oublier_stats_publiques()
+    # Son historique de configuration part avec lui : le garder ferait
+    # grossir la sauvegarde pour un serveur qui ne reviendra pas.
+    try:
+        jsave(F_HISTORIQUE_CONFIG, hc.oublier(historique_config_tout(), guild.id))
+    except Exception as erreur:
+        print(f"historique de configuration ({guild.id}) : {erreur}")
     dashboard_log("guild_remove", guild=guild, detail=f"{guild.member_count} membres")
     await alerter_equipe(
         "Un serveur en moins",
