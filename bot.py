@@ -7880,11 +7880,83 @@ async def api_oauth_callback(request):
                   f"{manageable} serveur(s) administrable(s)")
     raise web.HTTPFound(f"{redirect}#session={session_token}")
 
+# Combien de temps on garde l'avatar sans le redemander. L'URL d'un
+# avatar porte son empreinte : changer de photo de profil rend
+# l'ancienne introuvable, et le navigateur affichait alors une image
+# cassee a la place du visage.
+PROFIL_CACHE_SECONDS = 600
+_profil_cache = {}
+
+
+async def rafraichir_profil(identity):
+    """
+    Redemande a Discord le pseudo et l'avatar de l'utilisateur.
+
+    Sans reseau, ou sans jeton, on garde ce que la session connait :
+    un avatar perime vaut mieux que pas de dashboard.
+    """
+    token = identity.get("access_token")
+    cle = str(identity.get("user_id") or "")
+    if not token or not cle:
+        return identity
+    entree = _profil_cache.get(cle)
+    if entree and time.monotonic() - entree["ts"] < PROFIL_CACHE_SECONDS:
+        identity.update(entree["profil"])
+        return identity
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get("https://discord.com/api/users/@me",
+                                   headers={"Authorization": f"Bearer {token}"}) as reponse:
+                if reponse.status >= 400:
+                    return identity
+                donnees = await reponse.json()
+    except Exception as erreur:
+        print(f"profil Discord illisible ({cle}) : {type(erreur).__name__}")
+        return identity
+    if not isinstance(donnees, dict):
+        return identity
+    profil = {
+        "username": (donnees.get("global_name") or donnees.get("username")
+                     or identity.get("username") or "Utilisateur Discord"),
+        "avatar": donnees.get("avatar"),
+        "avatar_url": user_avatar_url(cle, donnees.get("avatar")),
+    }
+    _profil_cache[cle] = {"ts": time.monotonic(), "profil": profil}
+    if len(_profil_cache) > 500:
+        for vieille in sorted(_profil_cache, key=lambda k: _profil_cache[k]["ts"])[:250]:
+            _profil_cache.pop(vieille, None)
+    identity.update(profil)
+    return identity
+
+
+def identite_publique(identity):
+    """
+    Ce que le navigateur a le droit de savoir de sa propre session.
+
+    La session porte le jeton OAuth Discord de l'utilisateur : il
+    ouvrait l'API Discord en son nom, et partait tel quel dans la
+    reponse. Il reste ici.
+    """
+    identity = identity or {}
+    uid = str(identity.get("user_id") or "")
+    return {
+        "user_id": uid,
+        "username": identity.get("username") or uid or "Utilisateur Discord",
+        "discriminator": str(identity.get("discriminator") or "0"),
+        "avatar_url": identity.get("avatar_url") or user_avatar_url(uid, identity.get("avatar")),
+        "admin": bool(identity.get("admin")),
+        "guild_ids": [str(x) for x in (identity.get("guild_ids") or [])],
+        "manageable_guilds": identity.get("manageable_guilds") or [],
+        "expires_at": identity.get("expires_at") or "",
+    }
+
+
 async def api_me(request):
     identity = await api_identity(request)
     return api_json({
         "ok": True,
-        "user": identity,
+        "user": identite_publique(await rafraichir_profil(identity)),
     }, request=request)
 
 async def api_guilds(request):
@@ -7939,7 +8011,7 @@ async def api_guilds(request):
     return api_json({
         "ok": True,
         "guilds": guilds,
-        "user": identity,
+        "user": identite_publique(identity),
     }, request=request)
 
 async def api_guild_resources(request):
