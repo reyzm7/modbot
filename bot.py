@@ -7361,6 +7361,7 @@ def serialize_dashboard_config(guild):
         "reaction_description": cfg.get("reaction_description") or "Clique sur une reaction pour recevoir ou retirer le role correspondant.",
         "reaction_roles_channel_id": str(cfg.get("reaction_roles_channel_id") or ""),
         "reaction_roles_mode": cfg.get("reaction_roles_mode") or "Plusieurs rôles possibles",
+        "reaction_roles_boutons": bool(cfg.get("reaction_roles_boutons")),
         "recurring_messages": cfg.get("recurring_messages", []),
         "compteurs": cfg.get("compteurs", []),
         "social_relays": cfg.get("social_relays", []),
@@ -7705,6 +7706,8 @@ async def apply_dashboard_config(guild, payload):
             cfg["reaction_roles_channel_id"] = parsed_channel
         else:
             cfg.pop("reaction_roles_channel_id", None)
+    if "reaction_roles_boutons" in payload:
+        cfg["reaction_roles_boutons"] = bool(payload.get("reaction_roles_boutons"))
     if "reaction_roles_mode" in payload:
         cfg["reaction_roles_mode"] = clean_short_text(payload.get("reaction_roles_mode"), "Plusieurs rôles possibles", 80)
     if "reaction_title" in payload:
@@ -8134,7 +8137,22 @@ async def api_publish_reaction_roles(request):
         role = guild.get_role(parse_int(item.get("role_id")) or 0)
         lines.append(f"{item.get('emoji', '✨')} {role.mention if role else item.get('label', 'Role')}")
     embed.add_field(name="Roles disponibles", value="\n".join(lines)[:1000], inline=False)
-    message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(roles=False, users=False, everyone=False))
+    # Des boutons plutot que des reactions, si le serveur le veut : un
+    # emoji du serveur retire casse une reaction-role sans bruit, et se
+    # rate au doigt sur telephone.
+    par_boutons = bool(cfg.get("reaction_roles_boutons"))
+    message = await channel.send(
+        embed=embed,
+        view=vue_roles_boutons(reaction_roles, guild) if par_boutons else None,
+        allowed_mentions=discord.AllowedMentions(roles=False, users=False, everyone=False))
+    if par_boutons:
+        cfg["reaction_roles_message_id"] = message.id
+        cfg["reaction_roles_channel_id"] = channel.id
+        set_cfg(guild.id, cfg)
+        dashboard_log("reaction_roles_publish", guild, identity.get("username"),
+                      f"{len(reaction_roles)} roles en boutons dans #{channel.name}")
+        return api_json({"ok": True, "channel_id": str(channel.id),
+                         "message_id": str(message.id), "mode": "boutons"})
     for item in reaction_roles:
         try:
             await message.add_reaction(str(item.get("emoji") or "✨"))
@@ -16688,6 +16706,171 @@ async def build_member_event_card(member, system, departure=False):
     nom_fichier = f"{'departure' if departure else 'welcome'}-{member.guild.id}-{member.id}.png"
     return discord.File(sortie, filename=nom_fichier)
 
+
+async def carte_de_niveau(membre, niveau, points, dedans, besoin, rang):
+    """
+    La carte de niveau, en image.
+
+    Un embed se lit et s'oublie ; une carte se partage. C'est tout
+    l'interet d'un systeme de niveaux, et il manquait. Rend None quand
+    Pillow n'est pas la : l'appelant retombe alors sur son embed.
+    """
+    if not PIL_AVAILABLE:
+        return None
+    largeur, hauteur = 900, 260
+    marge, rayon = 22, 28
+
+    base = Image.new("RGBA", (largeur, hauteur), (10, 8, 20, 255))
+    panneau = Image.new("RGBA", (largeur - marge * 2, hauteur - marge * 2), (0, 0, 0, 0))
+    ImageDraw.Draw(panneau).rounded_rectangle(
+        (0, 0, panneau.width - 1, panneau.height - 1), radius=rayon,
+        fill=(22, 18, 38, 245))
+    base.alpha_composite(panneau, (marge, marge))
+    dessin = ImageDraw.Draw(base)
+
+    # ── L'avatar, rond ───────────────────────────────────────────────
+    taille = 140
+    ax, ay = marge + 26, (hauteur - taille) // 2
+    try:
+        octets = await _load_image_bytes(str(membre.display_avatar.with_size(256).url))
+    except Exception:
+        octets = None
+    anneau = Image.new("RGBA", (taille + 12, taille + 12), (0, 0, 0, 0))
+    ImageDraw.Draw(anneau).ellipse((0, 0, taille + 11, taille + 11),
+                                   fill=(139, 92, 246, 255))
+    base.alpha_composite(anneau, (ax - 6, ay - 6))
+    pose = False
+    if octets:
+        try:
+            avatar = Image.open(io.BytesIO(octets)).convert("RGBA")
+            avatar = ImageOps.fit(avatar, (taille, taille),
+                                  method=Image.Resampling.LANCZOS)
+            masque = Image.new("L", (taille, taille), 0)
+            ImageDraw.Draw(masque).ellipse((0, 0, taille - 1, taille - 1), fill=255)
+            base.paste(avatar, (ax, ay), masque)
+            pose = True
+        except Exception:
+            pose = False
+    if not pose:
+        dessin.ellipse((ax, ay, ax + taille, ay + taille), fill=(88, 101, 242, 255))
+
+    # ── Les textes ───────────────────────────────────────────────────
+    gauche = ax + taille + 34
+    nom = (membre.display_name or membre.name)[:20]
+    titre = _welcome_font("Inter", 40, bold=True)
+    petit = _welcome_font("Inter", 24, bold=False)
+    dessin.text((gauche, ay + 2), nom, font=titre, fill=(247, 243, 255))
+    ligne = f"Niveau {niveau}"
+    if rang:
+        ligne += f"  ·  rang #{rang}"
+    dessin.text((gauche, ay + 52), ligne, font=petit, fill=(179, 157, 255))
+
+    # ── La barre de progression ──────────────────────────────────────
+    # Elle dit ce qu'un nombre ne dit pas : ou l'on en est, et ce qu'il
+    # reste. C'est ce qu'on regarde en premier sur une carte.
+    bx, by = gauche, ay + taille - 44
+    bw, bh = largeur - gauche - marge - 26, 26
+    part = 0.0
+    if besoin:
+        part = max(0.0, min(1.0, float(dedans) / float(besoin)))
+    ImageDraw.Draw(base).rounded_rectangle((bx, by, bx + bw, by + bh),
+                                           radius=bh // 2, fill=(38, 32, 62, 255))
+    if part > 0:
+        ImageDraw.Draw(base).rounded_rectangle(
+            (bx, by, bx + max(bh, int(bw * part)), by + bh),
+            radius=bh // 2, fill=(139, 92, 246, 255))
+    dessin.text((bx, by - 30), f"{int(dedans)} / {int(besoin)} XP",
+                font=petit, fill=(216, 204, 255))
+    dessin.text((bx + bw - dessin.textlength(f"{int(points)} au total", font=petit),
+                 by - 30), f"{int(points)} au total", font=petit, fill=(150, 145, 175))
+
+    sortie = io.BytesIO()
+    base.convert("RGB").save(sortie, format="PNG", optimize=True)
+    sortie.seek(0)
+    return discord.File(sortie, filename=f"niveau-{membre.id}.png")
+
+
+# ── Les roles en libre-service, par boutons ───────────────────────────
+#
+# Les roles-reactions marchent aux emojis : une mecanique qui casse des
+# qu'un emoji du serveur est retire, et qui se rate au doigt sur
+# telephone. Un bouton porte son libelle, ne bouge pas, et dit ce qu'il
+# fait.
+
+def vue_roles_boutons(roles, guild=None):
+    """Une rangee de boutons, un par role propose."""
+    vue = discord.ui.View(timeout=None)
+    for item in (roles or [])[:20]:
+        ident = str(item.get("role_id") or "")
+        if not ident.isdigit():
+            continue
+        role = guild.get_role(int(ident)) if guild else None
+        libelle = str(item.get("label") or (role.name if role else "Rôle"))[:60]
+        emoji = str(item.get("emoji") or "").strip() or None
+        try:
+            vue.add_item(discord.ui.Button(
+                label=libelle, emoji=emoji, style=discord.ButtonStyle.secondary,
+                custom_id=f"rr:{ident}"))
+        except Exception:
+            vue.add_item(discord.ui.Button(
+                label=libelle, style=discord.ButtonStyle.secondary,
+                custom_id=f"rr:{ident}"))
+    return vue
+
+
+async def roles_boutons_interaction(interaction):
+    """Un clic donne le role, un second le retire."""
+    donnees = interaction.data or {}
+    custom_id = str(donnees.get("custom_id") or "")
+    if not custom_id.startswith("rr:"):
+        return
+    guild = interaction.guild
+    membre = guild.get_member(interaction.user.id) if guild else None
+    if membre is None and getattr(interaction.user, "roles", None) is not None:
+        membre = interaction.user
+    ident = custom_id.split(":")[-1]
+    role = guild.get_role(int(ident)) if guild and ident.isdigit() else None
+    gid = str(guild.id) if guild else None
+    if membre is None or role is None:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Rôle introuvable", "Il a peut-être été supprimé depuis.", gid))
+    if role >= guild.me.top_role:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "ModBot ne peut pas donner ce rôle",
+            f"{role.mention} est au-dessus du rôle de ModBot.", gid))
+
+    # Un seul role a la fois, quand le serveur l'a demande : on retire
+    # les autres de la liste plutot que de refuser le clic.
+    cfg = get_cfg(gid)
+    exclusif = "un seul" in str(cfg.get("reaction_roles_mode") or "").lower()
+    try:
+        if role in membre.roles:
+            await membre.remove_roles(role, reason="[ModBot] libre-service")
+            texte = f"{role.mention} retiré."
+        else:
+            if exclusif:
+                autres = [guild.get_role(int(x.get("role_id")))
+                          for x in (cfg.get("reaction_roles") or [])
+                          if str(x.get("role_id") or "").isdigit()]
+                a_retirer = [r for r in autres
+                             if r is not None and r != role and r in membre.roles
+                             and r < guild.me.top_role]
+                if a_retirer:
+                    await membre.remove_roles(*a_retirer, reason="[ModBot] libre-service")
+            await membre.add_roles(role, reason="[ModBot] libre-service")
+            texte = f"{role.mention} ajouté."
+    except discord.Forbidden:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Discord a refusé", "Il manque à ModBot la permission **Gérer les rôles**.", gid))
+    except Exception as erreur:
+        return await safe_ephemeral(interaction, embed=embed_error(
+            "Échec", f"`{erreur}`", gid))
+    await safe_ephemeral(interaction, embed=embed_success("C'est fait", texte, gid))
+
+
+bot.add_listener(roles_boutons_interaction, "on_interaction")
+
+
 # ════════════════════════════════════════════════
 #  AUTO-ROLES A L'ARRIVEE
 # ════════════════════════════════════════════════
@@ -22855,6 +23038,19 @@ async def cmd_niveau(i: discord.Interaction, membre: discord.Member = None):
     fiche = table.get(str(cible.id)) or {}
     niveau, dedans, besoin = cm.progression(fiche.get("xp"))
     rang = cm.rang_de(table, cible.id)
+    # La carte d'abord : un embed se lit et s'oublie, une carte se
+    # partage. L'embed reste en secours, quand Pillow manque ou qu'une
+    # image refuse de se construire.
+    await _safe_defer(i)
+    try:
+        carte = await carte_de_niveau(cible, niveau, int(fiche.get("xp") or 0),
+                                      dedans, besoin, rang)
+    except Exception as erreur:
+        print(f"carte de niveau ({cible.id}) : {erreur}")
+        carte = None
+    if carte is not None:
+        return await i.followup.send(file=carte, ephemeral=True)
+
     embed = E(f"Niveau {niveau}", f"{cible.mention} — **{int(fiche.get('xp') or 0)}** points",
               Palette.INFO)
     embed.add_field(name="Progression", value=f"{dedans} / {besoin} vers le niveau {niveau + 1}",
@@ -22863,7 +23059,7 @@ async def cmd_niveau(i: discord.Interaction, membre: discord.Member = None):
                     inline=True)
     if rang:
         embed.add_field(name="Classement", value=f"#{rang}", inline=True)
-    await safe_ephemeral(i, embed=embed)
+    await i.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="classement", description="🏆 Le classement du serveur")
