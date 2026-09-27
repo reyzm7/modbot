@@ -23268,7 +23268,12 @@ async def filtrer_repetition(message, cfg, immunise=False):
     rapport_compter(guild.id, "filtres")
 
     sanction, jeton = None, ""
-    if config["infraction"] and isinstance(message.author, discord.Member):
+    # On ne demande pas le TYPE de l'auteur. Un `isinstance` sur
+    # discord.Member a deja fait sauter un garde-fou de hierarchie dans
+    # ce fichier : des que l'objet n'en est pas exactement un, la branche
+    # entiere est ignoree, en silence. Les fonctions appelees ici se
+    # protegent elles-memes.
+    if config["infraction"]:
         nb = add_avert(uid, gid, f"Meme message dans {len(salons)} salons")
         sanction = await appliquer_sanction(message.author, nb, "message repete dans plusieurs salons")
         jeton = memoriser_sanction(
