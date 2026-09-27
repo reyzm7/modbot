@@ -24178,18 +24178,26 @@ async def modmail_fil_du_membre(guild, membre, config, creer=True):
     if salon is None:
         return None, False
     nom = mm.nom_du_fil(getattr(membre, "display_name", str(membre)), membre.id)
-    fil = None
+
+    # Un message d'abord, le fil dessus. Un fil detache n'existe dans le
+    # salon que sous la forme d'une ligne grise qu'on ne voit pas
+    # passer ; un message, si — et le fil s'ouvre d'un clic depuis lui.
+    role = guild.get_role(int(config["role"])) if config["role"] else None
     try:
-        # Un fil prive d'abord : le courrier d'un membre ne regarde que
-        # l'equipe, meme si le salon venait a s'ouvrir un jour.
-        fil = await salon.create_thread(name=nom, invitable=False,
-                                        type=discord.ChannelType.private_thread)
-    except Exception:
-        try:
-            fil = await salon.create_thread(name=nom)
-        except Exception as erreur:
-            print(f"modmail : fil impossible ({guild.id}) : {erreur}")
-            return None, False
+        annonce = await salon.send(
+            content=role.mention if role else None,
+            embed=embed_modmail_ouverture(guild, membre),
+            view=vue_modmail(guild.id, membre.id, config["ia"]),
+            allowed_mentions=discord.AllowedMentions(roles=True, users=False,
+                                                     everyone=False))
+    except Exception as erreur:
+        print(f"modmail : annonce impossible ({guild.id}) : {erreur}")
+        return None, False
+    try:
+        fil = await annonce.create_thread(name=nom, auto_archive_duration=10080)
+    except Exception as erreur:
+        print(f"modmail : fil impossible ({guild.id}) : {erreur}")
+        return None, False
     modmail_ecrire(mm.poser_fil(modmail_table(), guild.id, membre.id,
                                 fil.id, now().isoformat()))
     return fil, True
@@ -24222,18 +24230,6 @@ async def modmail_poster(guild, membre, texte, pieces=()):
         # permission qui manque, et le membre n'y peut rien. Il faut le
         # dire, sinon il reecrit dix fois dans le vide.
         return "fil" if salon_du_serveur(guild, config["salon"]) else "sans_salon"
-
-    if neuf:
-        role = guild.get_role(int(config["role"])) if config["role"] else None
-        try:
-            await fil.send(
-                content=role.mention if role else None,
-                embed=embed_modmail_ouverture(guild, membre),
-                view=vue_modmail(guild.id, membre.id, config["ia"]),
-                allowed_mentions=discord.AllowedMentions(roles=True, users=False,
-                                                         everyone=False))
-        except Exception as erreur:
-            print(f"modmail : entete impossible ({guild.id}) : {erreur}")
 
     embed = EG("💬 Message du membre", contenu, Palette.INFO, gid)
     embed.set_author(name=str(membre), icon_url=getattr(membre.display_avatar, "url", None))
@@ -24277,18 +24273,27 @@ async def modmail_envoyer_choisi(utilisateur, gid, texte, pieces, message=None):
     membre = guild.get_member(utilisateur.id) if guild else None
     if guild is None or membre is None:
         return "inactif"
-    refus = await modmail_poster(guild, membre, texte, pieces)
-    if refus:
-        await modmail_dire(utilisateur,
-                           EG(f"✉️ {guild.name}",
-                              mm.REFUS.get(refus, mm.REFUS["inactif"]),
-                              Palette.WARNING, str(guild.id)), cle=refus)
-        return refus
+    # La coche d'abord : creer un fil et poser deux messages prend une
+    # seconde ou deux, et pendant ce temps le membre n'a AUCUN signe
+    # que son message est parti. S'il est finalement refuse, la coche
+    # s'efface et il recoit la raison.
     if message is not None:
         try:
             await message.add_reaction("✅")
         except Exception:
             pass
+    refus = await modmail_poster(guild, membre, texte, pieces)
+    if refus:
+        if message is not None:
+            try:
+                await message.remove_reaction("✅", bot.user)
+            except Exception:
+                pass
+        await modmail_dire(utilisateur,
+                           EG(f"✉️ {guild.name}",
+                              mm.REFUS.get(refus, mm.REFUS["inactif"]),
+                              Palette.WARNING, str(guild.id)), cle=refus)
+        return refus
     config = modmail_cfg(str(guild.id))
     if config["accueil"] and utilisateur.id not in MODMAIL_CHOIX:
         await modmail_dire(utilisateur, EG(f"✉️ {guild.name}", config["accueil"],

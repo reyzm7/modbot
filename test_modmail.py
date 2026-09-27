@@ -217,6 +217,14 @@ corps = source[source.index("async def on_message(message):"):]
 verifier("le fil de courrier passe avant l'expérience et les filtres",
          corps.index("await modmail_depuis_le_fil(message)")
          < corps.index("track_msg(uid, gid)"))
+verifier("le fil s'ouvre sur un message du salon, pas tout seul",
+         "annonce = await salon.send(" in source
+         and "await annonce.create_thread(" in source
+         and "type=discord.ChannelType.private_thread" not in source)
+verifier("la coche part avant la création du fil, et s'efface si ça rate",
+         source.index('await message.add_reaction("✅")')
+         < source.index("refus = await modmail_poster(guild, membre, texte, pieces)")
+         and 'await message.remove_reaction("✅", bot.user)' in source)
 verifier("les boutons du courrier ont leur écouteur",
          'bot.add_listener(modmail_interaction, "on_interaction")' in source)
 
@@ -306,17 +314,30 @@ class FauxFil:
             self.archived = archived
 
 
+class FauxAnnonce:
+    """Le message du salon qui porte le fil."""
+
+    def __init__(self, salon, embed, vue):
+        self.salon, self.embeds, self.vue = salon, [embed], vue
+
+    async def create_thread(self, name=None, auto_archive_duration=None):
+        fil = FauxFil(7000 + len(self.salon.fils), name)
+        self.salon.fils.append(fil)
+        SERVEUR.fils[fil.id] = fil
+        return fil
+
+
 class FauxSalon:
     def __init__(self, cid, nom="equipe"):
         self.id, self.name = cid, nom
         self.mention = f"<#{cid}>"
         self.fils = []
+        self.annonces = []
 
-    async def create_thread(self, name=None, invitable=None, type=None):
-        fil = FauxFil(7000 + len(self.fils), name)
-        self.fils.append(fil)
-        SERVEUR.fils[fil.id] = fil
-        return fil
+    async def send(self, content=None, embed=None, view=None, allowed_mentions=None):
+        annonce = FauxAnnonce(self, embed, view)
+        self.annonces.append(annonce)
+        return annonce
 
 
 class FauxServeur:
@@ -388,16 +409,16 @@ verifier("un fil s'ouvre dans le salon de l'équipe", len(SALON.fils) == 1)
 fil = SALON.fils[0]
 verifier("le fil porte le nom et l'identifiant du membre",
          "Timide" in fil.name and "7" in fil.name)
-verifier("la fiche d'ouverture arrive avec ses boutons",
-         len(fil.messages) == 2 and fil.vues
-         and [b.custom_id for b in fil.vues[0].children]
+verifier("le salon porte une annonce, avec ses boutons",
+         len(SALON.annonces) == 1 and SALON.annonces[0].vue is not None
+         and [b.custom_id for b in SALON.annonces[0].vue.children]
          == [f"mm:fermer:{SERVEUR.id}:7", f"mm:bloquer:{SERVEUR.id}:7"])
-verifier("le message du membre est posé tel quel",
-         "insulté" in str(fil.messages[1][1].to_dict()))
+verifier("et le fil s'ouvre dessus, avec le message du membre dedans",
+         len(fil.messages) == 1 and "insulté" in str(fil.messages[0][1].to_dict()))
 
 lancer(bot_mod.modmail_poster(SERVEUR, MEMBRE, "et il recommence"))
 verifier("le deuxième message reste dans le même fil",
-         len(SALON.fils) == 1 and len(fil.messages) == 3)
+         len(SALON.fils) == 1 and len(fil.messages) == 2)
 
 reglages[GID]["modmail"]["pause"] = 600
 verifier("la pause tient les messages trop rapprochés",
