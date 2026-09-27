@@ -30,6 +30,7 @@ import salons_proteges as sp
 import roles_masse as rm
 import annulation as an
 import modmail as mm
+import repetition as rep
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -7293,6 +7294,7 @@ def serialize_dashboard_config(guild):
             "default_words": INSULTES_BASE,
             "custom_words": custom_words,
             "filtered_words": filtered_words,
+            "repetition": rep.lire_config(cfg.get("repetition")),
         },
         "moderation": {
             "default_words": INSULTES_BASE,
@@ -7628,6 +7630,8 @@ async def apply_dashboard_config(guild, payload):
     if "expiration_infractions" in security:
         cfg["expiration_infractions"] = sc.jours_de_retention(
             security.get("expiration_infractions"))
+    if isinstance(security.get("repetition"), dict):
+        cfg["repetition"] = rep.lire_config(security["repetition"])
     if "insultes_enabled" in security:
         cfg["insultes_enabled"] = bool(security.get("insultes_enabled"))
     if "antispam" in security:
@@ -23186,6 +23190,115 @@ def a_un_media(message):
     return any(getattr(e, "type", "") in ("image", "video", "gifv") for e in message.embeds)
 
 
+# ── La meme phrase dans plusieurs salons ──────────────────────────────
+#
+# L'anti-spam mesure une vitesse : trop de messages dans le meme salon.
+# Celui qui vend ses services ne fait pas ca. Il ecrit une fois, une
+# seule, dans chacun des dix salons, en prenant son temps. Chaque
+# message pris a part est irreprochable ; c'est l'ensemble qui est une
+# publicite, et rien ne regardait l'ensemble.
+#
+# La memoire tient en RAM : une fenetre de quelques minutes n'a rien a
+# faire sur le disque, et un redemarrage la remet a zero sans dommage.
+
+REPETITIONS = {}
+
+
+def repetition_cfg(gid):
+    return rep.lire_config(get_cfg(gid).get("repetition"))
+
+
+async def effacer_la_tournee(guild, traces):
+    """
+    Retire les messages de la tournee, dans tous les salons.
+
+    Rend le nombre reellement efface : Discord refuse parfois, et le
+    journal ne doit pas annoncer dix suppressions quand il y en a eu
+    trois.
+    """
+    efface = 0
+    for trace in traces or ():
+        salon = salon_du_serveur(guild, trace.get("salon"))
+        if salon is None:
+            continue
+        try:
+            message = await salon.fetch_message(int(trace.get("message")))
+            await message.delete()
+            efface += 1
+        except (discord.NotFound, discord.Forbidden):
+            continue
+        except Exception as erreur:
+            print(f"repetition : suppression impossible ({guild.id}) : {erreur}")
+    return efface
+
+
+async def filtrer_repetition(message, cfg, immunise=False):
+    """
+    La meme phrase, dans trop de salons : on efface la tournee entiere.
+
+    Rend True quand le message a ete traite ici — l'appelant s'arrete,
+    sans experience ni statistique pour une publicite.
+    """
+    guild = message.guild
+    config = repetition_cfg(str(guild.id))
+    if not config["enabled"] or immunise:
+        return False
+    if exempte_ici(cfg, message.channel, "spam"):
+        return False
+    if getattr(message.author, "guild_permissions", None) is not None \
+            and message.author.guild_permissions.manage_messages:
+        return False
+
+    texte = texte_complet_message(message)
+    if not rep.assez_long(texte, config["longueur"]):
+        return False
+
+    gid, uid = str(guild.id), str(message.author.id)
+    cle = f"{gid}:{uid}:{rep.empreinte(texte, sc.normalize_text)}"
+    traces = rep.retenir(REPETITIONS, cle, message.channel.id, message.id,
+                         time.monotonic(), config["fenetre"])
+    if not rep.tournee(traces, config["salons"]):
+        return False
+
+    # On repart de zero : la meme tournee ne se sanctionne pas deux fois,
+    # et le message suivant recommence un decompte propre.
+    rep.oublier(REPETITIONS, cle)
+    salons = rep.resume(traces)
+    efface = await effacer_la_tournee(guild, traces)
+    rapport_compter(guild.id, "filtres")
+
+    sanction, jeton = None, ""
+    if config["infraction"] and isinstance(message.author, discord.Member):
+        nb = add_avert(uid, gid, f"Meme message dans {len(salons)} salons")
+        sanction = await appliquer_sanction(message.author, nb, "message repete dans plusieurs salons")
+        jeton = memoriser_sanction(
+            guild, type_annulable(sanction.get("type")), message.author, bot.user,
+            raison=f"Même message dans {len(salons)} salons",
+            stamp=dernier_stamp(gid, uid), avert=True)
+
+    try:
+        avis = EG("🔁 Message répété",
+                  f"{message.author.mention}, ce message était déjà posté dans "
+                  f"**{len(salons)}** salons : il a été retiré partout.",
+                  Palette.WARNING, gid)
+        if sanction:
+            avis.add_field(name="⚡ Sanction", value=sanction["label"], inline=True)
+        await message.channel.send(embed=avis, delete_after=12,
+                                   allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass
+
+    await log_event(
+        guild, "moderation", "Même message dans plusieurs salons",
+        f"{message.author.mention} a posté la même chose dans **{len(salons)}** salons.",
+        fields=[("📍 Salons", " ".join(f"<#{s}>" for s in salons)[:1024]),
+                ("🧹 Messages retirés", f"`{efface}`"),
+                ("⚡ Sanction", sanction["label"] if sanction else "aucune"),
+                ("💬 Extrait", f"```{(message.content or '')[:400]}```")],
+        severity="warning", target=message.author, view=vue_annuler(jeton))
+    return True
+
+
 async def filtrer_salon_protege(message, cfg):
     """
     Supprime un message poste dans un salon protege, et previent son auteur.
@@ -24668,6 +24781,13 @@ async def on_message(message):
             le.add_field(name="🆔 ID", value=f"`{message.author.id}`", inline=True)
             le.add_field(name="📍 Salon", value=message.channel.mention, inline=True)
             await send_log(message.guild, le)
+            return
+
+        # La meme phrase dans plusieurs salons. Apres l'anti-spam, qui
+        # regarde la vitesse dans UN salon, et avant le filtre de
+        # langage : une publicite en tournee n'a pas besoin d'un mot
+        # interdit pour etre une publicite.
+        if await filtrer_repetition(message, cfg, immunise):
             return
 
         # Filtre de langage — moteur anti-contournement (security_core)
