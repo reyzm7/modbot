@@ -152,6 +152,53 @@ def membres_vises(membres, role_id, action, cible="humains",
     return sorted(set(vises), key=int)
 
 
+# ── Les roles qui expirent ────────────────────────────────────────────
+#
+# « VIP une semaine », « acces a l'evenement 48 heures » : donne a la
+# main, un role pareil se retire a la main — c'est-a-dire jamais.
+
+DUREE_MIN, DUREE_MAX = 60, 60 * 60 * 24 * 365
+TEMPORAIRES_MAX = 500
+
+
+def poser_role_temporaire(table, guild_id, membre_id, role_id, jusqu_au):
+    """Inscrit un role a retirer, et rend la table."""
+    fiches = {str(g): list(v) for g, v in (table or {}).items() if isinstance(v, list)}
+    liste = [f for f in fiches.get(str(guild_id), [])
+             if not (str(f.get("membre")) == str(membre_id)
+                     and str(f.get("role")) == str(role_id))]
+    liste.append({"membre": str(membre_id), "role": str(role_id),
+                  "jusqu_au": str(jusqu_au)})
+    fiches[str(guild_id)] = liste[-TEMPORAIRES_MAX:]
+    return fiches
+
+
+def roles_a_retirer(table, guild_id, maintenant):
+    """Les fiches dont le terme est passe."""
+    from datetime import datetime, timezone
+    dus = []
+    for fiche in (table or {}).get(str(guild_id), []):
+        try:
+            terme = datetime.fromisoformat(str(fiche.get("jusqu_au")))
+        except (TypeError, ValueError):
+            continue
+        if terme.tzinfo is None:
+            terme = terme.replace(tzinfo=timezone.utc)
+        if terme <= maintenant:
+            dus.append(fiche)
+    return dus
+
+
+def retirer_role_temporaire(table, guild_id, membre_id, role_id):
+    """Oublie une fiche : le role est repris, ou le membre est parti."""
+    fiches = {str(g): list(v) for g, v in (table or {}).items() if isinstance(v, list)}
+    fiches[str(guild_id)] = [
+        f for f in fiches.get(str(guild_id), [])
+        if not (str(f.get("membre")) == str(membre_id)
+                and str(f.get("role")) == str(role_id))]
+    return fiches
+
+
 def duree_estimee(nombre, par_seconde=4):
     """
     Une estimation honnête, en secondes, de la durée d'une opération.

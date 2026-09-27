@@ -339,6 +339,7 @@ F_RAPPELS = chemin_donnees("rappels.json")
 F_ANNULATIONS = chemin_donnees("annulations.json")
 F_MODMAIL = chemin_donnees("modmail.json")
 F_PSEUDOS = chemin_donnees("pseudos.json")
+F_ROLES_TEMPORAIRES = chemin_donnees("roles_temporaires.json")
 F_MUR = chemin_donnees("mur.json")
 F_VOTES = chemin_donnees("votes.json")
 # Le salon de comptage : ou en est la serie, qui a compte le dernier, le
@@ -7298,6 +7299,7 @@ def serialize_dashboard_config(guild):
             "custom_words": custom_words,
             "filtered_words": filtered_words,
             "repetition": rep.lire_config(cfg.get("repetition")),
+            "mentions": sc.lire_mentions_config(cfg.get("mentions")),
             "pseudos_suivis": suit_les_pseudos(gid),
         },
         "moderation": {
@@ -7647,6 +7649,8 @@ async def apply_dashboard_config(guild, payload):
             security.get("expiration_infractions"))
     if "pseudos_suivis" in security:
         cfg["pseudos_suivis"] = bool(security.get("pseudos_suivis"))
+    if isinstance(security.get("mentions"), dict):
+        cfg["mentions"] = sc.lire_mentions_config(security["mentions"])
     if isinstance(security.get("repetition"), dict):
         cfg["repetition"] = rep.lire_config(security["repetition"])
     if "insultes_enabled" in security:
@@ -22653,6 +22657,7 @@ async def presence_loop():
 
 _anniversaires_task = None
 _relances_task = None
+_roles_temporaires_task = None
 _rappels_membres_task = None
 _xp_vocal_task = None
 
@@ -23272,6 +23277,151 @@ async def effacer_la_tournee(guild, traces):
     return efface
 
 
+# ── Les mentions de masse ─────────────────────────────────────────────
+
+def mentions_cfg(gid):
+    return sc.lire_mentions_config(get_cfg(gid).get("mentions"))
+
+
+async def filtrer_mentions(message, cfg, immunise=False):
+    """
+    Vingt-cinq personnes pinguees d'un coup : ce n'est pas un message,
+    c'est une brimade. Rend True quand le message a ete traite ici.
+    """
+    guild = message.guild
+    config = mentions_cfg(str(guild.id))
+    if not config["enabled"] or immunise:
+        return False
+    if getattr(message.author, "guild_permissions", None) is not None \
+            and message.author.guild_permissions.manage_messages:
+        return False
+    if exempte_ici(cfg, message.channel, "spam"):
+        return False
+    membres = len(getattr(message, "mentions", []) or [])
+    roles = len(getattr(message, "role_mentions", []) or [])
+    if not sc.trop_de_mentions(config, membres, roles):
+        return False
+
+    if not await claim_message_by_delete(message):
+        return True
+    gid, uid = str(guild.id), str(message.author.id)
+    compte = sc.compter_mentions(membres, roles, config["roles"])
+    nb = add_avert(uid, gid, f"Mentions de masse : {compte} d'un coup")
+    sanction = await appliquer_sanction(message.author, nb, "mentions de masse")
+    jeton = memoriser_sanction(
+        guild, type_annulable(sanction.get("type")), message.author, bot.user,
+        raison=f"Mentions de masse ({compte})",
+        stamp=dernier_stamp(gid, uid), avert=True)
+    rapport_compter(guild.id, "filtres")
+
+    try:
+        await message.channel.send(
+            embed=EG("📣 Trop de mentions",
+                     f"{message.author.mention}, ce message mentionnait "
+                     f"**{compte}** personnes ou rôles : il a été retiré.\n"
+                     f"{sanction['label']}", Palette.WARNING, gid),
+            delete_after=12, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass
+    await log_event(
+        guild, "moderation", "Mentions de masse",
+        f"{message.author.mention} a mentionné **{compte}** personnes ou rôles "
+        f"dans {message.channel.mention}.",
+        fields=[("👥 Membres", f"`{membres}`"), ("🎭 Rôles", f"`{roles}`"),
+                ("⚡ Sanction", sanction["label"])],
+        severity="warning", target=message.author, view=vue_annuler(jeton))
+    return True
+
+
+# ── Les roles qui expirent ────────────────────────────────────────────
+
+def roles_temporaires_tout():
+    table = jload(F_ROLES_TEMPORAIRES)
+    return table if isinstance(table, dict) else {}
+
+
+async def rendre_les_roles_temporaires():
+    """Un tour des roles arrives a terme. Le retrait est silencieux."""
+    maintenant = now()
+    table = roles_temporaires_tout()
+    change = False
+    for guild in list(bot.guilds):
+        for fiche in rm.roles_a_retirer(table, guild.id, maintenant):
+            membre = guild.get_member(int(fiche["membre"])) if str(fiche["membre"]).isdigit() else None
+            role = guild.get_role(int(fiche["role"])) if str(fiche["role"]).isdigit() else None
+            if membre is not None and role is not None:
+                try:
+                    await membre.remove_roles(role, reason="[ModBot] role temporaire expire")
+                    await log_event(guild, "roles", "Rôle temporaire repris",
+                                    f"{role.mention} a été retiré à {membre.mention} : "
+                                    "son temps était écoulé.",
+                                    severity="info", target=membre)
+                except Exception as erreur:
+                    print(f"role temporaire ({guild.id}) : {erreur}")
+            table = rm.retirer_role_temporaire(table, guild.id, fiche["membre"], fiche["role"])
+            change = True
+    if change:
+        jsave(F_ROLES_TEMPORAIRES, table)
+
+
+async def roles_temporaires_loop():
+    """Un tour par minute : une duree se compte en minutes, pas en heures."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await rendre_les_roles_temporaires()
+        except Exception as erreur:
+            print(f"boucle roles temporaires: {erreur}")
+        await asyncio.sleep(60)
+
+
+# ── Le sondage ────────────────────────────────────────────────────────
+
+@bot.tree.command(name="sondage", description="📊 Poser une question au serveur")
+@app_commands.describe(question="La question posée",
+                       choix="Les réponses, séparées par des point-virgules",
+                       heures="Combien de temps le sondage reste ouvert (24 par défaut)",
+                       plusieurs="Autoriser plusieurs réponses par personne")
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.guild_only()
+async def cmd_sondage(i: discord.Interaction, question: str, choix: str,
+                      heures: int = 24, plusieurs: bool = False):
+    gid = str(i.guild.id)
+    options = [morceau.strip() for morceau in str(choix).split(";") if morceau.strip()]
+    if len(options) < 2:
+        return await send_error(
+            i, "Il faut au moins deux réponses",
+            "Sépare-les par des point-virgules : `Oui ; Non ; Peut-être`.")
+    if len(options) > 10:
+        return await send_error(i, "Dix réponses au maximum",
+                                "Discord n'en accepte pas davantage.")
+    heures = max(1, min(768, int(heures or 24)))
+    await _safe_defer(i)
+
+    # Le sondage natif de Discord : les resultats se lisent dans le
+    # client, sans que le bot ait a compter quoi que ce soit — et ils
+    # restent lisibles s'il tombe.
+    try:
+        sondage = discord.Poll(question=str(question)[:300],
+                               duration=timedelta(hours=heures),
+                               multiple=bool(plusieurs))
+        for option in options:
+            sondage.add_answer(text=option[:55])
+        await i.channel.send(poll=sondage)
+    except Exception as erreur:
+        return await i.followup.send(embed=embed_error(
+            "Sondage impossible",
+            "Discord a refusé : " + f"`{erreur}`", gid), ephemeral=True)
+
+    await i.followup.send(embed=embed_success(
+        "Sondage publié", f"**{len(options)}** réponses, ouvert **{heures} h**.", gid),
+        ephemeral=True)
+    await log_event(i.guild, "server", "Sondage publié", f"« {str(question)[:200]} »",
+                    fields=[("🗳️ Réponses", " · ".join(options)[:1024]),
+                            ("⏳ Durée", f"{heures} h")],
+                    severity="info", actor=i.user)
+
+
 async def filtrer_repetition(message, cfg, immunise=False):
     """
     La meme phrase, dans trop de salons : on efface la tournee entiere.
@@ -23820,7 +23970,7 @@ async def on_ready():
     # UnboundLocalError, et on_ready s'arretait la, a chaque demarrage.
     # Tout ce qui suivait ne tournait jamais — dont l'envoi des commandes.
     global _anniversaires_task, _rappels_membres_task, _xp_vocal_task
-    global _relances_task
+    global _relances_task, _roles_temporaires_task
     global _tempbans_task, _rapports_task
     global _licences_task
     global _presence_task
@@ -23889,6 +24039,9 @@ async def on_ready():
         _anniversaires_task = asyncio.create_task(boucle_surveillee("anniversaires_loop", anniversaires_loop))
     if not _relances_task or _relances_task.done():
         _relances_task = asyncio.create_task(boucle_surveillee("relances_loop", relances_loop))
+    if not _roles_temporaires_task or _roles_temporaires_task.done():
+        _roles_temporaires_task = asyncio.create_task(
+            boucle_surveillee("roles_temporaires_loop", roles_temporaires_loop))
     if not _rappels_membres_task or _rappels_membres_task.done():
         _rappels_membres_task = asyncio.create_task(boucle_surveillee("rappels_loop", rappels_loop))
     if not _xp_vocal_task or _xp_vocal_task.done():
@@ -25129,6 +25282,11 @@ async def on_message(message):
             await send_log(message.guild, le)
             return
 
+        # Les mentions de masse : une seule ligne suffit a faire fuir
+        # quelqu'un, elle n'a pas besoin d'etre repetee ailleurs.
+        if await filtrer_mentions(message, cfg, immunise):
+            return
+
         # La meme phrase dans plusieurs salons. Apres l'anti-spam, qui
         # regarde la vitesse dans UN salon, et avant le filtre de
         # langage : une publicite en tournee n'a pas besoin d'un mot
@@ -26020,7 +26178,8 @@ bot.tree.add_command(vocal_group)
 
 
 @bot.tree.command(name="role", description="🎭 Donner ou retirer un role a un membre")
-@app_commands.describe(membre="Le membre", role="Le role", action="Donner ou retirer")
+@app_commands.describe(membre="Le membre", role="Le role", action="Donner ou retirer",
+                       duree="Le temps que le role reste : 2h, 7j, 30m… (vide = pour toujours)")
 @app_commands.choices(action=[
     app_commands.Choice(name="Donner", value="ajouter"),
     app_commands.Choice(name="Retirer", value="retirer"),
@@ -26029,7 +26188,7 @@ bot.tree.add_command(vocal_group)
 @app_commands.checks.has_permissions(manage_roles=True)
 @app_commands.guild_only()
 async def cmd_role(i: discord.Interaction, membre: discord.Member, role: discord.Role,
-                   action: app_commands.Choice[str] = None):
+                   action: app_commands.Choice[str] = None, duree: str = ""):
     gid = str(i.guild.id)
     donner = (action.value if action else "ajouter") == "ajouter"
     if role.is_default():
@@ -26053,6 +26212,22 @@ async def cmd_role(i: discord.Interaction, membre: discord.Member, role: discord
         return await i.followup.send(embed=embed_error("Echec", f"`{ex}`", gid), ephemeral=True)
     texte = (f"{role.mention} donne a {membre.mention}." if donner
              else f"{role.mention} retire a {membre.mention}.")
+
+    # Un role donne pour un temps se reprend tout seul : donne a la
+    # main, il se retire a la main — c'est-a-dire jamais.
+    if donner and str(duree or "").strip():
+        secondes = parse_duree(duree)
+        if not secondes or not (rm.DUREE_MIN <= secondes <= rm.DUREE_MAX):
+            return await i.followup.send(embed=embed_error(
+                "Duree incomprise",
+                "Ecris par exemple `2h`, `7j` ou `30m`, entre une minute et un an.",
+                gid), ephemeral=True)
+        terme = now() + timedelta(seconds=secondes)
+        jsave(F_ROLES_TEMPORAIRES,
+              rm.poser_role_temporaire(roles_temporaires_tout(), i.guild.id,
+                                       membre.id, role.id, terme.isoformat()))
+        texte += f"\nIl lui sera repris {fmt(terme)}."
+
     await i.followup.send(embed=embed_success("C'est fait", texte, gid), ephemeral=True)
     await log_event(i.guild, "roles", "Role modifie a la main", texte,
                     fields=[("👮 Par", str(i.user))], severity="info",
@@ -26828,7 +27003,7 @@ CATEGORIES_COMMANDES = [
     ("🧹", "Messages", ["clear-message", "clear-all", "annonce", "patchnotes", "massdm"]),
     ("🎫", "Support", ["addticket", "report", "suggest", "modmail", "reponse"]),
     ("🎉", "Communauté", ["giveaway", "translate", "niveau", "classement",
-                         "anniversaire", "rappel", "mur"]),
+                         "anniversaire", "rappel", "mur", "sondage"]),
     ("🔇", "Sanctions", ["mute", "unmute"]),
     ("🔒", "Salons", ["lock", "unlock", "salon-acces"]),
     ("🎭", "Roles", ["role", "massrole", "demassrole"]),

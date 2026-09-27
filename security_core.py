@@ -598,6 +598,50 @@ class InfractionStore:
 
 
 # ════════════════════════════════════════════════════════════════════
+#  4 bis. LES MENTIONS DE MASSE
+# ════════════════════════════════════════════════════════════════════
+#
+# Le bot voyait @everyone. Il ne comptait pas les mentions : pinguer
+# vingt-cinq personnes d'un coup passait entierement, et c'est la
+# brimade la plus simple et la plus efficace de Discord — celle qui
+# fait quitter un serveur sans qu'aucune regle n'ait ete enfreinte.
+
+MENTIONS_MIN, MENTIONS_MAX, MENTIONS_DEFAUT = 3, 50, 6
+
+
+def lire_mentions_config(brut):
+    """Le reglage des mentions de masse, nettoye."""
+    brut = brut if isinstance(brut, dict) else {}
+    try:
+        maximum = int(str(brut.get("max")).strip())
+    except (TypeError, ValueError):
+        maximum = MENTIONS_DEFAUT
+    return {
+        "enabled": bool(brut.get("enabled")),
+        "max": max(MENTIONS_MIN, min(MENTIONS_MAX, maximum)),
+        # Un role mentionne touche parfois mille personnes : il compte
+        # double, sans quoi « @membres » passerait sous le seuil.
+        "roles": brut.get("roles", True) is not False,
+    }
+
+
+def compter_mentions(membres, roles=0, compte_les_roles=True):
+    """Ce qui compte vraiment dans un message."""
+    total = max(0, int(membres or 0))
+    if compte_les_roles:
+        total += 2 * max(0, int(roles or 0))
+    return total
+
+
+def trop_de_mentions(config, membres, roles=0):
+    """Ce message pingue-t-il trop de monde d'un coup ?"""
+    if not config.get("enabled"):
+        return False
+    compte = compter_mentions(membres, roles, config.get("roles", True))
+    return compte > int(config.get("max") or MENTIONS_DEFAUT)
+
+
+# ════════════════════════════════════════════════════════════════════
 #  5. ANTI-RAID
 # ════════════════════════════════════════════════════════════════════
 
