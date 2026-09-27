@@ -22625,6 +22625,7 @@ async def presence_loop():
 # ════════════════════════════════════════════════
 
 _anniversaires_task = None
+_relances_task = None
 _rappels_membres_task = None
 _xp_vocal_task = None
 
@@ -23791,6 +23792,7 @@ async def on_ready():
     # UnboundLocalError, et on_ready s'arretait la, a chaque demarrage.
     # Tout ce qui suivait ne tournait jamais — dont l'envoi des commandes.
     global _anniversaires_task, _rappels_membres_task, _xp_vocal_task
+    global _relances_task
     global _tempbans_task, _rapports_task
     global _licences_task
     global _presence_task
@@ -23857,6 +23859,7 @@ async def on_ready():
         _rappels_task = asyncio.create_task(boucle_surveillee("rappels_boutique_loop", rappels_boutique_loop))
     if not _anniversaires_task or _anniversaires_task.done():
         _anniversaires_task = asyncio.create_task(boucle_surveillee("anniversaires_loop", anniversaires_loop))
+    if not _relances_task or _relances_task.done():
         _relances_task = asyncio.create_task(boucle_surveillee("relances_loop", relances_loop))
     if not _rappels_membres_task or _rappels_membres_task.done():
         _rappels_membres_task = asyncio.create_task(boucle_surveillee("rappels_loop", rappels_loop))

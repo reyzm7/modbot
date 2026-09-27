@@ -228,7 +228,7 @@ verifier("avec ses trois gestes",
 verifier("le brouillon d'IA ne part jamais tout seul",
          "class VueBrouillonModmail" in source
          and "Je réponds moi-même" in source
-         and source.count("await modmail_poser_reponse(") == 2)
+         and source.count("await modmail_poser_reponse(") == 3)
 verifier("le brouillon demande l'IA du serveur et un quota",
          'ai_cfg(gid)["enabled"]' in source and "MODMAIL_IA_QUOTA" in source)
 verifier("la traduction passe par le traducteur du bot",
