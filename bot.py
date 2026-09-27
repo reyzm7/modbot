@@ -31,6 +31,7 @@ import roles_masse as rm
 import annulation as an
 import modmail as mm
 import repetition as rep
+import assistance as ass
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -7340,6 +7341,8 @@ def serialize_dashboard_config(guild):
         },
         "salons_proteges": sp.lire_config(cfg.get("salons_proteges")),
         "modmail": mm.lire_config(cfg.get("modmail")),
+        "reponses": ass.lire_reponses(cfg.get("reponses")),
+        "relance": ass.lire_relance(cfg.get("relance")),
         "roles_masse": {**rm.lire_config(cfg.get("roles_masse")),
                         "travail": massrole_etat(gid)},
         "events": evenements_cfg(gid),
@@ -7553,6 +7556,15 @@ async def apply_dashboard_config(guild, payload):
                   if propre["role_requis"] else None)
         propre["role_requis"] = str(requis.id) if requis else ""
         cfg["modmail"] = propre
+
+    if isinstance(payload.get("reponses"), list):
+        cfg["reponses"] = ass.lire_reponses(payload["reponses"])
+    relance = payload.get("relance")
+    if isinstance(relance, dict):
+        propre = ass.lire_relance(relance)
+        role = guild.get_role(int(propre["role"])) if propre["role"] else None
+        propre["role"] = str(role.id) if role else ""
+        cfg["relance"] = propre
 
     masse = payload.get("roles_masse")
     if isinstance(masse, dict):
@@ -23845,6 +23857,7 @@ async def on_ready():
         _rappels_task = asyncio.create_task(boucle_surveillee("rappels_boutique_loop", rappels_boutique_loop))
     if not _anniversaires_task or _anniversaires_task.done():
         _anniversaires_task = asyncio.create_task(boucle_surveillee("anniversaires_loop", anniversaires_loop))
+        _relances_task = asyncio.create_task(boucle_surveillee("relances_loop", relances_loop))
     if not _rappels_membres_task or _rappels_membres_task.done():
         _rappels_membres_task = asyncio.create_task(boucle_surveillee("rappels_loop", rappels_loop))
     if not _xp_vocal_task or _xp_vocal_task.done():
@@ -24318,9 +24331,15 @@ async def modmail_repondre_au_membre(guild, uid, contenu, signature, pieces=()):
     try:
         cible = guild.get_member(int(uid)) or await bot.fetch_user(int(uid))
         await cible.send(embed=embed)
-        return True
     except Exception:
         return False
+    table = modmail_table()
+    fiche = mm.lire_fil(table, guild.id, uid)
+    if fiche is not None:
+        fiche["repondu"] = now().isoformat()
+        table.setdefault(gid, {})[str(uid)] = fiche
+        modmail_ecrire(table)
+    return True
 
 
 async def modmail_depuis_le_fil(message):
@@ -24525,6 +24544,185 @@ async def modmail_brouillon_interaction(interaction, gid, uid):
         print(f"modmail : brouillon non affiche ({erreur})")
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  L'ASSISTANCE : des reponses pretes, et rien qui traine
+# ══════════════════════════════════════════════════════════════════════
+
+def reponses_du_serveur(gid):
+    return ass.lire_reponses(get_cfg(gid).get("reponses"))
+
+
+def relance_cfg(gid):
+    return ass.lire_relance(get_cfg(gid).get("relance"))
+
+
+def ticket_repondu(salon_id):
+    """L'equipe vient de repondre dans ce ticket : plus rien a relancer."""
+    fiches = load_tickets()
+    fiche = fiches.get("tickets", {}).get(str(salon_id))
+    if not isinstance(fiche, dict) or fiche.get("closed"):
+        return
+    fiche["repondu"] = now().isoformat()
+    save_tickets(fiches)
+
+
+def suivre_ticket(message):
+    """
+    Note qui a parle en dernier dans un ticket.
+
+    Sans cette trace, une relance ne saurait pas faire la difference
+    entre un ticket qui attend une reponse et un ticket ou l'equipe
+    vient d'ecrire.
+    """
+    fiches = load_tickets()
+    fiche = fiches.get("tickets", {}).get(str(message.channel.id))
+    if not isinstance(fiche, dict) or fiche.get("closed"):
+        return
+    quand = now().isoformat()
+    if str(message.author.id) == str(fiche.get("user_id")):
+        fiche["dernier"] = quand
+    elif est_du_staff(message.author, str(message.guild.id)):
+        fiche["repondu"] = quand
+    else:
+        return
+    save_tickets(fiches)
+
+
+async def relancer_ce_qui_traine():
+    """
+    Un tour des courriers et des tickets : ce qui attend trop repart
+    devant les yeux de l'equipe, une fois par message reste sans reponse.
+    """
+    maintenant = now()
+    for guild in list(bot.guilds):
+        gid = str(guild.id)
+        config = relance_cfg(gid)
+        if not config["enabled"]:
+            continue
+        role = guild.get_role(int(config["role"])) if config["role"] else None
+
+        # Le courrier.
+        table = modmail_table()
+        change = False
+        for uid, fiche in list((table.get(gid) or {}).items()):
+            if not ass.doit_relancer(fiche, config["heures"], maintenant):
+                continue
+            salon = None
+            if str(fiche.get("fil", "")).isdigit():
+                salon = guild.get_thread(int(fiche["fil"]))
+            if salon is None:
+                continue
+            if await poser_relance(salon, role, f"<@{uid}>",
+                                   ass.attente_lisible(fiche, maintenant), "courrier"):
+                fiche["relance"] = maintenant.isoformat()
+                change = True
+        if change:
+            modmail_ecrire(table)
+
+        # Les tickets.
+        fiches = load_tickets()
+        touche = False
+        for salon_id, fiche in list(fiches.get("tickets", {}).items()):
+            if not isinstance(fiche, dict) or fiche.get("closed"):
+                continue
+            salon = salon_du_serveur(guild, salon_id)
+            if salon is None or not ass.doit_relancer(fiche, config["heures"], maintenant):
+                continue
+            if await poser_relance(salon, role, f"<@{fiche.get('user_id')}>",
+                                   ass.attente_lisible(fiche, maintenant), "ticket"):
+                fiche["relance"] = maintenant.isoformat()
+                touche = True
+        if touche:
+            save_tickets(fiches)
+
+
+async def poser_relance(salon, role, qui, attente, genre):
+    """Le rappel, dans le fil ou le ticket. Rend True s'il est parti."""
+    gid = str(getattr(getattr(salon, "guild", None), "id", "") or "")
+    titre = "📬 Ce courrier attend" if genre == "courrier" else "🎫 Ce ticket attend"
+    embed = EG(titre,
+               f"{qui} attend une réponse depuis **{attente}**.",
+               Palette.WARNING, gid)
+    embed.set_footer(text="Une seule relance par message resté sans réponse.")
+    try:
+        await salon.send(content=role.mention if role else None, embed=embed,
+                         allowed_mentions=discord.AllowedMentions(roles=True, users=False,
+                                                                  everyone=False))
+        return True
+    except Exception as erreur:
+        print(f"relance impossible ({salon}) : {erreur}")
+        return False
+
+
+async def relances_loop():
+    """Un tour tous les quarts d'heure : le delai se compte en heures."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await relancer_ce_qui_traine()
+        except Exception as erreur:
+            print(f"boucle relances: {erreur}")
+        await asyncio.sleep(900)
+
+
+async def reponses_proposees(interaction: discord.Interaction, saisie: str):
+    """L'autocompletion : les noms des reponses enregistrees."""
+    gid = str(interaction.guild.id) if interaction.guild else ""
+    noms = ass.suggerer(reponses_du_serveur(gid), saisie or "", 25)
+    return [app_commands.Choice(name=nom[:100], value=nom[:100]) for nom in noms]
+
+
+@bot.tree.command(name="reponse", description="💬 Envoyer une réponse toute faite")
+@app_commands.describe(nom="Le nom de la réponse enregistrée",
+                       membre="À qui elle s'adresse (facultatif)")
+@app_commands.autocomplete(nom=reponses_proposees)
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.guild_only()
+async def cmd_reponse(i: discord.Interaction, nom: str, membre: discord.Member = None):
+    gid = str(i.guild.id)
+    if not est_du_staff(i.user, gid):
+        return await send_error(i, "Réservé à l'équipe",
+                                "Seule l'équipe du serveur envoie les réponses enregistrées.")
+    reponses = reponses_du_serveur(gid)
+    if not reponses:
+        return await send_error(
+            i, "Aucune réponse enregistrée",
+            "Elles s'écrivent dans le tableau de bord, rubrique « Modmail ».")
+    reponse = ass.trouver(reponses, nom)
+    if reponse is None:
+        return await send_error(i, "Réponse introuvable",
+                                "Aucune réponse ne porte ce nom : "
+                                + ", ".join(f"`{r['nom']}`" for r in reponses[:10]))
+    await _safe_defer(i)
+
+    # Dans un fil de courrier, la reponse part en prive, comme si
+    # l'equipe l'avait ecrite a la main.
+    uid_courrier = mm.membre_du_fil(modmail_table(), i.guild.id, getattr(i.channel, "id", 0))
+    cible = membre or (i.guild.get_member(int(uid_courrier)) if uid_courrier.isdigit() else None)
+    texte = ass.remplir(reponse["texte"],
+                        getattr(cible, "mention", "") or "", i.guild.name)
+
+    if uid_courrier:
+        await modmail_poser_reponse(i, i.guild, uid_courrier, texte)
+        return
+
+    embed = EG(f"💬 {reponse['nom']}", texte, Palette.INFO, gid)
+    embed.set_footer(text=f"Envoyé par {i.user}")
+    try:
+        await i.channel.send(content=cible.mention if cible else None, embed=embed,
+                             allowed_mentions=discord.AllowedMentions(users=True,
+                                                                      roles=False,
+                                                                      everyone=False))
+    except Exception as erreur:
+        return await i.followup.send(embed=embed_error(
+            "Envoi impossible", f"`{erreur}`", gid), ephemeral=True)
+    # Le ticket vient de recevoir une reponse : la relance n'a plus
+    # lieu d'etre.
+    ticket_repondu(getattr(i.channel, "id", 0))
+    await i.followup.send(embed=embed_success(
+        "Réponse envoyée", f"« {reponse['nom']} » est partie.", gid), ephemeral=True)
+
+
 async def modmail_fermer(guild, uid, par, raison=""):
     """Range le fil et previent le membre. Le prochain message en rouvrira un."""
     gid = str(guild.id)
@@ -24706,6 +24904,13 @@ async def on_message(message):
     # part au membre, et ne rapporte ni statistique ni experience.
     if await modmail_depuis_le_fil(message):
         return
+
+    # Un ticket retient qui a parle en dernier : c'est ce qui permet de
+    # relancer ce qui attend, sans relancer ce qui avance.
+    try:
+        suivre_ticket(message)
+    except Exception as erreur:
+        print(f"suivi de ticket ({message.channel.id}) : {erreur}")
 
     if message.id in _en_cours:
         return
@@ -26358,7 +26563,7 @@ CATEGORIES_COMMANDES = [
     ("🔨", "Modération", ["warn", "ban", "deban", "ban-list", "avert-count",
                           "reset-avert", "infractions", "infractions-reset", "insultes"]),
     ("🧹", "Messages", ["clear-message", "clear-all", "annonce", "patchnotes", "massdm"]),
-    ("🎫", "Support", ["addticket", "report", "suggest", "modmail"]),
+    ("🎫", "Support", ["addticket", "report", "suggest", "modmail", "reponse"]),
     ("🎉", "Communauté", ["giveaway", "translate", "niveau", "classement",
                          "anniversaire", "rappel", "mur"]),
     ("🔇", "Sanctions", ["mute", "unmute"]),
