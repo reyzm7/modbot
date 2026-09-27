@@ -122,6 +122,18 @@ verifier("un délai à zéro éteint tout",
 verifier("une date illisible ne déclenche rien",
          ass.doit_relancer({"dernier": "hier"}, 12, MAINTENANT) is False)
 
+# Un courrier s'eteint quand PLUS PERSONNE n'a rien dit : l'equipe
+# comme le membre.
+verifier("un courrier sans un mot depuis huit jours se ferme",
+         ass.doit_se_fermer({"dernier": il_y_a(24 * 8)}, 7, MAINTENANT) is True)
+verifier("celui où l'équipe a répondu hier reste ouvert",
+         ass.doit_se_fermer({"dernier": il_y_a(24 * 8), "repondu": il_y_a(24)},
+                            7, MAINTENANT) is False)
+verifier("un délai à zéro ne ferme jamais rien",
+         ass.doit_se_fermer({"dernier": il_y_a(24 * 80)}, 0, MAINTENANT) is False)
+verifier("une fiche vide ne se ferme pas non plus",
+         ass.doit_se_fermer({}, 7, MAINTENANT) is False)
+
 verifier("l'attente se dit en heures", ass.attente_lisible({"dernier": il_y_a(5)},
                                                            MAINTENANT) == "5 h")
 verifier("puis en jours", ass.attente_lisible({"dernier": il_y_a(50)},

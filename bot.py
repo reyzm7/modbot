@@ -17132,6 +17132,7 @@ async def on_member_join(member):
 @bot.event
 async def on_member_remove(member):
     await send_dashboard_member_event(member, departure=True)
+    rapport_compter(getattr(member.guild, "id", None), "departs")
 
     # Distingue un depart volontaire d'une expulsion via les logs d'audit
     actor, entry = await fetch_audit_actor(
@@ -22546,9 +22547,12 @@ def embed_rapport(guild, compte):
               "Voici ce que ModBot a fait pendant les sept derniers jours.",
               Palette.INFO)
     lignes = [("👥 Nouveaux membres", compte["arrivees"]),
+              ("👋 Départs", compte["departs"]),
               ("⚠️ Sanctions appliquées", compte["sanctions"]),
               ("🚫 Messages filtrés", compte["filtres"]),
-              ("🎫 Tickets ouverts", compte["tickets"])]
+              ("🎫 Tickets ouverts", compte["tickets"]),
+              ("✉️ Courriers reçus", compte["courriers"]),
+              ("⭐ Messages au mur", compte["mur"])]
     for nom, valeur in lignes:
         if valeur:
             embed.add_field(name=nom, value=f"`{valeur}`", inline=True)
@@ -23492,6 +23496,7 @@ async def mur_reaction(payload):
     table[str(message.id)] = cm.fiche_mur(pose.id, etoiles, message.author.id,
                                           now().isoformat())
     _ecrire_par_serveur(F_MUR, guild.id, table)
+    rapport_compter(guild.id, "mur")
 
 
 @bot.tree.command(name="mur", description="⭐ Les messages les plus étoilés du serveur")
@@ -24110,6 +24115,20 @@ def vue_modmail(gid, uid, ia=False):
     return vue
 
 
+def vue_clore_courrier(gid):
+    """
+    Le bouton « C'est réglé », dans le message privé du membre.
+
+    Seul le staff pouvait fermer — donc personne ne fermait. Celui qui
+    a posé la question sait mieux que quiconque quand elle est réglée.
+    """
+    vue = discord.ui.View(timeout=None)
+    vue.add_item(discord.ui.Button(
+        label="C'est réglé, merci", emoji="✅", style=discord.ButtonStyle.success,
+        custom_id=f"mm:clore:{gid}"))
+    return vue
+
+
 def vue_modmail_serveurs(fiches):
     """Le choix du serveur, ferme ou non : le membre voit toute sa liste."""
     vue = discord.ui.View(timeout=None)
@@ -24124,6 +24143,35 @@ def vue_modmail_serveurs(fiches):
     vue.add_item(discord.ui.Select(placeholder="À quel serveur écris-tu ?",
                                    options=options, custom_id="mm:serveur"))
     return vue
+
+
+async def fichiers_du_message(pieces, taille_max=8 * 1024 * 1024):
+    """
+    Les pièces jointes, recopiées pour être jointes ailleurs.
+
+    Une adresse de pièce jointe Discord est signée et expire : le
+    modérateur qui rouvre le fil de la veille voyait une image morte.
+    On recopie donc le fichier. Au-delà de huit mégaoctets on renonce —
+    l'appelant remet alors le lien, qui vaut mieux que rien.
+    """
+    fichiers, trop_gros = [], []
+    for piece in list(pieces or [])[:5]:
+        taille = int(getattr(piece, "size", 0) or 0)
+        if taille and taille > taille_max:
+            trop_gros.append(piece)
+            continue
+        try:
+            fichiers.append(await piece.to_file())
+        except Exception as erreur:
+            print(f"modmail : piece jointe non recopiee ({erreur})")
+            trop_gros.append(piece)
+    return fichiers, trop_gros
+
+
+def champ_des_liens(pieces):
+    """Le champ de secours : les adresses de ce qu'on n'a pas pu joindre."""
+    liens = "\n".join(str(getattr(p, "url", p))[:200] for p in list(pieces or [])[:5])
+    return liens[:1024]
 
 
 async def modmail_traduire(texte, vers):
@@ -24240,11 +24288,13 @@ async def modmail_poster(guild, membre, texte, pieces=()):
         if traduit:
             embed.add_field(name=f"🌍 Traduction ({langue} → {vers})",
                             value=traduit[:1024], inline=False)
-    if pieces:
-        liens = "\n".join(str(getattr(p, "url", p))[:200] for p in list(pieces)[:5])
-        embed.add_field(name="📎 Pièces jointes", value=liens[:1024], inline=False)
+    fichiers, restes = await fichiers_du_message(pieces)
+    if restes:
+        embed.add_field(name="📎 Trop volumineux pour être recopiés",
+                        value=champ_des_liens(restes), inline=False)
     try:
-        await fil.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await fil.send(embed=embed, files=fichiers,
+                       allowed_mentions=discord.AllowedMentions.none())
     except Exception as erreur:
         print(f"modmail : message non pose ({guild.id}) : {erreur}")
         return "sans_salon"
@@ -24260,6 +24310,7 @@ async def modmail_poster(guild, membre, texte, pieces=()):
     modmail_ecrire(table)
     if neuf:
         dashboard_log("modmail", guild, str(membre), contenu[:200])
+        rapport_compter(guild.id, "courriers")
     return ""
 
 
@@ -24362,12 +24413,13 @@ async def modmail_repondre_au_membre(guild, uid, contenu, signature, pieces=()):
                 embed.description = traduit[:4000]
                 embed.add_field(name="💬 Message original", value=contenu[:1024],
                                 inline=False)
-    if pieces:
-        liens = "\n".join(str(getattr(p, "url", p))[:200] for p in list(pieces)[:5])
-        embed.add_field(name="📎 Pièces jointes", value=liens[:1024], inline=False)
+    fichiers, restes = await fichiers_du_message(pieces)
+    if restes:
+        embed.add_field(name="📎 Trop volumineux pour être recopiés",
+                        value=champ_des_liens(restes), inline=False)
     try:
         cible = guild.get_member(int(uid)) or await bot.fetch_user(int(uid))
-        await cible.send(embed=embed)
+        await cible.send(embed=embed, files=fichiers, view=vue_clore_courrier(gid))
     except Exception:
         return False
     table = modmail_table()
@@ -24656,6 +24708,15 @@ async def relancer_ce_qui_traine():
         if change:
             modmail_ecrire(table)
 
+        # Les courriers eteints. Apres les relances, et non avant : un
+        # fil qu'on vient de relancer merite qu'on attende la reponse.
+        fermeture = modmail_cfg(gid)["fermeture"]
+        if fermeture:
+            for uid, fiche in list((modmail_table().get(gid) or {}).items()):
+                if ass.doit_se_fermer(fiche, fermeture, maintenant):
+                    await modmail_fermer(guild, uid, "ModBot",
+                                         f"sans nouvelle depuis {fermeture} jours")
+
         # Les tickets.
         fiches = load_tickets()
         touche = False
@@ -24817,6 +24878,22 @@ async def modmail_interaction(interaction):
     custom_id = str(donnees.get("custom_id") or "")
     if not custom_id.startswith("mm:"):
         return
+
+    if custom_id.startswith("mm:clore:"):
+        gid = custom_id.split(":")[-1]
+        guild = bot.get_guild(int(gid)) if gid.isdigit() else None
+        if guild is None:
+            return
+        fiche = mm.lire_fil(modmail_table(), guild.id, interaction.user.id)
+        embed = (embed_success("Courrier clos",
+                               "Merci. Écris de nouveau quand tu veux : "
+                               "un nouveau courrier s'ouvrira.", gid)
+                 if fiche else
+                 embed_info("Déjà clos", "Ce courrier était déjà refermé.", gid))
+        if fiche:
+            await modmail_fermer(guild, str(interaction.user.id),
+                                 str(interaction.user), "clos par le membre")
+        return await modmail_repondre_au_choix(interaction, embed)
 
     if custom_id == "mm:serveur":
         valeurs = donnees.get("values") or []

@@ -22,7 +22,10 @@ SEMAINE = timedelta(days=7)
 
 # Ce qu'on compte. Ajouter une entree ici suffit : les fiches deja
 # ecrites n'ont pas la clef, et `chiffres()` la rend a zero.
-COMPTEURS = ("arrivees", "sanctions", "filtres", "tickets")
+COMPTEURS = ("arrivees", "sanctions", "filtres", "tickets",
+             # Ajoutes apres coup : le rapport parlait d'un bot qui
+             # n'avait ni courrier, ni mur, ni menage.
+             "courriers", "mur", "departs")
 
 # Au-dela, ce n'est plus un compteur mais une anomalie : un bug de
 # boucle, un raid qui n'a pas ete vu. On borne plutot que d'ecrire un

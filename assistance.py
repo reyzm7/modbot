@@ -148,6 +148,24 @@ def doit_relancer(fiche, heures, maintenant):
     return (maintenant - dernier).total_seconds() >= int(heures) * 3600
 
 
+def doit_se_fermer(fiche, jours, maintenant):
+    """
+    Ce courrier s'est-il éteint de lui-même ?
+
+    On regarde le DERNIER mot échangé, des deux côtés : un fil où
+    l'équipe a répondu hier n'est pas mort, même si le membre n'a plus
+    rien dit depuis.
+    """
+    if not jours:
+        return False
+    dates = [_date((fiche or {}).get(clef))
+             for clef in ("dernier", "repondu", "ouvert")]
+    dates = [quand for quand in dates if quand is not None]
+    if not dates:
+        return False
+    return (maintenant - max(dates)).days >= int(jours)
+
+
 def attente_lisible(fiche, maintenant):
     """Depuis combien de temps ça attend, en une expression courte."""
     dernier = _date((fiche or {}).get("dernier"))

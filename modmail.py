@@ -30,6 +30,11 @@ FILS_MAX = 500
 # a le droit de laisser quelqu'un ecrire dix lignes d'affilee.
 PAUSE_MIN, PAUSE_MAX, PAUSE_DEFAUT = 0, 300, 5
 
+# Au bout de combien de jours sans un mot un courrier se ferme tout
+# seul. Zero : jamais. Sans cela le salon de l'equipe devient un
+# cimetiere de conversations finies, et la table grossit sans fin.
+FERMETURE_MIN, FERMETURE_MAX, FERMETURE_DEFAUT = 0, 90, 7
+
 REFUS = {
     "inactif": "Ce serveur a décidé de ne pas mettre cette fonction en place.",
     "sans_salon": ("La messagerie est activée mais aucun salon ne la reçoit. "
@@ -97,6 +102,8 @@ def lire_config(brut):
         # Proposer un brouillon de reponse a l'equipe. Jamais envoye
         # tout seul : c'est un modérateur qui decide.
         "ia": bool(brut.get("ia")),
+        "fermeture": _entier(brut.get("fermeture"), FERMETURE_DEFAUT,
+                             FERMETURE_MIN, FERMETURE_MAX),
     }
 
 

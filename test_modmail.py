@@ -53,6 +53,10 @@ verifier("l'ancienneté demandée est bornée à un an",
          mm.lire_config({"anciennete": 9000})["anciennete"] == mm.ANCIENNETE_MAX)
 verifier("un rôle illisible n'en est pas une condition",
          mm.lire_config({"role_requis": "le role des anciens"})["role_requis"] == "")
+verifier("un courrier s'éteint au bout d'une semaine, sauf avis contraire",
+         vide["fermeture"] == 7
+         and mm.lire_config({"fermeture": 0})["fermeture"] == 0
+         and mm.lire_config({"fermeture": 9000})["fermeture"] == mm.FERMETURE_MAX)
 verifier("la traduction et le brouillon sont coupés par défaut",
          vide["traduire"] is False and vide["ia"] is False)
 verifier("et s'allument quand le serveur le demande",
@@ -217,6 +221,22 @@ corps = source[source.index("async def on_message(message):"):]
 verifier("le fil de courrier passe avant l'expérience et les filtres",
          corps.index("await modmail_depuis_le_fil(message)")
          < corps.index("track_msg(uid, gid)"))
+verifier("les pièces jointes sont recopiées, pas citées par leur adresse",
+         "async def fichiers_du_message(" in source
+         and "await piece.to_file()" in source
+         and source.count("files=fichiers") == 2)
+verifier("ce qui est trop gros garde son lien, faute de mieux",
+         "Trop volumineux pour être recopiés" in source
+         and "def champ_des_liens(" in source)
+verifier("le membre peut clore son courrier lui-même",
+         "def vue_clore_courrier(" in source
+         and 'custom_id.startswith("mm:clore:")' in source
+         and "view=vue_clore_courrier(gid)" in source)
+verifier("un courrier éteint se ferme tout seul",
+         "ass.doit_se_fermer(fiche, fermeture, maintenant)" in source)
+verifier("le rapport de la semaine compte les courriers",
+         'rapport_compter(guild.id, "courriers")' in source
+         and 'compte["courriers"]' in source)
 verifier("le fil s'ouvre sur un message du salon, pas tout seul",
          "annonce = await salon.send(" in source
          and "await annonce.create_thread(" in source
