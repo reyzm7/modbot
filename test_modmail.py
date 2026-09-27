@@ -99,7 +99,7 @@ verifier("une pause à zéro n'arrête personne",
 verifier("chaque refus a une phrase à montrer",
          all(code in mm.REFUS for code in
              ("inactif", "sans_salon", "bloque", "trop_vite", "vide",
-              "trop_neuf", "sans_role")))
+              "trop_neuf", "sans_role", "fil")))
 
 # Les conditions posees aux membres : elles regardent QUI ecrit, la ou
 # refus_message regarde le message et le module.
@@ -234,6 +234,15 @@ verifier("le brouillon demande l'IA du serveur et un quota",
 verifier("la traduction passe par le traducteur du bot",
          "async def modmail_traduire(" in source
          and "await translate_text(texte, vers)" in source)
+# Une reponse ephemere n'existe pas en message prive : Discord la
+# refuse, et il ne se passait donc rien du tout.
+verifier("le choix du serveur répond en remplaçant le menu, jamais en éphémère",
+         "async def modmail_repondre_au_choix(" in source
+         and source.count("await modmail_repondre_au_choix(") == 5
+         and "safe_ephemeral" not in source.split('if custom_id == "mm:serveur":')[1]
+                                             .split("morceaux = custom_id.split")[0])
+verifier("et le menu disparaît une fois qu'il a servi",
+         "edit_message(embed=embed, view=None)" in source)
 verifier("le bot ne se répète pas quand un membre insiste",
          "MODMAIL_PAUSE_REFUS" in source and "MODMAIL_DIT" in source)
 verifier("le bot mesure l'ancienneté avant de porter le message",

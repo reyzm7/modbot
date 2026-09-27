@@ -40,6 +40,8 @@ REFUS = {
     "trop_neuf": ("Ce serveur demande un peu d'ancienneté avant d'écrire à son "
                   "équipe. Reviens dans quelques jours."),
     "sans_role": "Ce serveur réserve sa messagerie à certains membres.",
+    "fil": ("L'équipe n'a pas pu recevoir ton message : il manque à ModBot le "
+            "droit d'ouvrir un fil dans son salon. Préviens un administrateur."),
 }
 
 # Combien de jours d'anciennete un serveur peut exiger. Un an suffit :

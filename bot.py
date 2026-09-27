@@ -24218,7 +24218,10 @@ async def modmail_poster(guild, membre, texte, pieces=()):
         return "vide"
     fil, neuf = await modmail_fil_du_membre(guild, membre, config)
     if fil is None:
-        return "sans_salon"
+        # Le salon existe mais le fil n'a pas pu naitre : c'est une
+        # permission qui manque, et le membre n'y peut rien. Il faut le
+        # dire, sinon il reecrit dix fois dans le vide.
+        return "fil" if salon_du_serveur(guild, config["salon"]) else "sans_salon"
 
     if neuf:
         role = guild.get_role(int(config["role"])) if config["role"] else None
@@ -24781,6 +24784,28 @@ async def modmail_fermer(guild, uid, par, raison=""):
                     fields=[("📋 Raison", raison or "—")], severity="info")
 
 
+async def modmail_repondre_au_choix(interaction, embed):
+    """
+    Repond au choix du serveur en remplacant le menu.
+
+    Une reponse ephemere n'existe pas en message prive : Discord la
+    refuse, l'erreur etait avalee, et il ne se passait donc RIEN — le
+    menu restait affiche et le membre croyait son message perdu.
+    Editer le message dit ce qui s'est passe et retire le menu, qui a
+    fait son travail.
+    """
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=None)
+            return
+    except Exception as erreur:
+        print(f"modmail : choix non edite ({erreur})")
+    try:
+        await interaction.followup.send(embed=embed)
+    except Exception as erreur:
+        print(f"modmail : choix sans reponse ({erreur})")
+
+
 async def modmail_interaction(interaction):
     """Les boutons du courrier : fermer, bloquer, et le choix du serveur."""
     donnees = interaction.data or {}
@@ -24794,7 +24819,7 @@ async def modmail_interaction(interaction):
         guild = bot.get_guild(int(gid)) if gid.isdigit() else None
         membre = guild.get_member(interaction.user.id) if guild else None
         if membre is None:
-            return await safe_ephemeral(interaction, embed=embed_error(
+            return await modmail_repondre_au_choix(interaction, embed_error(
                 "Serveur introuvable", "Tu n'es plus sur ce serveur.", None))
         # Un serveur ferme repond qu'il est ferme. Le choix n'est pas
         # retenu : le message suivant ne doit pas y repartir tout seul.
@@ -24802,22 +24827,22 @@ async def modmail_interaction(interaction):
         if etat != "ouvert":
             MODMAIL_ATTENTE.pop(interaction.user.id, None)
             MODMAIL_CHOIX.pop(interaction.user.id, None)
-            return await safe_ephemeral(interaction, embed=embed_info(
+            return await modmail_repondre_au_choix(interaction, embed_info(
                 guild.name,
                 mm.REFUS["bloque"] if etat == "bloque" else mm.REFUS["inactif"], gid))
         attente = MODMAIL_ATTENTE.pop(interaction.user.id, None)
         if not attente:
             MODMAIL_CHOIX[interaction.user.id] = (
                 gid, now() + timedelta(minutes=MODMAIL_CHOIX_MINUTES))
-            return await safe_ephemeral(interaction, embed=embed_success(
+            return await modmail_repondre_au_choix(interaction, embed_success(
                 "C'est noté", f"Écris ton message : il partira à **{guild.name}**.", gid))
         refus = await modmail_poster(guild, membre, attente[0], attente[1])
         if refus:
-            return await safe_ephemeral(interaction, embed=embed_info(
+            return await modmail_repondre_au_choix(interaction, embed_info(
                 guild.name, mm.REFUS.get(refus, mm.REFUS["inactif"]), gid))
         MODMAIL_CHOIX[interaction.user.id] = (
             gid, now() + timedelta(minutes=MODMAIL_CHOIX_MINUTES))
-        return await safe_ephemeral(interaction, embed=embed_success(
+        return await modmail_repondre_au_choix(interaction, embed_success(
             "Message transmis", f"L'équipe de **{guild.name}** l'a reçu.", gid))
 
     morceaux = custom_id.split(":")
