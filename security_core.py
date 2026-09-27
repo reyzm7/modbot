@@ -521,7 +521,7 @@ class InfractionStore:
     def points(self, guild_id, user_id):
         return self._points(self.history(guild_id, user_id))
 
-    def add(self, guild_id, user_id, reason, points=1, **extra):
+    def add(self, guild_id, user_id, reason, points=1, date=None, **extra):
         """Ajoute une infraction et retourne (total de points, historique a jour)."""
         data = self._load()
         gid, uid = str(guild_id), str(user_id)
@@ -532,7 +532,7 @@ class InfractionStore:
         except (TypeError, ValueError):
             weight = 1
         entry = {
-            "date": datetime.now(timezone.utc).isoformat(),
+            "date": str(date) if date else datetime.now(timezone.utc).isoformat(),
             "reason": str(reason or "Infraction"),
             "points": weight,
         }
@@ -543,6 +543,68 @@ class InfractionStore:
         guild_bucket[uid] = entries[-self.MAX_ENTRIES_PER_MEMBER:]
         self._save(data)
         return self._points(guild_bucket[uid]), guild_bucket[uid]
+
+    def count(self, guild_id, user_id):
+        """
+        Le NOMBRE d infractions qui comptent encore.
+
+        C est le cran d echelle. Les points disent la gravite, ce
+        compte dit ou l on en est : trois crans, c est la troisieme
+        marche, meme si l une des trois pesait trois points.
+        """
+        return len(self.history(guild_id, user_id))
+
+    def raw_count(self, guild_id, user_id):
+        """Les lignes stockees, perimees comprises. Sert a la reprise."""
+        data = self._load()
+        return len([e for e in data.get(str(guild_id), {}).get(str(user_id), [])
+                    if isinstance(e, dict)])
+
+    def membres(self, guild_id):
+        """Combien de membres ont au moins une infraction qui compte."""
+        jours = self.jours(guild_id)
+        return sum(1 for entries in self._load().get(str(guild_id), {}).values()
+                   if self._fresh(entries, jours))
+
+    def total(self, guild_id):
+        """Toutes les infractions retenues du serveur."""
+        jours = self.jours(guild_id)
+        return sum(len(self._fresh(entries, jours))
+                   for entries in self._load().get(str(guild_id), {}).values())
+
+    def merge(self, guild_id, user_id, entries):
+        """
+        Ajoute des lignes venues d ailleurs, et remet l ordre.
+
+        Sert a la reprise d un ancien compteur : elles arrivent avec
+        leur date d origine, plus vieille que celles deja en place.
+        """
+        data = self._load()
+        gid, uid = str(guild_id), str(user_id)
+        bucket = data.setdefault(gid, {})
+        toutes = [e for e in bucket.get(uid, []) if isinstance(e, dict)]
+        toutes += [e for e in entries if isinstance(e, dict)]
+        toutes.sort(key=lambda e: str(e.get("date") or ""))
+        bucket[uid] = toutes[-self.MAX_ENTRIES_PER_MEMBER:]
+        self._save(data)
+        return len(bucket[uid])
+
+    def remove_last(self, guild_id, user_id):
+        """
+        Retire la derniere infraction posee.
+
+        Un geste annule qui n avait pas garde l instant exact de sa
+        ligne rend quand meme le cran d echelle. Retourne (retiree,
+        nombre restant).
+        """
+        data = self._load()
+        gid, uid = str(guild_id), str(user_id)
+        entries = data.get(gid, {}).get(uid, [])
+        if not isinstance(entries, list) or not entries:
+            return False, 0
+        data[gid][uid] = entries[:-1]
+        self._save(data)
+        return True, len(self._fresh(data[gid][uid], self.jours(gid)))
 
     def reset(self, guild_id, user_id):
         data = self._load()

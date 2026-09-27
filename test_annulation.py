@@ -329,8 +329,9 @@ bot_mod.F_ANNULATIONS = os.path.join(dossier, "annulations.json")
 bot_mod.F_DATA = os.path.join(dossier, "data.json")
 bot_mod.F_BANS = os.path.join(dossier, "bans.json")
 bot_mod.F_TEMPBANS = os.path.join(dossier, "tempbans.json")
-bot_mod.INFRACTIONS = sc.InfractionStore(os.path.join(dossier, "infractions.json"),
-                                         retention_days=180)
+bot_mod.INFRACTIONS = sc.InfractionStore(
+    os.path.join(dossier, "infractions.json"), retention_days=180,
+    retention_resolver=bot_mod.jours_infractions)
 bot_mod.dashboard_log = lambda *a, **k: None
 bot_mod.oublier_stats_publiques = lambda *a, **k: None
 journal = []
@@ -398,9 +399,8 @@ verifier("un jeton recopié sur un autre serveur ne défait rien de chez lui",
 
 banni = FauxMembre(9, "Parti")
 bot_mod.jsave(bot_mod.F_BANS, {GID: [{"user_id": "9", "raison": "raid"}]})
-bot_mod.jsave(bot_mod.F_DATA, {GID: {"9": {"historique": [
-    {"raison": "premier", "date": "2026-09-20 10:00:00"},
-    {"raison": "second", "date": "2026-09-26 10:00:00"}]}}})
+bot_mod.add_avert("9", GID, "premier")
+bot_mod.add_avert("9", GID, "second")
 _, lignes = bot_mod.INFRACTIONS.add(GID, banni.id, "raid", points=3)
 jeton_ban = bot_mod.memoriser_sanction(SERVEUR, "ban", banni, MODO, raison="raid",
                                        stamp=lignes[-1]["date"], avert=True)
@@ -408,9 +408,17 @@ fait, souci = lancer(bot_mod.defaire_sanction(SERVEUR, an.lire(bot_mod.annulatio
 verifier("le bannissement est levé", fait and SERVEUR.debannis == [9], souci)
 verifier("le membre sort de l'historique des bans",
          bot_mod.jload(bot_mod.F_BANS).get(GID) == [])
-verifier("et le point ne pèse plus", bot_mod.INFRACTIONS.points(GID, banni.id) == 0)
+verifier("et le point ne pèse plus", bot_mod.INFRACTIONS.points(GID, banni.id) == 2)
+# L'echelle et le casier partagent un magasin : retirer la ligne par
+# son instant PUIS la derniere, ce serait rendre deux crans pour une.
 verifier("un cran d'échelle est rendu, un seul",
-         [a["raison"] for a in bot_mod.jload(bot_mod.F_DATA)[GID]["9"]["historique"]] == ["premier"])
+         [a["reason"] for a in bot_mod.get_hist("9", GID)] == ["premier", "second"])
+
+sans_jeton = an.fabriquer("warn", SERVEUR.id, 9, nom="Parti")
+sans_jeton["avert"] = True
+lancer(bot_mod.defaire_sanction(SERVEUR, sans_jeton))
+verifier("sans instant precis, c'est la dernière qui est rendue",
+         [a["reason"] for a in bot_mod.get_hist("9", GID)] == ["premier"])
 
 absent = FauxMembre(10, "Absent")
 fiche_mute = an.fabriquer("mute", SERVEUR.id, absent.id, nom="Absent")
@@ -423,16 +431,54 @@ verifier("lever le mute d'un membre parti se dit, au lieu de faire semblant",
 
 _cfg_reelle = bot_mod.get_cfg
 recent = datetime.now(timezone.utc)
-bot_mod.jsave(bot_mod.F_DATA, {GID: {"11": {"historique": [
-    {"raison": "vieux", "date": (recent - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")},
-    {"raison": "recent", "date": recent.strftime("%Y-%m-%d %H:%M:%S")}]}}})
+bot_mod.INFRACTIONS.merge(GID, "11", [
+    {"date": (recent - timedelta(days=10)).isoformat(), "reason": "vieux", "points": 1},
+    {"date": recent.isoformat(), "reason": "recent", "points": 1}])
 bot_mod.get_cfg = lambda gid: {"expiration_infractions": 3}
 verifier("l'échelle ne compte plus un avertissement périmé",
-         [a["raison"] for a in bot_mod.get_hist("11", GID)] == ["recent"])
+         [a["reason"] for a in bot_mod.get_hist("11", GID)] == ["recent"])
+verifier("et le cran d'échelle suit", bot_mod.get_nb("11", GID) == 1)
 bot_mod.get_cfg = lambda gid: {"expiration_infractions": 0}
 verifier("le serveur qui ne veut rien oublier les garde tous",
          len(bot_mod.get_hist("11", GID)) == 2)
 bot_mod.get_cfg = _cfg_reelle
+
+
+# ── Un seul compteur, desormais ───────────────────────────────────────
+#
+# L'echelle comptait dans un fichier, le casier dans un autre. Un
+# avertissement donne depuis le tableau de bord n'avancait pas
+# l'echelle, un casier efface la laissait intacte. Ce qui restait de
+# l'ancien fichier est repris au demarrage, une fois.
+
+bot_mod.INFRACTIONS.reset(GID, "12")
+bot_mod.jsave(bot_mod.F_DATA, {GID: {"12": {"historique": [
+    {"raison": "vieux warn", "date": "2026-09-20 10:00:00"},
+    {"raison": "autre warn", "date": "2026-09-26 10:00:00"}]}}})
+verifier("la reprise ramène ce que seul l'ancien fichier savait",
+         bot_mod.reprendre_ancien_compteur() == 2
+         and bot_mod.get_nb("12", GID) == 2)
+verifier("avec leur date d'origine, pas celle du démarrage",
+         bot_mod.get_hist("12", GID)[0]["date"].startswith("2026-09-20"))
+verifier("une seconde reprise ne double rien",
+         bot_mod.reprendre_ancien_compteur() == 0
+         and bot_mod.get_nb("12", GID) == 2)
+
+bot_mod.jsave(bot_mod.F_DATA, {GID: {"13": {"historique": [
+    {"raison": "deja compte", "date": "2026-09-26 10:00:00"}]}}})
+bot_mod.INFRACTIONS.reset(GID, "13")
+bot_mod.INFRACTIONS.add(GID, "13", "deja compte")
+verifier("ce que le casier connaît déjà n'est pas repris deux fois",
+         bot_mod.reprendre_ancien_compteur() == 0
+         and bot_mod.get_nb("13", GID) == 1)
+
+bot_mod.jsave(bot_mod.F_DATA, {GID: {"12": {"historique": [
+    {"raison": "vieux warn", "date": "2026-09-20 10:00:00"}], "repris": True}}})
+bot_mod.reset_avert("12", GID)
+verifier("effacer le casier efface le cran d'échelle avec",
+         bot_mod.get_nb("12", GID) == 0)
+verifier("et la trace de l'ancien fichier part aussi : sinon elle revient",
+         "12" not in bot_mod.jload(bot_mod.F_DATA).get(GID, {}))
 
 
 # ══════════════════════════════════════════════════════════════════════

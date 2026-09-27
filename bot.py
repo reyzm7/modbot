@@ -466,10 +466,11 @@ TAILLE_MAX_SAUVEGARDE = 6 * 1024 * 1024
 # fait l'inverse — elle oublie de sauvegarder, ce qui se repare.
 FICHIERS_SAUVEGARDES = (
     "config.json",        # les reglages : c'est le fichier qui compte
-    # Les avertissements et le journal des bannissements. Ils manquaient :
-    # l'historique des infractions survivait a un redeploiement, mais
-    # l'echelle des sanctions repartait de zero, et le journal des bans
-    # avec elle.
+    # L'ancien compteur des avertissements, et le journal des
+    # bannissements. Le compteur ne sert plus qu'a une chose : si une
+    # vieille sauvegarde revient un jour, le demarrage y reprendra ce
+    # que le casier ne connait pas. Le journal des bans, lui, compte
+    # toujours — sans lui, un redeploiement l'effacait.
     "data.json",
     "bans.json",
     # Ce que l'equipe s'est ecrit sur un membre ne se refabrique pas.
@@ -1898,32 +1899,28 @@ def est_immunise(member, gid):
 # ════════════════════════════════════════════════
 
 def get_hist(uid, gid):
-    # Le delai du serveur, comme pour l'historique des infractions. Il
-    # etait ecrit en dur ici : l'echelle purgeait au bon rythme quand on
-    # ecrivait, et comptait a l'ancien quand on lisait.
-    hist = jload(F_DATA).get(str(gid), {}).get(str(uid), {}).get("historique", [])
-    jours = jours_infractions(gid)
-    if not jours:
-        return list(hist)
-    cutoff = now() - timedelta(days=jours)
-    return [a for a in hist
-            if datetime.strptime(a["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) > cutoff]
+    """
+    L'historique qui pilote l'echelle des sanctions.
+
+    Il vivait dans un second fichier, en parallele du casier. Deux
+    magasins pour une seule question, et deux reponses des qu'on en
+    touchait un seul : un avertissement donne depuis le tableau de bord
+    ne faisait pas avancer l'echelle, un casier efface la laissait
+    intacte, et l'anti-arnaque comptait dans le vide. Il n'y a plus
+    qu'un magasin.
+    """
+    return INFRACTIONS.history(gid, uid)
+
 
 def get_nb(uid, gid):
-    return len(get_hist(uid, gid))
+    return INFRACTIONS.count(gid, uid)
 
 def add_avert(uid, gid, raison, infraction=True):
     """
-    Un avertissement de plus, et la trace qui va avec.
+    Un avertissement de plus. Rend le cran d'echelle atteint.
 
-    Deux compteurs vivaient en parallele : celui-ci, qui pilote l'echelle
-    des sanctions, et l'historique des infractions, que lisent
-    `/infractions` et le tableau de bord. Le filtre de langage remplissait
-    les deux, mais `/warn`, l'anti-spam et les salons proteges seulement
-    celui-ci : ces sanctions-la n'apparaissaient donc nulle part.
-    C'est ici que ca se decide desormais, pour tout le monde a la fois.
-    `infraction=False` pour l'appelant qui a deja ecrit sa propre ligne,
-    plus detaillee.
+    `infraction=False` pour l'appelant qui vient d'ecrire lui-meme sa
+    ligne, plus detaillee : on la compte sans l'ecrire deux fois.
     """
     if infraction:
         try:
@@ -1931,32 +1928,75 @@ def add_avert(uid, gid, raison, infraction=True):
         except Exception as erreur:
             # Compter ne doit jamais empecher de sanctionner.
             print(f"infraction non enregistree ({gid}/{uid}) : {erreur}")
-    data = jload(F_DATA)
-    u, g = str(uid), str(gid)
-    if g not in data:
-        data[g] = {}
-    if u not in data[g]:
-        data[g][u] = {"historique": []}
-    # Les deux compteurs oublient ensemble. Ils avaient chacun leur
-    # duree — cinq mois ici, six ailleurs : un membre pouvait avoir un
-    # casier vide et un cran d'echelle encore pose, ou l'inverse.
-    jours = jours_infractions(g)
-    if jours:
-        cutoff = now() - timedelta(days=jours)
-        data[g][u]["historique"] = [
-            a for a in data[g][u]["historique"]
-            if datetime.strptime(a["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) > cutoff
-        ]
-    data[g][u]["historique"].append({"raison": raison, "date": now().strftime("%Y-%m-%d %H:%M:%S")})
-    jsave(F_DATA, data)
-    return len(data[g][u]["historique"])
+    return INFRACTIONS.count(gid, uid)
+
 
 def reset_avert(uid, gid):
+    """Le casier vide, et l'echelle avec : c'est le meme magasin."""
+    try:
+        INFRACTIONS.reset(gid, uid)
+    except Exception as erreur:
+        print(f"remise a zero ({gid}/{uid}) : {erreur}")
+    oublier_ancien_compteur(gid, uid)
+
+
+def _date_de_l_ancien(texte):
+    """L'ancien fichier ecrivait « 2026-09-27 18:04:11 », sans fuseau."""
+    try:
+        return datetime.strptime(str(texte), "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return now().isoformat()
+
+
+def oublier_ancien_compteur(gid, uid):
+    """Efface la trace du membre dans l'ancien fichier, s'il en reste une."""
     data = jload(F_DATA)
-    u, g = str(uid), str(gid)
-    if g in data and u in data[g]:
-        data[g][u] = {"historique": []}
+    g, u = str(gid), str(uid)
+    if isinstance(data.get(g), dict) and u in data[g]:
+        data[g].pop(u, None)
         jsave(F_DATA, data)
+
+
+def reprendre_ancien_compteur():
+    """
+    Les avertissements de l'ancien fichier rejoignent le casier.
+
+    L'echelle comptait dans `data.json`, le casier dans le sien. En
+    reunissant les deux, ce que seul l'ancien fichier connaissait aurait
+    disparu : un membre a trois crans serait reparti de zero, et les
+    serveurs qui l'avaient merite auraient eu une amnistie surprise. On
+    reverse la difference, une fois, avec les dates d'origine.
+    """
+    data = jload(F_DATA)
+    if not isinstance(data, dict) or not data:
+        return 0
+    reprises, change = 0, False
+    for g, membres in list(data.items()):
+        if not isinstance(membres, dict):
+            continue
+        for u, fiche in list(membres.items()):
+            if not isinstance(fiche, dict) or fiche.get("repris"):
+                continue
+            anciens = [a for a in (fiche.get("historique") or [])
+                       if isinstance(a, dict)]
+            try:
+                manque = len(anciens) - INFRACTIONS.raw_count(g, u)
+                if manque > 0:
+                    INFRACTIONS.merge(g, u, [
+                        {"date": _date_de_l_ancien(a.get("date")),
+                         "reason": str(a.get("raison") or "Avertissement"),
+                         "points": 1, "source": "ancien compteur"}
+                        for a in anciens[-manque:]])
+                    reprises += manque
+            except Exception as erreur:
+                print(f"reprise du compteur ({g}/{u}) : {erreur}")
+                continue
+            fiche["repris"] = True
+            change = True
+    if change:
+        jsave(F_DATA, data)
+    return reprises
 
 # ══════════════════════════════════════════════════════════════════════
 #  LE DOSSIER DE SANCTION
@@ -2245,16 +2285,9 @@ def vue_annuler(jeton):
 
 
 def retirer_dernier_avert(uid, gid):
-    """Rend un cran de l'echelle : le dernier avertissement disparait."""
-    data = jload(F_DATA)
-    u, g = str(uid), str(gid)
-    historique = (data.get(g, {}).get(u) or {}).get("historique") or []
-    if not historique:
-        return 0
-    historique.pop()
-    data[g][u]["historique"] = historique
-    jsave(F_DATA, data)
-    return len(historique)
+    """Rend un cran de l'echelle : la derniere infraction disparait."""
+    _, restants = INFRACTIONS.remove_last(gid, uid)
+    return restants
 
 
 def retirer_de_la_liste_des_bans(gid, uid):
@@ -2305,15 +2338,21 @@ async def defaire_sanction(guild, action):
                 if genre == "mute":
                     return False, f"Discord a refusé la levée : `{erreur}`"
 
-    # Les compteurs en dernier, et separement : qu'un reset ait efface
-    # la ligne d'infraction entre-temps ne doit pas empecher de rendre
-    # le cran d'echelle.
+    # Le compteur en dernier : qu'un reset ait efface la ligne
+    # entre-temps ne doit pas empecher de rendre la liberte.
+    #
+    # On retire la ligne posee a cet instant precis. Si elle n'est plus
+    # la — un reset, une purge, une sanction d'avant le jeton — on rend
+    # quand meme le cran, en retirant la derniere. Jamais les deux :
+    # depuis que l'echelle et le casier partagent un magasin, ce serait
+    # rendre deux crans pour une seule sanction.
+    retiree = False
     if action.get("stamp"):
         try:
-            INFRACTIONS.remove(gid, uid, action["stamp"])
+            retiree, _ = INFRACTIONS.remove(gid, uid, action["stamp"])
         except Exception as erreur:
             print(f"annulation : point non retire ({erreur})")
-    if action.get("avert"):
+    if action.get("avert") and not retiree:
         try:
             retirer_dernier_avert(uid, gid)
         except Exception as erreur:
@@ -8980,7 +9019,7 @@ async def api_member_action(request):
             resultat = "banni"
 
         elif action == "reset":
-            INFRACTIONS.reset(gid, membre.id)
+            reset_avert(str(membre.id), gid)
             resultat = "infractions effacees"
 
         elif action in {"immunize", "unimmunize"}:
@@ -15793,11 +15832,11 @@ class VuePanelStats(discord.ui.View):
             await i.response.defer(ephemeral=True)
         except Exception:
             return
-        data = jload(F_DATA); bans = jload(F_BANS)
+        bans = jload(F_BANS)
         gid = str(i.guild.id); custom = get_custom(i.guild.id); cfg = get_cfg(i.guild.id)
-        nb_m = len(data.get(gid, {}))
+        nb_m = INFRACTIONS.membres(gid)
         nb_b = len(bans.get(gid, []))
-        nb_a = sum(len(v.get("historique", [])) for v in data.get(gid, {}).values())
+        nb_a = INFRACTIONS.total(gid)
         e = E(f"📊 Statistiques — {i.guild.name}", couleur=0x5865F2)
         if i.guild.icon: e.set_thumbnail(url=i.guild.icon.url)
         e.add_field(name="👥 Membres avertis", value=f"```{nb_m}```", inline=True)
@@ -21242,7 +21281,6 @@ async def cmd_infractions_reset(i: discord.Interaction, membre: discord.Member):
     )
     if not confirmed:
         return
-    INFRACTIONS.reset(gid, membre.id)
     reset_avert(str(membre.id), gid)
     target = view.interaction or i
     try:
@@ -21378,7 +21416,6 @@ async def handle_bad_word(message, detection):
     if step["action"] == "ban" and result["applied"]:
         add_ban(gid, str(member.id), str(member),
                 f"Langage interdit — {detection['word']}", "Permanent", "auto_filter", "ModBot")
-        INFRACTIONS.reset(gid, member.id)
         reset_avert(str(member.id), gid)
 
 def detect_message_content(message, gid):
@@ -23903,7 +23940,7 @@ async def cmd_mesdonnees(i: discord.Interaction):
         fin = sc.date_expiration(historique[-1].get("date"), jours)
         lignes.append(f"la dernière le `{fmt(derniere) if derniere else '?'}`"
                       + (f", elle cesse de compter le `{fmt(fin)}`" if fin else ""))
-    lignes.append(f"**{get_nb(uid, gid)}** avertissement(s) dans l'échelle des sanctions")
+    lignes.append(f"l'échelle des sanctions : **{get_nb(uid, gid)}/{MAX_AVERT}**")
     lignes.append("l'oubli : " + (f"au bout de **{sc.libelle_retention(jours)}**"
                                   if jours else "ce serveur ne les oublie pas"))
     embed.add_field(name="⚖️ Modération", value="\n".join(lignes)[:1024], inline=False)
@@ -24189,6 +24226,16 @@ async def on_ready():
     # sauvegardee — et le redeploiement suivant l'effacerait sans filet. La
     # comparaison d'empreinte se charge de ne rien poster si c'est deja fait.
     _sauvegarde_a_faire = True
+
+    # ── 1 bis. L'echelle et le casier ne font plus qu'un magasin. Ce que
+    #       seul l'ancien fichier savait est reverse ici, une seule fois.
+    _etape_demarrage("etape_compteur")
+    try:
+        reprises = reprendre_ancien_compteur()
+        if reprises:
+            print(f"compteur des sanctions : {reprises} avertissement(s) repris")
+    except Exception as err:
+        print(f"reprise du compteur des sanctions : {err}")
 
     # ── 2. Les vues persistantes (timeout=None + custom_id partout).
     _etape_demarrage("etape_vues")
@@ -26010,7 +26057,13 @@ async def cmd_avert(i: discord.Interaction, membre: discord.Member):
     e.add_field(name="⚡ Prochain", value=sanction_next, inline=True)
     statut = "🟢 Aucun" if nb==0 else ("🟠 Sous surveillance" if nb<MAX_AVERT else "🔴 Banni")
     e.add_field(name="🏷️ Statut", value=statut, inline=True)
-    if hist: e.add_field(name="📜 Historique", value="\n".join([f"• `{h['date']}` — {h['raison']}" for h in hist[-5:]]), inline=False)
+    if hist:
+        lignes = []
+        for ligne in hist[-5:]:
+            quand = sc.parse_iso(ligne.get("date"))
+            lignes.append(f"• `{fmt(quand) if quand else '?'}` — "
+                          + str(ligne.get("reason") or "Avertissement"))
+        e.add_field(name="📜 Historique", value="\n".join(lignes)[:1024], inline=False)
     e.set_footer(text="ModBot • Dossier de modération")
     await i.followup.send(embed=e, ephemeral=True)
 
@@ -26039,10 +26092,10 @@ async def cmd_profilestats(i: discord.Interaction, membre: discord.Member = None
 async def cmd_serverstats(i: discord.Interaction):
     await _safe_defer(i)
     gid = str(i.guild.id)
-    stats = jload(F_STATS); data = jload(F_DATA); bans_d = jload(F_BANS)
+    stats = jload(F_STATS); bans_d = jload(F_BANS)
     today = now().strftime("%Y-%m-%d")
     total_msgs_today = sum(u.get("daily", {}).get(today, 0) for u in stats.get(gid, {}).values())
-    nb_avertis = len(data.get(gid, {}))
+    nb_avertis = INFRACTIONS.membres(gid)
     nb_bans = len(bans_d.get(gid, []))
     tks = load_tickets()
     tickets_today = sum(1 for t in tks.get("tickets", {}).values() if t.get("date","").startswith(today) and str(t.get("channel_id","")) in [str(ch.id) for ch in i.guild.channels])
