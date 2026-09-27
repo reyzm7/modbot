@@ -266,7 +266,7 @@ verifier("la traduction passe par le traducteur du bot",
 # refuse, et il ne se passait donc rien du tout.
 verifier("le choix du serveur répond en remplaçant le menu, jamais en éphémère",
          "async def modmail_repondre_au_choix(" in source
-         and source.count("await modmail_repondre_au_choix(") == 5
+         and source.count("await modmail_repondre_au_choix(") == 6
          and "safe_ephemeral" not in source.split('if custom_id == "mm:serveur":')[1]
                                              .split("morceaux = custom_id.split")[0])
 verifier("et le menu disparaît une fois qu'il a servi",
