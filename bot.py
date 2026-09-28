@@ -34,6 +34,7 @@ import repetition as rep
 import assistance as ass
 import membres as mb
 import historique_config as hc
+import modeles as md
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -8185,6 +8186,50 @@ async def api_save_guild_config(request):
     await apply_dashboard_config(guild, payload)
     return api_json({"ok": True, "config": serialize_dashboard_config(guild)})
 
+async def api_guild_modeles(request):
+    """
+    Les modeles proposes, avec ce qu'il resterait a faire pour chacun.
+
+    Le « reste a faire » depend du serveur : un courrier prive sans
+    salon ou le poser ne s'allume pas, et il vaut mieux le dire avant
+    le clic qu'apres.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    actuel = hc.instantane(serialize_dashboard_config(guild))
+    modeles = []
+    for fiche in md.liste():
+        modeles.append({**fiche, "reste": md.reste_a_faire(fiche["clef"], actuel)})
+    return api_json({"ok": True, "modeles": modeles})
+
+
+async def api_appliquer_modele(request):
+    """
+    Poser un modele : des reglages de depart, en un clic.
+
+    Il passe par `apply_dashboard_config` comme une sauvegarde
+    ordinaire — donc par ses verifications, et par l'historique : se
+    tromper de modele se defait d'un bouton.
+    """
+    identity = await api_identity(request)
+    guild = await api_guild_from_request(request, identity)
+    payload = await request.json() if request.can_read_body else {}
+    clef = str((payload or {}).get("modele") or "")
+    if not md.existe(clef):
+        raise web.HTTPNotFound(text="Ce modele n'existe pas.")
+
+    actuel = hc.instantane(serialize_dashboard_config(guild))
+    reglages, reste = md.appliquer(clef, actuel)
+    reglages["actor"] = identity.get("username") or identity.get("user_id")
+    reglages["motif_historique"] = f"Modèle « {md.MODELES[clef]['nom']} » appliqué"
+    await apply_dashboard_config(guild, reglages)
+    dashboard_log("config_modele", guild, identity.get("username"),
+                  f"Modele {md.MODELES[clef]['nom']}")
+    return api_json({"ok": True, "config": serialize_dashboard_config(guild),
+                     "reste": reste, "nom": md.MODELES[clef]["nom"],
+                     "versions": hc.resume(historique_config_tout(), guild.id)})
+
+
 async def api_guild_historique(request):
     """Les versions successives de la configuration, la plus recente en tete."""
     identity = await api_identity(request)
@@ -13813,6 +13858,8 @@ async def start_dashboard_api():
     app.router.add_get("/api/guilds/{guild_id}/config", api_get_guild_config)
     app.router.add_put("/api/guilds/{guild_id}/config", api_save_guild_config)
     app.router.add_get("/api/guilds/{guild_id}/sanctions", api_get_guild_sanctions)
+    app.router.add_get("/api/guilds/{guild_id}/modeles", api_guild_modeles)
+    app.router.add_post("/api/guilds/{guild_id}/modeles/appliquer", api_appliquer_modele)
     app.router.add_get("/api/guilds/{guild_id}/historique", api_guild_historique)
     app.router.add_post("/api/guilds/{guild_id}/historique/restaurer", api_restaurer_config)
 
