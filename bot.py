@@ -35,6 +35,7 @@ import assistance as ass
 import membres as mb
 import historique_config as hc
 import modeles as md
+import quarantaine as qtn
 
 # Sortie non bufferisee : sans cela Python accumule les messages quand la
 # sortie est redirigee (cas de tous les hebergeurs). Les logs arriveraient
@@ -410,6 +411,18 @@ LINK_RE = re.compile(
     re.I
 )
 INVITE_RE = LINK_RE
+
+# Les seuls domaines d'invitation, extraits de LINK_RE. Celui-ci melange
+# liens et invitations, ce qui suffit a l'anti-lien mais pas ici : dire
+# « pas de lien » a quelqu'un qui invite ses amis sur son serveur
+# explique mal ce qu'on lui reproche, et la quarantaine permet de
+# retenir l'un sans l'autre.
+INVITATION_RE = re.compile(
+    r'(?:(?:canary\.|ptb\.)?discord(?:app)?\.com/invite/[A-Za-z0-9-]+'
+    r'|discord\.gg/[A-Za-z0-9-]+|discord\.me/[A-Za-z0-9-]+'
+    r'|dsc\.gg/[A-Za-z0-9-]+|invite\.gg/[A-Za-z0-9-]+)',
+    re.I
+)
 
 # ════════════════════════════════════════════════
 #  UTILITAIRES
@@ -7346,6 +7359,7 @@ def serialize_dashboard_config(guild):
             "custom_words": custom_words,
             "filtered_words": filtered_words,
             "repetition": rep.lire_config(cfg.get("repetition")),
+            "quarantaine": qtn.lire_config(cfg.get("quarantaine")),
             "mentions": sc.lire_mentions_config(cfg.get("mentions")),
             "pseudos_suivis": suit_les_pseudos(gid),
         },
@@ -7736,6 +7750,8 @@ async def apply_dashboard_config(guild, payload):
         cfg["mentions"] = sc.lire_mentions_config(security["mentions"])
     if isinstance(security.get("repetition"), dict):
         cfg["repetition"] = rep.lire_config(security["repetition"])
+    if "quarantaine" in security:
+        cfg["quarantaine"] = qtn.lire_config(security["quarantaine"])
     if "insultes_enabled" in security:
         cfg["insultes_enabled"] = bool(security.get("insultes_enabled"))
     if "antispam" in security:
@@ -23794,6 +23810,105 @@ async def cmd_sondage(i: discord.Interaction, question: str, choix: str,
                     severity="info", actor=i.user)
 
 
+def quarantaine_cfg(gid):
+    return qtn.lire_config(get_cfg(gid).get("quarantaine"))
+
+
+def anciennete_dans_le_serveur(member):
+    """
+    Depuis combien de secondes ce membre est la, ou None.
+
+    None n'est pas zero : Discord ne donne pas toujours « joined_at »
+    — membre parti et revenu, cache incomplet, serveur tres grand. Sans
+    date, on ne peut pas savoir si la personne est la depuis deux
+    minutes ou deux ans, et le module laisse alors passer. Retenir un
+    habitue pour n'arreter personne serait le pire des deux.
+    """
+    arrive = getattr(member, "joined_at", None)
+    if arrive is None:
+        return None
+    try:
+        return (now() - arrive).total_seconds()
+    except Exception:
+        return None
+
+
+async def filtrer_quarantaine(message, cfg, immunise=False):
+    """
+    Les premieres heures d'un nouveau venu : ni lien, ni fichier, ni
+    invitation.
+
+    Le compte qui vient poster son arnaque n'attend pas : il rejoint,
+    il ecrit, il part. Il ne peut pas imiter l'anciennete, et c'est la
+    seule chose qu'on lui demande ici — pas de captcha, pas de role a
+    meriter, pas de salon a lire.
+
+    Rend True quand le message a ete traite ici.
+    """
+    guild = message.guild
+    config = quarantaine_cfg(str(guild.id))
+    if not config["enabled"] or immunise:
+        return False
+    # Le staff n'est jamais un nouveau venu, meme le jour de son
+    # arrivee : il a ete mis la par quelqu'un qui savait ce qu'il
+    # faisait.
+    if est_du_staff(message.author, str(guild.id)):
+        return False
+
+    restant = qtn.secondes_restantes(anciennete_dans_le_serveur(message.author), config)
+    if restant <= 0:
+        return False
+
+    texte = texte_complet_message(message)
+    motif = qtn.motif_retenu(
+        config,
+        a_lien=bool(texte and LINK_RE.search(texte)),
+        a_fichier=bool(getattr(message, "attachments", None)),
+        a_invitation=bool(texte and INVITATION_RE.search(texte)),
+    )
+    if not motif:
+        return False
+
+    if not await claim_message_by_delete(message):
+        return False
+
+    gid = str(guild.id)
+    QUOI = {
+        "liens": "de liens",
+        "fichiers": "de fichiers",
+        "invitations": "d'invitations",
+    }
+    attente = qtn.formuler_attente(restant)
+    # On dit le temps qui reste, pas seulement le refus : « tu ne peux
+    # pas » se lit comme une punition, « dans trois heures tu pourras »
+    # se lit comme une regle.
+    e = EG("⏳ Bienvenue, encore un instant",
+           f"{message.author.mention}, les arrivants ne peuvent pas encore envoyer "
+           f"{QUOI[motif]} ici.\nEncore **{attente}**, puis tu pourras.",
+           0xFFC861, gid)
+    try:
+        await message.channel.send(embed=e, delete_after=10)
+    except Exception:
+        pass
+
+    rapport_compter(guild.id, "filtres")
+    sanction = None
+    if config["infraction"]:
+        nb = add_avert(str(message.author.id), gid, f"Quarantaine : {motif}")
+        sanction = await appliquer_sanction(message.author, nb, "quarantaine des arrivants")
+
+    le = E("⏳ LOG — Quarantaine des arrivants", couleur=0xFFC861)
+    le.add_field(name="👤 Membre", value=str(message.author), inline=True)
+    le.add_field(name="🆔 ID", value=f"`{message.author.id}`", inline=True)
+    le.add_field(name="📍 Salon", value=message.channel.mention, inline=True)
+    le.add_field(name="🚫 Retenu", value=motif, inline=True)
+    le.add_field(name="⏳ Restant", value=attente, inline=True)
+    if sanction:
+        le.add_field(name="⚖️ Sanction", value=sanction["label"], inline=True)
+    await send_log(guild, le)
+    return True
+
+
 async def filtrer_repetition(message, cfg, immunise=False):
     """
     La meme phrase, dans trop de salons : on efface la tournee entiere.
@@ -25667,6 +25782,14 @@ async def on_message(message):
         # Les mentions de masse : une seule ligne suffit a faire fuir
         # quelqu'un, elle n'a pas besoin d'etre repetee ailleurs.
         if await filtrer_mentions(message, cfg, immunise):
+            return
+
+        # Les premieres heures d'un nouveau venu. Avant tous les autres
+        # filtres de contenu : ceux-la regardent CE QUI est ecrit, et
+        # peinent a distinguer une arnaque d'un lien ordinaire. Celui-ci
+        # regarde QUI ecrit, ce qu'aucun compte jetable ne peut imiter,
+        # et tranche donc plus vite et plus surement.
+        if await filtrer_quarantaine(message, cfg, immunise):
             return
 
         # La meme phrase dans plusieurs salons. Apres l'anti-spam, qui
