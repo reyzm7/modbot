@@ -156,8 +156,13 @@ verifier("et seulement si le mode securite vient de s'engager",
 verifier("aucun autre declencheur n'a ete ajoute",
          source.count("RAID.vague(") == 1, str(source.count("RAID.vague(")))
 
-verifier("la liste est figee dans l'alerte, pas relue au clic",
-         '"vague": [str(x) for x in (vague or [])]' in source)
+# Le figeage vit dans alertes.py depuis le 05/10/2026 : la fiche d'une
+# alerte doit survivre a un redemarrage, donc elle ne garde que du texte.
+source_alertes = open("alertes.py", encoding="utf-8").read()
+verifier("la liste est figee dans la fiche, pas relue au clic",
+         '"vague": _ids(vague, 200)' in source_alertes)
+verifier("et la fiche se fabrique bien avec la vague du moment",
+         "vague=vague" in source)
 verifier("le bouton lit la liste figee",
          'alerte.get("vague") or []' in source)
 verifier("deux clics n'expulsent qu'une fois",

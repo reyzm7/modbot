@@ -89,8 +89,16 @@ with tempfile.TemporaryDirectory() as dossier:
     magasin = sc.InfractionStore(fichier, retention_days=180,
                                  retention_resolver=lambda gid: reglages.get(str(gid)))
 
-    vieille = {"date": iso(10), "reason": "vieille histoire", "points": 2}
-    fraiche = {"date": iso(1), "reason": "hier", "points": 1}
+    # Relatives au jour REEL, parce que c'est par rapport a lui que le
+    # magasin purge. Avec une date figee, ce bloc passait au vert
+    # jusqu'au 03/10/2026 et echouait tout seul le lendemain, sans
+    # qu'une ligne de code ait bouge.
+    maintenant_reel = datetime.now(timezone.utc)
+    def il_y_a(jours):
+        return (maintenant_reel - timedelta(days=jours)).isoformat()
+
+    vieille = {"date": il_y_a(10), "reason": "vieille histoire", "points": 2}
+    fraiche = {"date": il_y_a(1), "reason": "hier", "points": 1}
     with open(fichier, "w", encoding="utf-8") as fp:
         json.dump({"11": {"7": [dict(vieille), dict(fraiche)]},
                    "22": {"7": [dict(vieille), dict(fraiche)]}}, fp)

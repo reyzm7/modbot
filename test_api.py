@@ -715,11 +715,21 @@ def verifier_commandes():
              not sans_garde, str(sans_garde))
 
     # Croisement avec le wiki, quand le site est a cote.
-    chemin = os.path.join(os.path.dirname(os.getcwd()), "modbot-site", "wiki.html")
-    if not os.path.exists(chemin):
+    #
+    # TOUTES ses pages, pas seulement wiki.html. Le wiki tenait sur une
+    # page ; il a ete decoupe en huit le 01/10/2026, et wiki.html est
+    # devenu une affiche qui ne cite plus une seule commande — elles
+    # vivent dans wiki-commandes.html. Ce croisement lisait donc une page
+    # vide et declarait toutes les commandes absentes du wiki.
+    import glob
+    dossier = os.path.join(os.path.dirname(os.getcwd()), "modbot-site")
+    pages = sorted(glob.glob(os.path.join(dossier, "wiki.html"))
+                   + glob.glob(os.path.join(dossier, "wiki-*.html")))
+    if not pages:
         print("  (wiki absent, croisement ignore)")
         return
-    wiki = io.open(chemin, encoding="utf-8").read()
+    wiki = "".join(io.open(p, encoding="utf-8").read() for p in pages)
+    print(f"  (wiki lu sur {len(pages)} page(s))")
     citees = {x.strip() for x in re.findall(r"<code[^>]*>([^<]+)</code>", wiki)}
     citees = {c for c in citees if c.startswith(("/", "!"))}
 
