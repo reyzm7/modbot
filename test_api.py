@@ -1139,26 +1139,41 @@ async def verifier_cloture_alerte():
     origine.add_field(name="⏳ Sans reponse",
                       value="La protection reste en place.", inline=False)
 
-    for decision, attendu in (("fausse alerte", "✋"), ("attaque confirmee", "🚨")):
-        message = _FauxMessage(origine)
-        alerte = {"messages": [message], "decision": decision, "decide_par": "Buffl#0001"}
-        bot_mod.ALERTES_ACTIVES["essai"] = alerte
-        await bot_mod._cloturer_alerte("essai")
+    # La fiche d'une alerte vit sur le disque depuis le 05/10/2026, pour
+    # qu'un clic du lendemain aboutisse encore. Les messages Discord, eux,
+    # ne se serialisent pas : ils restent a cote, en memoire. Le test pose
+    # donc les deux a leur place, et detourne la lecture plutot que
+    # d'ecrire un fichier.
+    table = {}
+    lecture_reelle = bot_mod.alertes_tout
+    bot_mod.alertes_tout = lambda: table
+    try:
+        for decision, attendu in (("fausse alerte", "✋"), ("attaque confirmee", "🚨")):
+            message = _FauxMessage(origine)
+            table["essai"] = {"decision": decision, "decide_par": "Buffl#0001"}
+            bot_mod.ALERTES_MESSAGES["essai"] = [message]
+            await bot_mod._cloturer_alerte("essai")
 
-        edite = message.dernier
-        texte = str(edite.to_dict())
-        verifier(f"[{decision}] le detail de l'attaque est conserve",
-                 "7 salons supprimes" in texte)
-        verifier(f"[{decision}] l'acteur reste identifiable",
-                 "1189681599965573131" in texte)
-        verifier(f"[{decision}] la sanction reste visible", "bannissement" in texte)
-        verifier(f"[{decision}] le verdict est affiche",
-                 "Buffl#0001" in texte and decision in texte)
-        verifier(f"[{decision}] le bandeau porte le bon symbole",
-                 (edite.title or "").startswith(attendu), edite.title)
-        verifier(f"[{decision}] le champ d'attente a disparu",
-                 all("sans reponse" not in (c.name or "").lower() for c in edite.fields))
-        verifier(f"[{decision}] les boutons sont retires", message.vue_retiree)
+            edite = message.dernier
+            texte = str(edite.to_dict())
+            verifier(f"[{decision}] le detail de l'attaque est conserve",
+                     "7 salons supprimes" in texte)
+            verifier(f"[{decision}] l'acteur reste identifiable",
+                     "1189681599965573131" in texte)
+            verifier(f"[{decision}] la sanction reste visible", "bannissement" in texte)
+            verifier(f"[{decision}] le verdict est affiche",
+                     "Buffl#0001" in texte and decision in texte)
+            verifier(f"[{decision}] le bandeau porte le bon symbole",
+                     (edite.title or "").startswith(attendu), edite.title)
+            verifier(f"[{decision}] le champ d'attente a disparu",
+                     all("sans reponse" not in (c.name or "").lower() for c in edite.fields))
+            verifier(f"[{decision}] les boutons sont retires", message.vue_retiree)
+            # Les messages sont consommes : une alerte tranchee deux fois
+            # ne doit pas rediter des messages deja rediges.
+            verifier(f"[{decision}] les messages sont consommes",
+                     "essai" not in bot_mod.ALERTES_MESSAGES)
+    finally:
+        bot_mod.alertes_tout = lecture_reelle
 
 
 class _FauxMessage:
