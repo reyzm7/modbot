@@ -29,6 +29,7 @@ import rapport as rp
 import salons_proteges as sp
 import roles_masse as rm
 import annulation as an
+import alertes as al
 import modmail as mm
 import repetition as rep
 import assistance as ass
@@ -340,6 +341,7 @@ F_XP = chemin_donnees("xp.json")
 F_ANNIVERSAIRES = chemin_donnees("anniversaires.json")
 F_RAPPELS = chemin_donnees("rappels.json")
 F_ANNULATIONS = chemin_donnees("annulations.json")
+F_ALERTES = chemin_donnees("alertes.json")
 F_MODMAIL = chemin_donnees("modmail.json")
 F_PSEUDOS = chemin_donnees("pseudos.json")
 F_ROLES_TEMPORAIRES = chemin_donnees("roles_temporaires.json")
@@ -8478,7 +8480,8 @@ def serialize_security_config(guild):
         "alerts": {
             "dm_admins": cfg.get("alertes_mp_admins") is not False,
             "admins_reachable": len(administrateurs_du_serveur(guild)),
-            "active": len([a for a in ALERTES_ACTIVES.values() if a.get("guild_id") == guild.id]),
+            "active": len([a for a in alertes_tout().values()
+                           if str(a.get("guild_id")) == str(guild.id) and not a.get("decide_par")]),
         },
         "auto_backup": {
             "enabled": bool(cfg.get("auto_backup_enabled")),
@@ -18297,7 +18300,39 @@ def set_raid_cfg(gid, **changes):
 # Alertes en cours, par identifiant. Volontairement en memoire : une alerte
 # vit quelques minutes, et un redemarrage signifie de toute facon que la
 # protection deja appliquee reste en place (c'est le comportement sur).
-ALERTES_ACTIVES: dict = {}
+# Les alertes vivent sur le disque, pas en memoire.
+#
+# Elles tenaient dans un dictionnaire, et le moindre redemarrage les
+# effacait. L'administrateur qui cliquait « Fausse alerte » le lendemain
+# lisait « alerte expiree » : le mode securite restait engage et les
+# roles retires ne revenaient jamais. Un bouton qui promet d'annuler
+# doit survivre a la nuit.
+#
+# Les objets Discord, eux, ne se serialisent pas : les messages envoyes
+# restent a cote, en memoire. Les perdre ne coute qu'un embed non
+# rafraichi — l'annulation, elle, continue de fonctionner.
+ALERTES_MESSAGES: dict = {}
+
+
+def alertes_tout():
+    table = jload(F_ALERTES)
+    return table if isinstance(table, dict) else {}
+
+
+def alertes_ecrire(table):
+    jsave(F_ALERTES, table)
+
+
+def alerte_lire(jeton):
+    """La fiche d'une alerte, ou None si le bouton ne doit plus repondre."""
+    fiche, _motif = al.etat(alertes_tout(), jeton)
+    return fiche
+
+
+def alerte_motif(jeton):
+    """Pourquoi le bouton refuse — pour le dire au lieu de ne rien faire."""
+    _fiche, motif = al.etat(alertes_tout(), jeton)
+    return motif
 
 # Nombre maximum d'administrateurs contactes par alerte : au-dela, Discord
 # limite la cadence des MP et l'alerte mettrait plusieurs minutes a partir.
@@ -18329,12 +18364,22 @@ class VueAlerteAttaque(discord.ui.View):
     """
 
     def __init__(self, alerte_id, guild_id):
-        super().__init__(timeout=1800)  # 30 min
+        # Sans fin. Trente minutes suffisaient a ce qu'une alerte recue
+        # la nuit soit morte au reveil : les boutons ne repondaient plus,
+        # et le mode securite restait engage sans que personne puisse le
+        # lever autrement qu'a la main.
+        super().__init__(timeout=None)
         self.alerte_id = alerte_id
         self.guild_id = int(guild_id)
+        # Un identifiant par bouton : c'est ce qui permet de reconstruire
+        # la vue au demarrage et de repondre a un clic d'hier.
+        for bouton, nom in ((self.expulser, "vague"),
+                            (self.fausse_alerte, "fausse"),
+                            (self.confirmer, "confirmee")):
+            bouton.custom_id = f"alerte:{nom}:{alerte_id}"
 
     def _alerte(self):
-        return ALERTES_ACTIVES.get(self.alerte_id)
+        return alerte_lire(self.alerte_id)
 
     async def _deja_tranchee(self, interaction, alerte):
         decideur = alerte.get("decide_par")
@@ -18372,10 +18417,19 @@ class VueAlerteAttaque(discord.ui.View):
                 "Serveur introuvable", "ModBot n'a plus acces a ce serveur.", 0xED4245))
 
         await _safe_defer(interaction)
-        alerte["expulses"] = 0  # pose tout de suite : deux clics, une seule vague
+        # Pose tout de suite, et sur le disque : deux clics, une seule vague.
+        alerte["expulses"] = 0
+        table = alertes_tout()
+        if self.alerte_id in table:
+            table[self.alerte_id]["expulses"] = 0
+            alertes_ecrire(table)
         partis, restes = await expulser_la_vague(guild, alerte.get("vague") or [],
                                                  str(interaction.user))
         alerte["expulses"] = partis
+        table = alertes_tout()
+        if self.alerte_id in table:
+            table[self.alerte_id]["expulses"] = partis
+            alertes_ecrire(table)
 
         embed = E("🧹 Vague expulsee", couleur=0xFAA61A)
         embed.description = (
@@ -18404,8 +18458,10 @@ class VueAlerteAttaque(discord.ui.View):
         if alerte.get("decide_par"):
             return await self._deja_tranchee(interaction, alerte)
 
-        alerte["decide_par"] = str(interaction.user)
-        alerte["decision"] = "fausse alerte"
+        table, _ = al.trancher(alertes_tout(), self.alerte_id,
+                               str(interaction.user), "fausse alerte")
+        alertes_ecrire(table)
+        alerte = table.get(self.alerte_id) or alerte
         await _safe_defer(interaction)
 
         guild = bot.get_guild(self.guild_id)
@@ -18417,7 +18473,13 @@ class VueAlerteAttaque(discord.ui.View):
         retablissements = []
 
         # 1. Lever le mode securite s'il a ete declenche par cette alerte
-        if alerte.get("safe_mode_engage") and RAID.safe_mode_active(str(guild.id)):
+        # Des qu'il est actif, sans regarder si c'est CETTE alerte qui
+        # l'a engage. Une attaque declenche souvent l'anti-raid avant
+        # l'anti-nuke, et produit plusieurs alertes a la suite : seule la
+        # premiere portait la marque, donc seule la premiere levait le
+        # mode. Les autres laissaient le serveur verrouille, et c'est
+        # justement la derniere que l'administrateur voit dans ses MP.
+        if al.doit_lever_le_mode_securite(alerte, RAID.safe_mode_active(str(guild.id))):
             await release_safe_mode(guild, automatic=False)
             retablissements.append("mode securite leve")
 
@@ -18460,8 +18522,10 @@ class VueAlerteAttaque(discord.ui.View):
         if alerte.get("decide_par"):
             return await self._deja_tranchee(interaction, alerte)
 
-        alerte["decide_par"] = str(interaction.user)
-        alerte["decision"] = "attaque confirmee"
+        table, _ = al.trancher(alertes_tout(), self.alerte_id,
+                               str(interaction.user), "attaque confirmee")
+        alertes_ecrire(table)
+        alerte = table.get(self.alerte_id) or alerte
         await _safe_defer(interaction)
 
         guild = bot.get_guild(self.guild_id)
@@ -18513,7 +18577,8 @@ async def _cloturer_alerte(alerte_id):
     le bandeau de titre, la couleur, et le champ d'attente remplace par le
     verdict.
     """
-    alerte = ALERTES_ACTIVES.pop(alerte_id, None)
+    table = alertes_tout()
+    alerte = table.get(alerte_id)
     if not alerte:
         return
 
@@ -18522,7 +18587,7 @@ async def _cloturer_alerte(alerte_id):
     intitule, couleur, consequence = VERDICTS_ALERTE.get(
         decision, ("✅ Alerte traitee", 0x747F8D, ""))
 
-    for message in alerte.get("messages", []):
+    for message in ALERTES_MESSAGES.pop(alerte_id, []):
         try:
             origine = message.embeds[0] if message.embeds else None
             if origine is None:
@@ -18609,22 +18674,12 @@ async def alerter_administrateurs(guild, titre, description, fields=None,
         return None
 
     alerte_id = f"{guild.id}-{int(time.time() * 1000)}"
-    ALERTES_ACTIVES[alerte_id] = {
-        "guild_id": guild.id,
-        "titre": titre,
-        "acteur_id": getattr(acteur, "id", None),
-        "sanction": sanction,
-        "safe_mode_engage": safe_mode_engage,
-        # La liste est FIGEE ici, a la detection. La relire au moment du
-        # clic expulserait ceux qui sont arrives entre-temps — dont les
-        # curieux venus voir ce qui se passe.
-        "vague": [str(x) for x in (vague or [])],
-        "expulses": None,
-        "messages": [],
-        "decide_par": None,
-        "decision": None,
-        "cree": now().isoformat(),
-    }
+    table = al.purger(alertes_tout())
+    table = al.poser(table, alerte_id, al.fabriquer(
+        guild.id, titre, acteur_id=getattr(acteur, "id", "") or "",
+        sanction=sanction, safe_mode_engage=safe_mode_engage, vague=vague))
+    alertes_ecrire(table)
+    ALERTES_MESSAGES[alerte_id] = []
 
     embed = E(f"🚨 {titre}", couleur=0xED4245)
     embed.description = (
@@ -18647,7 +18702,7 @@ async def alerter_administrateurs(guild, titre, description, fields=None,
     for admin in admins:
         try:
             message = await admin.send(embed=embed, view=VueAlerteAttaque(alerte_id, guild.id))
-            ALERTES_ACTIVES[alerte_id]["messages"].append(message)
+            ALERTES_MESSAGES[alerte_id].append(message)
             envoyes += 1
             await asyncio.sleep(0.3)
         except Exception:
@@ -18662,12 +18717,15 @@ async def alerter_administrateurs(guild, titre, description, fields=None,
                 message = await salon.send(
                     content="@here", embed=embed, view=VueAlerteAttaque(alerte_id, guild.id),
                     allowed_mentions=discord.AllowedMentions(everyone=True))
-                ALERTES_ACTIVES[alerte_id]["messages"].append(message)
+                ALERTES_MESSAGES[alerte_id].append(message)
                 envoyes = 1
             except Exception:
                 pass
 
-    ALERTES_ACTIVES[alerte_id]["destinataires"] = envoyes
+    table = alertes_tout()
+    if alerte_id in table:
+        table[alerte_id]["destinataires"] = envoyes
+        alertes_ecrire(table)
     return alerte_id
 
 
@@ -18926,6 +18984,14 @@ async def annuler_sanction_nuke(guild, actor_id, sanction):
 
     if stype == "strip":
         member = guild.get_member(int(actor_id))
+        if member is None:
+            # Le cache peut l'avoir oublie entre la sanction et le clic.
+            # Demander a Discord coute une requete et evite de repondre
+            # « introuvable » a propos de quelqu'un qui est la.
+            try:
+                member = await guild.fetch_member(int(actor_id))
+            except Exception:
+                member = None
         if not member:
             return "membre introuvable, roles non restaures"
         roles = [guild.get_role(int(rid)) for rid in sanction.get("roles", [])]
@@ -20226,7 +20292,7 @@ async def security_alertes(i: discord.Interaction, actif: bool = None, test: boo
             fields=[("🧪 Nature", "Test manuel — aucune sanction n'a ete appliquee"),
                     ("👤 Lance par", str(i.user))],
         )
-        recus = ALERTES_ACTIVES.get(alerte_id, {}).get("destinataires", 0)
+        recus = (alertes_tout().get(alerte_id) or {}).get("destinataires", 0)
         embed = embed_success("Alerte de test envoyee",
                               f"`{recus}` administrateur(s) sur `{len(admins)}` ont recu le message.", gid)
         if recus < len(admins):
@@ -24501,6 +24567,30 @@ async def on_ready():
             bot.add_view(v)
         except Exception as err:
             print(f"add_view {type(v).__name__}: {err}")
+
+    # ── 2 bis. Les alertes d'attaque encore ouvertes.
+    #
+    # Leurs boutons sont dans des messages prives envoyes avant le
+    # redemarrage. Sans cette reprise, un clic sur « Fausse alerte »
+    # n'aboutit nulle part : le mode securite reste engage et les roles
+    # retires ne reviennent jamais. C'est ce qui se passait a chaque
+    # redemarrage, puisque la table vivait en memoire.
+    try:
+        ouvertes = al.purger(alertes_tout())
+        alertes_ecrire(ouvertes)
+        reprises = 0
+        for jeton, fiche in ouvertes.items():
+            if fiche.get("decide_par"):
+                continue  # deja tranchee : ses boutons n'ont plus rien a faire
+            gid = fiche.get("guild_id")
+            if not str(gid or "").isdigit():
+                continue
+            bot.add_view(VueAlerteAttaque(jeton, int(gid)))
+            reprises += 1
+        if reprises:
+            print(f"alertes : {reprises} alerte(s) encore annulable(s)")
+    except Exception as err:
+        print(f"reprise des alertes : {err}")
 
     _etape_demarrage("etape_api")
     try:
