@@ -731,7 +731,11 @@ def verifier_commandes():
     wiki = "".join(io.open(p, encoding="utf-8").read() for p in pages)
     print(f"  (wiki lu sur {len(pages)} page(s))")
     citees = {x.strip() for x in re.findall(r"<code[^>]*>([^<]+)</code>", wiki)}
-    citees = {c for c in citees if c.startswith(("/", "!"))}
+    # Une commande a un nom apres son signe. « // » n'en est pas une :
+    # c'est le prefixe qui transforme un message de modmail en note
+    # interne, et le wiki le cite comme tel depuis le 26/09/2026.
+    citees = {c for c in citees
+              if re.match(r"^[/!][a-z][\w-]*( [\w-]+)*$", c)}
 
     reelles = {"/" + n for n in plates} | {"!" + n for n in prefixe}
     for g, subs in groupes.items():
