@@ -492,8 +492,18 @@ def verifier_immunite_admins():
     verifier("immuniser un role ne le rend pas de confiance anti-nuke",
              not bot_mod.sc.is_whitelisted("3", ["42"], None, None,
                                            {"whitelist_roles": []}))
-    verifier("l'anti-nuke surveille les administrateurs par defaut",
-             not bot_mod.sc.is_whitelisted("1", [], None, None, {}, is_admin=True))
+    # Les administrateurs humains echappent a l'anti-nuke depuis le
+    # 05/10/2026, a la demande du proprietaire du projet : l'anti-nuke
+    # retirait ses roles a un administrateur qui supprimait des salons a
+    # la main. Le cout de ce defaut est ecrit dans security_core.
+    verifier("l'anti-nuke laisse passer les administrateurs humains",
+             bot_mod.sc.is_whitelisted("1", [], None, None, {}, is_admin=True))
+    verifier("mais jamais un bot administrateur",
+             not bot_mod.sc.is_whitelisted("2", [], None, None, {},
+                                           is_admin=True, is_bot=True))
+    verifier("et la surveillance revient si on la redemande",
+             not bot_mod.sc.is_whitelisted("3", [], None, None,
+                                           {"trust_admins": False}, is_admin=True))
 
 
 def verifier_polices():
