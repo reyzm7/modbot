@@ -19970,7 +19970,7 @@ async def security_antiraid(i: discord.Interaction, actif: bool, seuil: int = No
 @security_group.command(name="antinuke", description="Configurer la protection anti-nuke")
 @app_commands.describe(actif="Activer la protection", sanction="Sanction appliquee a l'attaquant",
                        restauration_auto="Recreer automatiquement ce qui est supprime",
-                       confiance_admins="DECONSEILLE : ne plus surveiller les administrateurs")
+                       confiance_admins="Les administrateurs echappent a l'anti-nuke (actif par defaut)")
 @app_commands.choices(sanction=[
     app_commands.Choice(name="Retirer tous les roles", value="strip"),
     app_commands.Choice(name="Expulser", value="kick"),
@@ -19997,10 +19997,14 @@ async def security_antinuke(i: discord.Interaction, actif: bool,
     if cfg.get("trust_admins"):
         embed.add_field(
             name="🔓 Administrateurs non surveilles",
-            value="Les administrateurs echappent desormais a l'anti-nuke.\n"
-                  "**Un nuke vient presque toujours d'un compte administrateur** — "
-                  "compte pirate, administrateur devenu hostile. Cette protection "
-                  "ne couvre plus ces cas. A remettre a `Non` des que possible.",
+            value="Les administrateurs humains echappent a l'anti-nuke — c'est le "
+                  "reglage par defaut, pour qu'une suppression de salon a la main "
+                  "ne coute pas ses roles.\n"
+                  "Ce qu'il laisse passer : un compte administrateur pirate ou "
+                  "devenu hostile. Mettre `confiance_admins: Non` remet la "
+                  "surveillance, et la liste blanche (`/securite whitelist`) "
+                  "exempte une seule personne sans ouvrir a toutes.\n"
+                  "Les bots administrateurs restent surveillés dans tous les cas.",
             inline=False,
         )
     if not i.guild.me.guild_permissions.view_audit_log:

@@ -867,15 +867,22 @@ DEFAULT_NUKE_CONFIG = {
     "whitelist_users": [],
     "whitelist_roles": [],
     "trust_owner": True,
-    # DELIBEREMENT False. Nuker un serveur exige des permissions elevees :
-    # supprimer des salons, bannir en masse, changer des permissions. La
-    # population capable de nuker est donc, a peu de chose pres, celle qui a
-    # Administrateur — compte admin compromis, admin devenu hostile, ou bot
-    # malveillant a qui on a donne les pleins pouvoirs. Faire confiance a tous
-    # les administrateurs revient a eteindre l'anti-nuke pour exactement les
-    # trois scenarios qu'il existe pour couvrir. Reglage laisse a l'utilisateur,
-    # mais jamais actif par defaut.
-    "trust_admins": False,
+    # Actif par defaut depuis le 05/10/2026, a la demande du proprietaire du
+    # projet. Ce qui l'a decide : l'anti-nuke retirait ses roles a un
+    # administrateur qui supprimait des salons a la main, ce qui est un geste
+    # d'administration ordinaire — et le faux positif coute cher, puisqu'il
+    # faut ensuite se rendre ses propres droits.
+    #
+    # Ce que ce defaut coute, pour que ce soit ecrit noir sur blanc : nuker un
+    # serveur exige des permissions elevees, donc la population capable de
+    # nuker est a peu de chose pres celle qui a Administrateur. Un compte
+    # administrateur pirate ou devenu hostile n'est donc plus arrete par
+    # l'anti-nuke tant que ce reglage reste actif.
+    #
+    # Deux choses limitent la portee : un bot administrateur n'en beneficie
+    # jamais (voir is_whitelisted), et le reglage se coupe en une case depuis
+    # le tableau de bord ou par /securite antinuke.
+    "trust_admins": True,
     # Le staff (administrateurs, roles staff du serveur, role support des
     # tickets) echappe-t-il a l'anti-nuke ? Faux par defaut, pour la meme
     # raison que trust_admins : un compte staff vole est precisement le
@@ -969,7 +976,7 @@ def is_whitelisted(user_id, role_ids, guild_owner_id, bot_id, config=None,
       * c'est le proprietaire du serveur (si trust_owner)
       * son id figure dans whitelist_users
       * un de ses roles figure dans whitelist_roles
-      * il est administrateur ET trust_admins est active (desactive par defaut)
+      * il est administrateur ET trust_admins est active (ACTIVE par defaut)
       * il fait partie du staff ET trust_staff est active (desactive par defaut)
 
     `is_admin` et `is_staff` sont calcules par l'appelant : ce module ne
@@ -992,7 +999,7 @@ def is_whitelisted(user_id, role_ids, guild_owner_id, bot_id, config=None,
     whitelisted_roles = {str(x) for x in (cfg.get("whitelist_roles") or [])}
     if whitelisted_roles and any(str(rid) in whitelisted_roles for rid in (role_ids or [])):
         return True
-    if is_admin and not is_bot and cfg.get("trust_admins", False):
+    if is_admin and not is_bot and cfg.get("trust_admins", True):
         return True
     # Meme regle pour le staff : jamais un bot, jamais sans l'avoir demande.
     if is_staff and not is_bot and cfg.get("trust_staff", False):

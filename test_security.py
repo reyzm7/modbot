@@ -305,22 +305,33 @@ class TestAntiNuke(unittest.TestCase):
         self.assertTrue(sc.is_whitelisted("600", [], None, "600", {}))
         self.assertFalse(sc.is_whitelisted("500", [], "500", None, {"trust_owner": False}))
 
-    def test_admins_surveilles_par_defaut(self):
+    def test_admins_proteges_par_defaut(self):
         """
-        Le test le plus important du fichier. Un nuke vient presque toujours
-        d'un compte administrateur : compte pirate, admin devenu hostile, bot
-        a qui on a donne les pleins pouvoirs. Si un jour ce test passe au
-        vert avec trust_admins absent de la config, l'anti-nuke ne protege
-        plus contre rien.
-        """
-        self.assertFalse(sc.DEFAULT_NUKE_CONFIG["trust_admins"])
-        self.assertFalse(sc.is_whitelisted("777", [], None, None, {}, is_admin=True))
+        Les administrateurs humains echappent a l'anti-nuke sans rien regler.
 
-    def test_confiance_admins_explicite(self):
-        cfg = {"trust_admins": True}
-        self.assertTrue(sc.is_whitelisted("777", [], None, None, cfg, is_admin=True))
+        Ce defaut a change le 05/10/2026 : il etait False, et l'anti-nuke
+        retirait ses roles a un administrateur qui supprimait des salons a la
+        main. Le choix est assume, et son cout est ecrit dans
+        security_core : un compte administrateur pirate n'est plus arrete
+        tant que le reglage reste actif.
+        """
+        self.assertTrue(sc.DEFAULT_NUKE_CONFIG["trust_admins"])
+        self.assertTrue(sc.is_whitelisted("777", [], None, None, {}, is_admin=True))
         # Un non-administrateur ne gagne rien au passage.
-        self.assertFalse(sc.is_whitelisted("778", [], None, None, cfg, is_admin=False))
+        self.assertFalse(sc.is_whitelisted("778", [], None, None, {}, is_admin=False))
+
+    def test_confiance_admins_se_coupe(self):
+        """
+        Le reglage reste desactivable — c'est ce qui le rend acceptable.
+
+        Un serveur qui remet « trust_admins » a False doit retrouver la
+        surveillance complete, sans rien regler d'autre.
+        """
+        cfg = {"trust_admins": False}
+        self.assertFalse(sc.is_whitelisted("777", [], None, None, cfg, is_admin=True))
+        # Et la liste blanche continue de fonctionner par-dessus.
+        cfg_liste = {"trust_admins": False, "whitelist_users": ["777"]}
+        self.assertTrue(sc.is_whitelisted("777", [], None, None, cfg_liste, is_admin=True))
 
     def test_bot_administrateur_jamais_de_confiance(self):
         """
@@ -331,6 +342,9 @@ class TestAntiNuke(unittest.TestCase):
         cfg = {"trust_admins": True}
         self.assertFalse(
             sc.is_whitelisted("900", [], None, None, cfg, is_admin=True, is_bot=True))
+        # Et avec le defaut, donc sans rien preciser : c'est le cas reel.
+        self.assertFalse(
+            sc.is_whitelisted("901", [], None, None, {}, is_admin=True, is_bot=True))
 
     def test_staff_surveille_par_defaut(self):
         """
